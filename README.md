@@ -7,8 +7,7 @@
 以下命令直接在 DSH 的本地命令通道运行，不进入模型上下文：
 
 ```text
-/maa fight 1-7 2
-/maa 刷 1-7 两次
+/maa fight 1-7 2 //刷两次1-7
 /maa startup
 /maa infrast
 /maa award
@@ -18,15 +17,14 @@
 /maa help
 ```
 
-`fight` 默认不使用理智药、临期理智药或源石，`infrast` 默认不使用无人机。输入这些明确命令本身就是用户对该次操作的授权。
+`fight` 默认不使用理智药、临期理智药或源石，`infrast` 默认不使用无人机。
 
 作战会优先使用游戏内连续作战：请求 1～10 次时，`times` 和 `series` 都设置为该次数（例如 10 次生成 `times: 10, series: 10`）；超过 10 次时使用 `series: 0` 自动分组，避免反复进行单次作战。
 
-任务执行期间，确认条会显示“停止任务”按钮；它等价于本地 `/maa stop`，只终止当前 DSH 会话启动的 maa-cli 进程树，不会关闭游戏、模拟器、MAA 图形界面或其他独立运行的 maa-cli。MaaCore 没有可靠的暂停/继续接口，所以停止后不会自动继续剩余局数；如果游戏已经接受了连续作战，当前战斗或游戏自身排定的连战仍可能继续。
-
+任务执行期间，确认条会显示“停止任务”按钮；它等价于本地 `/maa stop`，只终止当前 DSH 会话启动的 maa-cli 进程树，不会关闭游戏、模拟器、MAA 图形界面或其他独立运行的 maa-cli。MaaCore 没有可靠的暂停/继续接口，所以停止后不会自动继续剩余局数。
 ## 安装
 
-发布到 npm 后，普通用户只需要在 DSH 中输入一条命令：
+只需要在 DSH 中输入一条命令：
 
 ```text
 dsh plugin --profile desktop add dsh-maa-cli
@@ -71,7 +69,7 @@ dsh plugin --profile desktop add "link:D:\项目\dsh-maa-cli"
 - 隔离：通过 `MAA_DATA_DIR` / `MAA_STATE_DIR` / `MAA_CACHE_DIR` / `MAA_CONFIG_DIR` 四个变量让 maa-cli 只认这个目录，不会写用户全局的 MAA 目录。
 - 生成任务时会先调用 `maa-cli dir config`，再把 `dsh-generated.json` 写入该次运行实际使用的配置目录，避免私有运行时与全局配置目录不一致。
 - 卸载：删除该目录即可。
-- 不想打开 DSH 时也可直接安装：`node scripts/install-runtime.mjs`（等价于调用 `maa_runtime` 的 `install`，会打印每一步的耗时）。
+- 不想打开 DSH 时也可直接安装：`node scripts/install-runtime.mjs`（调用 `maa_runtime` 的 `install`，会打印每一步的耗时）。
 - adb 探测顺序：`DSH_MAA_CLI_ADB_PATH` → `ANDROID_HOME` / `ANDROID_SDK_ROOT` → `%ProgramFiles%` 与各固定盘的 `Program Files` 下的 MuMu / 雷电 / 蓝叠 → `PATH`。探测不到时会写出不含 `adb_path` 的 `default.toml`，手动补上那一行即可（地址默认 `127.0.0.1:16384`）。
 
 ## 环境变量
@@ -107,4 +105,3 @@ npm login
 npm publish
 ```
 
-发布属于 npm 账号操作，不是普通用户安装步骤。
