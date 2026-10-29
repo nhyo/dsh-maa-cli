@@ -38,14 +38,14 @@ dsh plugin --profile desktop add dsh-maa-cli
 # npm 正式版（普通用户推荐）
 dsh plugin --profile desktop add dsh-maa-cli
 
-# 本地发布包（尚未发布 npm 或离线分发时）
+# 本地发布包（离线分发时）
 dsh plugin --profile desktop add "D:\下载\dsh-maa-cli-0.9.0.tgz"
 
 # 本地源码目录（仅供开发）
 dsh plugin --profile desktop add "link:D:\项目\dsh-maa-cli"
 ```
 
-注意：第一条按包名安装的命令，只有在维护者把 `dsh-maa-cli` 发布到 npm 后才会在其他电脑上生效。本仓库不打包 maa-cli、MaaCore 或资源，也不包含开发者电脑的绝对路径；运行时会在每位用户自己的 `~/.dsh/maa-cli/runtime` 中按需准备。
+本仓库不打包 maa-cli、MaaCore 或资源，也不包含开发者电脑的绝对路径；运行时会在每位用户自己的 `~/.dsh/maa-cli/runtime` 中按需准备。
 
 复杂任务仍可直接用自然语言告诉 DSH。模型只负责调用一次 `maa_prepare_plan`；计划生成后，DSH 输入框附近会主动显示确认条。点击“确认并执行 MAA”会通过本地 `/maa confirm <code>` 执行，不产生第二条模型消息。思考区内的工具卡也保留同一个按钮作为备用。确认码只对同一 DSH 会话有效、只能使用一次，并在 30 分钟后过期。
 
