@@ -1,0 +1,196 @@
+import { mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+
+export const GENERATED_TASK_NAME = 'dsh-generated'
+
+const CLIENTS = new Set(['Official', 'Bilibili', 'Txwy', 'YoStarEN', 'YoStarJP', 'YoStarKR'])
+const FACILITIES = new Set(['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Dorm'])
+const DRONES = new Set(['_NotUse', 'Money', 'SyntheticJade', 'CombatRecord', 'PureGold', 'OriginStone', 'Chip'])
+const ROGUELIKE_THEMES = new Set(['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden'])
+const STEP_TYPES = new Set([
+  'StartUp', 'Fight', 'Infrast', 'Recruit', 'Mall', 'Award', 'Roguelike',
+  'ReclamationAlgorithm', 'Depot', 'OperBox', 'Custom', 'CloseDown',
+])
+const COMMON_FIELDS = new Set(['type', 'clientType'])
+
+export function buildTaskDocument(steps) {
+  if (!Array.isArray(steps) || steps.length < 1 || steps.length > 20) {
+    throw new TypeError('steps must contain 1-20 ordered MAA steps')
+  }
+  const clients = [...new Set(steps.map(step => step?.clientType).filter(value => value !== undefined))]
+  if (clients.length > 1) throw new TypeError('All step clientType values must match')
+  if (clients.length === 1) enumValue(clients[0], CLIENTS, 'clientType')
+  return {
+    ...(clients.length === 1 ? { client_type: clients[0] } : {}),
+    tasks: steps.map((step, index) => buildStep(step, index)),
+  }
+}
+
+export function summarizePlan(steps) {
+  return steps.map((step, index) => `${index + 1}. ${summarizeStep(step)}`).join(' → ')
+}
+
+export function generatedTaskPath(configDir) {
+  if (typeof configDir !== 'string' || configDir.trim() === '' || !path.isAbsolute(configDir.trim())) {
+    throw new TypeError('maa-cli config directory must be an absolute path')
+  }
+  return path.join(configDir.trim(), 'tasks', `${GENERATED_TASK_NAME}.json`)
+}
+
+export async function writeGeneratedTask(document, options = {}) {
+  const target = generatedTaskPath(options.configDir)
+  const tasksDir = path.dirname(target)
+  await mkdir(tasksDir, { recursive: true })
+  const json = `${JSON.stringify(document, null, 2)}\n`
+  await writeFile(target, json, { encoding: 'utf8' })
+  return { path: target, json }
+}
+
+function buildStep(step, index) {
+  if (!isPlainObject(step) || !STEP_TYPES.has(step.type)) {
+    throw new TypeError(`steps[${index}].type is unsupported`)
+  }
+  const type = step.type
+  let params
+  switch (type) {
+    case 'StartUp':
+      assertFields(step, new Set([...COMMON_FIELDS, 'clientType']))
+      params = {
+        client_type: enumValue(step.clientType ?? 'Official', CLIENTS, `${type}.clientType`),
+        start_game_enabled: true,
+      }
+      break
+    case 'Fight':
+      assertFields(step, new Set([...COMMON_FIELDS, 'stage', 'times', 'medicine', 'expiringMedicine', 'stone']))
+      const fightTimes = integer(step.times, 1, 100, 'Fight.times')
+      params = compact({
+        stage: optionalString(step.stage, 1, 32, /^[\p{L}\p{N}._-]+$/u, 'Fight.stage'),
+        times: fightTimes,
+        medicine: optionalInteger(step.medicine, 0, 99, 'Fight.medicine', 0),
+        expiring_medicine: optionalInteger(step.expiringMedicine, 0, 99, 'Fight.expiringMedicine', 0),
+        stone: optionalInteger(step.stone, 0, 20, 'Fight.stone', 0),
+        // One in-game multi-battle whenever possible. Current MaaCore accepts
+        // 1-10; for larger totals, AUTO (0) chooses the stage maximum and then
+        // reduces the final group so the requested total is still reached.
+        series: fightTimes <= 10 ? fightTimes : 0,
+      })
+      break
+    case 'Infrast':
+      assertFields(step, new Set([...COMMON_FIELDS, 'mode', 'facilities', 'drones', 'threshold', 'replenish', 'dormNotStationed', 'dormTrust']))
+      params = {
+        mode: optionalInteger(step.mode, 0, 20000, 'Infrast.mode', 0, new Set([0, 20000])),
+        facility: enumArray(step.facilities ?? [...FACILITIES], FACILITIES, 'Infrast.facilities'),
+        drones: enumValue(step.drones ?? '_NotUse', DRONES, 'Infrast.drones'),
+        threshold: optionalNumber(step.threshold, 0, 1, 'Infrast.threshold', 0.3),
+        replenish: optionalBoolean(step.replenish, false),
+        dorm_notstationed_enabled: optionalBoolean(step.dormNotStationed, false),
+        dorm_trust_enabled: optionalBoolean(step.dormTrust, false),
+      }
+      break
+    case 'Recruit':
+      assertFields(step, new Set([...COMMON_FIELDS, 'refresh', 'select', 'confirm', 'times', 'setTime', 'expedite', 'permitReserve', 'firstTags', 'extraTagsMode']))
+      params = {
+        refresh: optionalBoolean(step.refresh, false),
+        select: starArray(step.select ?? [4, 5, 6], 'Recruit.select'),
+        confirm: starArray(step.confirm ?? [], 'Recruit.confirm'),
+        times: optionalInteger(step.times, 0, 4, 'Recruit.times', 0),
+        set_time: optionalBoolean(step.setTime, true),
+        expedite: optionalBoolean(step.expedite, false),
+        level3_recruitment_permit_reserve: optionalInteger(step.permitReserve, 0, 999, 'Recruit.permitReserve', 0),
+        first_tags: stringArray(step.firstTags ?? [], 10, 24, 'Recruit.firstTags'),
+        extra_tags_mode: optionalInteger(step.extraTagsMode, 0, 2, 'Recruit.extraTagsMode', 0),
+      }
+      break
+    case 'Mall':
+      assertFields(step, new Set([...COMMON_FIELDS, 'shopping', 'buyFirst', 'blacklist', 'forceShoppingIfCreditFull', 'onlyBuyDiscount', 'reserveMaxCredit', 'visitFriends', 'creditFight']))
+      params = {
+        shopping: optionalBoolean(step.shopping, false),
+        buy_first: stringArray(step.buyFirst ?? [], 20, 32, 'Mall.buyFirst'),
+        blacklist: stringArray(step.blacklist ?? [], 20, 32, 'Mall.blacklist'),
+        force_shopping_if_credit_full: optionalBoolean(step.forceShoppingIfCreditFull, false),
+        only_buy_discount: optionalBoolean(step.onlyBuyDiscount, false),
+        reserve_max_credit: optionalBoolean(step.reserveMaxCredit, true),
+        visit_friends: optionalBoolean(step.visitFriends, false),
+        credit_fight: optionalBoolean(step.creditFight, false),
+      }
+      break
+    case 'Award':
+      assertFields(step, new Set([...COMMON_FIELDS, 'dailyWeekly', 'mail', 'freePull', 'orundum', 'mining', 'specialAccess', 'signInEvent']))
+      params = {
+        award: optionalBoolean(step.dailyWeekly, true),
+        mail: optionalBoolean(step.mail, false),
+        recruit: optionalBoolean(step.freePull, false),
+        orundum: optionalBoolean(step.orundum, false),
+        mining: optionalBoolean(step.mining, false),
+        specialaccess: optionalBoolean(step.specialAccess, false),
+        signinevent: optionalBoolean(step.signInEvent, false),
+      }
+      break
+    case 'Roguelike':
+      assertFields(step, new Set([...COMMON_FIELDS, 'theme', 'mode', 'squad', 'coreChar', 'roles', 'startsCount', 'difficulty', 'useSupport', 'useNonFriendSupport', 'stopAtFinalBoss']))
+      params = compact({
+        theme: enumValue(step.theme, ROGUELIKE_THEMES, 'Roguelike.theme'),
+        mode: optionalInteger(step.mode, 0, 5, 'Roguelike.mode', 0),
+        squad: optionalString(step.squad, 1, 32, null, 'Roguelike.squad'),
+        core_char: optionalString(step.coreChar, 1, 32, null, 'Roguelike.coreChar'),
+        roles: optionalString(step.roles, 1, 32, null, 'Roguelike.roles'),
+        starts_count: integer(step.startsCount, 1, 20, 'Roguelike.startsCount'),
+        difficulty: optionalInteger(step.difficulty, 0, 99, 'Roguelike.difficulty'),
+        use_support: optionalBoolean(step.useSupport, false),
+        use_nonfriend_support: optionalBoolean(step.useNonFriendSupport, false),
+        stop_at_final_boss: optionalBoolean(step.stopAtFinalBoss, false),
+      })
+      break
+    case 'ReclamationAlgorithm':
+      assertFields(step, new Set([...COMMON_FIELDS, 'mode', 'toolToCraft', 'numCraftBatches']))
+      params = {
+        theme: 'Tales',
+        mode: optionalInteger(step.mode, 0, 1, 'ReclamationAlgorithm.mode', 1),
+        tools_to_craft: optionalString(step.toolToCraft, 1, 32, null, 'ReclamationAlgorithm.toolToCraft') ?? '荧光棒',
+        num_craft_batches: optionalInteger(step.numCraftBatches, 1, 16, 'ReclamationAlgorithm.numCraftBatches', 1),
+      }
+      break
+    case 'Custom':
+      assertFields(step, new Set([...COMMON_FIELDS, 'taskNames']))
+      params = { task_names: stringArray(step.taskNames, 20, 96, 'Custom.taskNames', /^[\p{L}\p{N}@:_./-]+$/u) }
+      if (params.task_names.length === 0) throw new TypeError('Custom.taskNames cannot be empty')
+      break
+    case 'Depot':
+    case 'OperBox':
+    case 'CloseDown':
+      assertFields(step, COMMON_FIELDS)
+      break
+  }
+  return params === undefined ? { type } : { type, params }
+}
+
+function summarizeStep(step) {
+  switch (step.type) {
+    case 'StartUp': return `启动游戏(${step.clientType ?? 'Official'})`
+    case 'Fight': return `作战 ${step.stage ?? '当前关卡'} ×${step.times}，连战${step.times <= 10 ? step.times : '自动分组'}，理智药${step.medicine ?? 0}，临期药${step.expiringMedicine ?? 0}，源石${step.stone ?? 0}`
+    case 'Infrast': return `基建换班${step.drones && step.drones !== '_NotUse' ? `，无人机=${step.drones}` : ''}`
+    case 'Recruit': return `公招${step.times ?? 0}次${step.expedite ? '，使用加急许可' : ''}`
+    case 'Mall': return `信用商店${step.shopping ? '并购物' : '仅收取/访问'}${step.forceShoppingIfCreditFull ? '，信用溢出时忽略黑名单' : ''}`
+    case 'Award': return '领取指定奖励'
+    case 'Roguelike': return `肉鸽 ${step.theme} ×${step.startsCount}`
+    case 'ReclamationAlgorithm': return `生息演算 mode=${step.mode ?? 1}`
+    case 'Depot': return '识别仓库'
+    case 'OperBox': return '识别干员列表'
+    case 'Custom': return `MaaCore任务链 ${step.taskNames?.join(', ')}`
+    case 'CloseDown': return '关闭游戏'
+    default: return String(step.type)
+  }
+}
+
+function assertFields(object, allowed) { for (const key of Object.keys(object)) if (!allowed.has(key)) throw new TypeError(`${object.type}.${key} is not supported`) }
+function compact(object) { return Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined)) }
+function isPlainObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) }
+function enumValue(value, allowed, label) { if (!allowed.has(value)) throw new TypeError(`${label} is invalid`); return value }
+function enumArray(value, allowed, label) { if (!Array.isArray(value) || value.length === 0 || value.some(item => !allowed.has(item))) throw new TypeError(`${label} contains an invalid value`); return [...new Set(value)] }
+function integer(value, min, max, label) { if (!Number.isInteger(value) || value < min || value > max) throw new TypeError(`${label} must be an integer from ${min} to ${max}`); return value }
+function optionalInteger(value, min, max, label, fallback, discrete) { if (value === undefined) return fallback; const result = integer(value, min, max, label); if (discrete && !discrete.has(result)) throw new TypeError(`${label} is invalid`); return result }
+function optionalNumber(value, min, max, label, fallback) { if (value === undefined) return fallback; if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new TypeError(`${label} must be from ${min} to ${max}`); return value }
+function optionalBoolean(value, fallback) { if (value === undefined) return fallback; if (typeof value !== 'boolean') throw new TypeError('expected a boolean'); return value }
+function optionalString(value, min, max, pattern, label) { if (value === undefined) return undefined; if (typeof value !== 'string' || value.length < min || value.length > max || (pattern && !pattern.test(value))) throw new TypeError(`${label} is invalid`); return value }
+function stringArray(value, maxItems, maxLength, label, pattern) { if (!Array.isArray(value) || value.length > maxItems) throw new TypeError(`${label} must be an array with at most ${maxItems} items`); return value.map((item, index) => optionalString(item, 1, maxLength, pattern ?? null, `${label}[${index}]`)) }
+function starArray(value, label) { if (!Array.isArray(value) || value.some(star => !Number.isInteger(star) || star < 1 || star > 6)) throw new TypeError(`${label} must contain star levels from 1 to 6`); return [...new Set(value)] }
