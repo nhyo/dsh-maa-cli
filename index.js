@@ -108,7 +108,7 @@ const TRAINING_ADVICE_RESULT_SCHEMA = {
         required: ['id', 'name', 'profession', 'professionName', 'tier', 'overallRank', 'professionRank', 'coverageBoost', 'elite', 'level', 'reasons'],
         properties: {
           id: { type: 'string' }, name: { type: 'string' }, profession: { type: 'string' }, professionName: { type: 'string' }, tier: { type: 'string' },
-          overallRank: { anyOf: [{ type: 'integer' }, { type: 'null' }] }, professionRank: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
+          overallRank: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, professionRank: { oneOf: [{ type: 'integer' }, { type: 'null' }] },
           coverageBoost: { type: 'boolean' }, elite: { type: 'integer' }, level: { type: 'integer' },
           reasons: { type: 'array', items: { type: 'string' } },
         },
