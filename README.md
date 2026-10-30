@@ -3,6 +3,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-maa-cli.svg)](https://www.npmjs.com/package/dsh-maa-cli)
 [![license](https://img.shields.io/npm/l/dsh-maa-cli.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/nhyo/dsh-maa-cli)
 
 一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：把《明日方舟》的日常操作变成一条本地命令，复杂需求才交给模型组装计划。
 
