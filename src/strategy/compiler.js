@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { access, copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
-const THEMES = new Set(['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'])
 const ACTION_TYPES = new Set(['Deploy', 'Skill', 'Retreat', 'SpeedUp', 'BulletTime', 'SkillUsage', 'Output', 'SkillDaemon', 'ResetStopwatch', 'SetUnitLocation'])
 const DIRECTIONS = new Map([
   ['left', 'Left'], ['左', 'Left'], ['right', 'Right'], ['右', 'Right'],
@@ -20,22 +19,38 @@ export function compileStrategyRequest(input) {
 }
 
 export async function previewStrategy(strategy, resourceDir) {
+  const result = await previewStrategyDetails(strategy, resourceDir)
+  return { supported: result.supported, unsupported: result.unsupported }
+}
+
+export async function previewStrategyDetails(strategy, resourceDir) {
   requireAbsolute(resourceDir, 'MAA resource directory')
   const supported = []
   const unsupported = [...strategy.unsupported]
+  const changes = []
   if (strategy.kind === 'Roguelike') {
-    const result = await compileRoguelikeFiles(strategy, resourceDir, false)
+    const result = await compileRoguelikeFiles(strategy, resourceDir, true)
     supported.push(...result.supported)
     unsupported.push(...result.unsupported)
+    for (const file of result.files) changes.push({
+      kind: 'resource', target: path.relative(resourceDir, file.target).replaceAll('\\', '/'),
+      detail: '通过 --user-resource 临时覆盖；执行结束或异常时恢复',
+    })
   } else {
     const result = await compileCopilotFile(strategy, resourceDir)
     supported.push(...result.supported)
     unsupported.push(...result.unsupported)
+    if (result.document) {
+      changes.push({
+        kind: 'copilot', target: `${strategy.stageName} Copilot`,
+        detail: result.document.actions.map(action => `${action.type}${action.name ? ` ${action.name}` : ''}${action.kills !== undefined ? ` @ ${action.kills}杀` : ''}`).join(' → '),
+      })
+    }
   }
   if (supported.length === 0) {
     throw new Error(`没有可安全执行的策略。${unsupported.map(item => `${item.request}：${item.reason}`).join('；') || '请求未包含受支持的策略字段。'}`)
   }
-  return { supported, unsupported }
+  return { supported, unsupported, changes }
 }
 
 export async function materializeStrategy(document, strategy, options) {
@@ -58,7 +73,7 @@ export async function materializeStrategy(document, strategy, options) {
   }
 
   const documentTheme = document.tasks?.find(task => task?.type === 'Roguelike')?.params?.theme
-  const effectiveStrategy = documentTheme && THEMES.has(documentTheme) ? { ...strategy, theme: documentTheme } : strategy
+  const effectiveStrategy = documentTheme && validResourceId(documentTheme) ? { ...strategy, theme: documentTheme } : strategy
   const compiled = await compileRoguelikeFiles(effectiveStrategy, resourceDir, true)
   if (compiled.supported.length === 0) throw new Error(formatUnsupported(compiled.unsupported))
   const userResourceRoot = path.join(configDir, 'resource')
@@ -103,11 +118,11 @@ export async function recoverStrategyOverlay(configDir) {
 function compileRoguelikeRequest(input, unsupported) {
   const task = plain(input.task) ? input.task : {}
   const theme = requiredText(task.theme, 'Roguelike theme', 32)
-  if (!THEMES.has(theme)) throw new TypeError(`unsupported Roguelike theme: ${theme}`)
+  if (!validResourceId(theme)) throw new TypeError(`invalid Roguelike theme resource id: ${theme}`)
   const startsCount = integer(task.startsCount ?? 1, 1, 99999, 'startsCount')
   const step = {
     type: 'Roguelike', theme, startsCount,
-    ...(optionalInteger(task.mode, 0, 30001, 'mode') !== undefined ? { mode: task.mode } : {}),
+    ...(optionalInteger(task.mode, 0, 99999, 'mode') !== undefined ? { mode: task.mode } : {}),
     ...(optionalInteger(task.difficulty, 0, 99, 'difficulty') !== undefined ? { difficulty: task.difficulty } : {}),
     ...(textOrUndefined(task.squad, 32) ? { squad: task.squad.trim() } : {}),
     ...(textOrUndefined(task.coreChar, 32) ? { coreChar: task.coreChar.trim() } : {}),
@@ -466,5 +481,6 @@ function optionalInteger(value, min, max, label) { return value === undefined ? 
 function requireAbsolute(value, label) { if (typeof value !== 'string' || !path.isAbsolute(value)) throw new TypeError(`${label} must be an absolute path`); return path.resolve(value) }
 function plain(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) }
 function invalid(message) { throw new TypeError(message) }
+function validResourceId(value) { return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,31}$/u.test(value) }
 
 export const GENERATED_COPILOT_MARKER = COPILOT_MARKER

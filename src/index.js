@@ -1,8 +1,9 @@
 import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa } from './runtime/runner.js'
 import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './commands/planner.js'
-import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan } from './commands/confirmation.js'
+import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, updatePendingPlan } from './commands/confirmation.js'
 import { parseLocalMaaCommand } from './commands/local-command.js'
 import { applyTaskPanelOverrides, taskPanelFromDocument } from './commands/task-panel.js'
+import { discoverMaaCapabilities } from './capabilities/discovery.js'
 import { formatReport, runDoctor } from './runtime/doctor.js'
 import { prepareRuntimeDirectories } from './runtime/preflight.js'
 import { checkEmulator, emulatorErrorMessage } from './runtime/emulator.js'
@@ -21,8 +22,13 @@ import {
   GENERATED_COPILOT_MARKER,
   materializeStrategy,
   previewStrategy,
+  previewStrategyDetails,
 } from './strategy/compiler.js'
-import { applyStrategyMemory, parseMaaCompatibility, rememberPlanStrategies } from './strategy/memory.js'
+import {
+  applyStrategyMemory, deleteStrategyMemory, listStrategyMemory, parseMaaCompatibility,
+  rememberPlanStrategies, setStrategyMemoryEnabled,
+} from './strategy/memory.js'
+import { noteModelPrompt, parseStrategyNote } from './strategy/note.js'
 
 export const name = 'maa-cli-tools'
 export const inject = ['tools', 'commands']
@@ -206,6 +212,68 @@ function memorySummary(memory) {
   return `｜策略记忆：复用 ${memory.reused}，新增 ${memory.stored}${memory.rejected ? `，拒绝 ${memory.rejected}` : ''}`
 }
 
+async function strategyEnvironment(signal) {
+  const cliPath = await requireMaaCli()
+  const [directory, compatibility] = await Promise.all([
+    runMaa(queryArguments('resource_dir'), { cliPath, signal, timeoutMs: 30_000 }),
+    inspectMaaCompatibility(cliPath, signal),
+  ])
+  const resourceDir = directory.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1)
+  if (directory.exitCode !== 0 || !resourceDir) throw new Error(`无法读取 MAA 资源目录：${directory.stderr || directory.stdout || `exit ${directory.exitCode}`}`)
+  const capabilities = await discoverMaaCapabilities({ resourceDir, compatibility })
+  return { resourceDir, compatibility, capabilities }
+}
+
+function documentWithNoteStrategy(document, strategy) {
+  if (strategy.kind === 'Roguelike') return structuredClone(document)
+  const result = structuredClone(document)
+  let replaced = false
+  result.tasks = result.tasks.map(task => {
+    if (replaced || !['Fight', 'Copilot'].includes(task?.type)) return task
+    replaced = true
+    return { type: 'Copilot', params: { filename: GENERATED_COPILOT_MARKER, formation: strategy.formation } }
+  })
+  if (!replaced) throw new Error('当前计划没有可替换为 Copilot 的作战任务。')
+  return result
+}
+
+async function prepareNotePreview(agent, confirmationCode, rawNote, overrides, signal) {
+  const note = decodeConfirmationNote(rawNote)
+  const pending = await peekPendingPlan(agent)
+  if (pending.confirmationCode !== confirmationCode) throw new Error('MAA 确认码与待确认计划不一致。')
+  const environment = await strategyEnvironment(signal)
+  const patch = Object.keys(overrides ?? {}).length ? applyTaskPanelOverrides(pending.document, overrides, environment.capabilities) : null
+  const previewPending = patch ? { ...pending, document: patch.document } : pending
+  const parsed = await parseStrategyNote(note, previewPending)
+  if (parsed.needsModel) {
+    return {
+      status: 'needs_model', note, recognized: parsed.recognized, unresolved: parsed.unresolved,
+      modelPrompt: noteModelPrompt(parsed),
+    }
+  }
+  const compiled = compileStrategyRequest(parsed.input)
+  const applied = await applyStrategyMemory(compiled, { ...environment, persist: false })
+  const details = await previewStrategyDetails(applied.strategy, environment.resourceDir)
+  const document = documentWithNoteStrategy(previewPending.document, applied.strategy)
+  if (applied.strategy.kind === 'Copilot') {
+    details.changes.unshift({ kind: 'task', target: 'MAA task chain', detail: `Fight → Copilot (${applied.strategy.stageName})` })
+  }
+  const preview = {
+    status: 'ready', note, recognized: parsed.recognized,
+    supported: details.supported, unsupported: details.unsupported, changes: details.changes,
+    memory: applied.memory, strategy: applied.strategy, document,
+    overrides: overrides ?? {}, adjustments: patch?.applied ?? [],
+  }
+  await updatePendingPlan(agent, current => ({ ...current, notePreview: preview }))
+  return preview
+}
+
+function publicNotePreview(preview) {
+  if (!preview) return null
+  const { strategy: _strategy, document: _document, ...publicValue } = preview
+  return publicValue
+}
+
 const STEP_PROPERTIES = {
   type: { type: 'string', enum: ['StartUp', 'Fight', 'Infrast', 'Recruit', 'Mall', 'Award', 'Roguelike', 'ReclamationAlgorithm', 'Depot', 'OperBox', 'Custom', 'CloseDown'] },
   clientType: { type: 'string', enum: ['Official', 'Bilibili', 'Txwy', 'YoStarEN', 'YoStarJP', 'YoStarKR'], description: 'Optional game client for the whole plan. It may appear on any step; all provided values must match.' },
@@ -215,7 +283,7 @@ const STEP_PROPERTIES = {
   refresh: { type: 'boolean' }, select: { type: 'array', items: { type: 'integer' } }, confirm: { type: 'array', items: { type: 'integer' } }, setTime: { type: 'boolean' }, expedite: { type: 'boolean' }, permitReserve: { type: 'integer' }, firstTags: { type: 'array', items: { type: 'string' } }, extraTagsMode: { type: 'integer' },
   shopping: { type: 'boolean' }, buyFirst: { type: 'array', items: { type: 'string' } }, blacklist: { type: 'array', items: { type: 'string' } }, forceShoppingIfCreditFull: { type: 'boolean' }, onlyBuyDiscount: { type: 'boolean' }, reserveMaxCredit: { type: 'boolean' }, visitFriends: { type: 'boolean' }, creditFight: { type: 'boolean' },
   dailyWeekly: { type: 'boolean' }, mail: { type: 'boolean' }, freePull: { type: 'boolean' }, orundum: { type: 'boolean' }, mining: { type: 'boolean' }, specialAccess: { type: 'boolean' }, signInEvent: { type: 'boolean' },
-  theme: { type: 'string', enum: ['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'] }, squad: { type: 'string' }, coreChar: { type: 'string' }, roles: { type: 'string' }, startsCount: { type: 'integer' }, difficulty: { type: 'integer' }, useSupport: { type: 'boolean' }, useNonFriendSupport: { type: 'boolean' }, stopAtFinalBoss: { type: 'boolean' },
+  theme: { type: 'string', description: 'Theme id discovered from the active MAA resources; validated by the server.' }, squad: { type: 'string' }, coreChar: { type: 'string' }, roles: { type: 'string' }, startsCount: { type: 'integer' }, difficulty: { type: 'integer' }, useSupport: { type: 'boolean' }, useNonFriendSupport: { type: 'boolean' }, stopAtFinalBoss: { type: 'boolean' },
   toolToCraft: { type: 'string' }, numCraftBatches: { type: 'integer' }, taskNames: { type: 'array', items: { type: 'string' } },
 }
 
@@ -238,9 +306,9 @@ function renderResult(_args, value) {
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
-// The 备注 field on the confirmation panel is for DSH, never for MaaCore: it
-// arrives URL-encoded on the local command plane so spaces survive, and is only
-// echoed back as guidance for the model's next turn (acting on it is optional).
+// The 备注 field arrives URL-encoded on the local command plane so spaces
+// survive. It is compiled and previewed by DSH; raw note text is never copied
+// into a MaaCore task document.
 export function decodeConfirmationNote(raw) {
   let decoded
   try {
@@ -255,13 +323,36 @@ export function decodeConfirmationNote(raw) {
 }
 
 function formatCommandResult(result) {
-  const lines = [`MAA 已结束（退出码 ${result.exitCode}）。`, `计划：${result.planSummary}`]
+  const feedback = result.executionFeedback ?? classifyMaaExecution(result)
+  const lines = [feedback.headline, `计划：${result.planSummary}`, `执行验证：${feedback.detail}`]
   if (result.operatorBox) lines.push('', formatOperatorBoxScanResult(result.operatorBox))
   if (result.operatorBoxError) lines.push('', `干员 Box 结果读取失败：${result.operatorBoxError}`)
   if (result.maintenanceWarning) lines.push('', result.maintenanceWarning)
   if (result.stdout) lines.push('', result.stdout)
   if (result.stderr) lines.push('', result.stderr)
   return lines.join('\n')
+}
+
+export function classifyMaaExecution(result, strategyApplied = false) {
+  const log = `${result?.stdout ?? ''}\n${result?.stderr ?? ''}`
+  const statuses = [...log.matchAll(/^\[([^\]]+)\]\s+(Succeeded|Completed|Failed|Stopped|Unstarted)\s*$/gimu)]
+    .map(match => ({ task: match[1], status: match[2] }))
+  if (result?.exitCode !== 0) return {
+    status: 'failed', headline: `MAA 执行失败（退出码 ${result?.exitCode ?? '未知'}）。`,
+    detail: strategyApplied ? '策略配置已生成并交给 MAA，但 MAA 进程返回失败；不能视为策略执行成功。' : 'MAA 进程返回失败。', statuses,
+  }
+  if (statuses.some(item => item.status === 'Failed')) return {
+    status: 'failed', headline: 'MAA 报告任务失败。', detail: '进程退出码为 0，但任务摘要包含 Failed。', statuses,
+  }
+  if (statuses.length && statuses.every(item => ['Succeeded', 'Completed'].includes(item.status))) return {
+    status: 'verified', headline: 'MAA 已完成任务。', detail: `MAA 摘要确认完成：${statuses.map(item => item.task).join('、')}`, statuses,
+  }
+  const state = statuses.length ? statuses.map(item => `${item.task}=${item.status}`).join('、') : '日志中没有可识别的完成状态'
+  return {
+    status: 'unverified', headline: 'MAA 进程已正常结束，但任务结果未完全验证。',
+    detail: `${state}；${strategyApplied ? '仅能确认策略已生成、加载并调用 MAA，不能据此声称游戏内动作成功。' : '不能仅凭退出码 0 声称游戏内任务成功。'}`,
+    statuses,
+  }
 }
 
 const activeExecutions = new Map()
@@ -329,20 +420,21 @@ async function executeDocument(agent, signal, document, planSummary, options = {
       outputLimit: hasOperatorBox ? 16 * 1024 * 1024 : undefined,
       envPatch: hasOperatorBox ? { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } : undefined,
     })
-    if (!hasOperatorBox) return { ...result, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning }
+    const executionFeedback = classifyMaaExecution(result, strategyExecution !== null)
+    if (!hasOperatorBox) return { ...result, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback }
 
     const cleanStderr = stripOperBoxCallbacks(result.stderr)
     if (result.exitCode !== 0) {
-      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning }
+      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback }
     }
     try {
       const operatorBox = parseCompletedOperatorBox(`${result.stdout}\n${result.stderr}`)
       await saveOperatorBox(operatorBox)
-      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, operatorBox, maintenanceWarning: maintenance.warning }
+      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, operatorBox, maintenanceWarning: maintenance.warning, executionFeedback }
     } catch (error) {
       return {
         ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary,
-        operatorBoxError: error instanceof Error ? error.message : String(error), maintenanceWarning: maintenance.warning,
+        operatorBoxError: error instanceof Error ? error.message : String(error), maintenanceWarning: maintenance.warning, executionFeedback,
       }
     }
   } finally {
@@ -390,14 +482,33 @@ export function apply(ctx) {
           if (parsed.confirmationCode && parsed.confirmationCode !== pending.confirmationCode) {
             throw new Error('MAA 确认码与待确认计划不一致。')
           }
+          const environment = await strategyEnvironment(signal)
           return {
             kind: 'success',
             text: JSON.stringify({
               code: pending.confirmationCode,
               summary: pending.planSummary,
-              panel: taskPanelFromDocument(pending.document),
+              panel: taskPanelFromDocument(pending.document, environment.capabilities),
+              capabilitySignature: environment.capabilities.signature,
+              capabilitySource: environment.capabilities.source,
+              capabilityWarning: environment.capabilities.warning ?? '',
+              notePreview: publicNotePreview(pending.notePreview),
             }),
           }
+        }
+        if (parsed.kind === 'note-preview') {
+          const preview = await prepareNotePreview(agent, parsed.confirmationCode, parsed.note, parsed.overrides, signal)
+          return { kind: 'success', text: JSON.stringify(publicNotePreview(preview)) }
+        }
+        if (parsed.kind === 'strategies') {
+          return { kind: 'success', text: JSON.stringify(await listStrategyMemory()) }
+        }
+        if (parsed.kind === 'strategy-enable' || parsed.kind === 'strategy-disable') {
+          const changed = await setStrategyMemoryEnabled(parsed.id, parsed.kind === 'strategy-enable')
+          return { kind: 'success', text: JSON.stringify(changed) }
+        }
+        if (parsed.kind === 'strategy-delete') {
+          return { kind: 'success', text: JSON.stringify(await deleteStrategyMemory(parsed.id)) }
         }
         if (parsed.kind === 'confirm') {
           // The slash command or the button that invokes it is the explicit
@@ -414,23 +525,49 @@ export function apply(ctx) {
             delete overrides.note
           }
           const hasOverrides = Object.keys(overrides).length > 0
-          const peeked = hasOverrides ? await peekPendingPlan(agent) : null
-          const patched = peeked ? applyTaskPanelOverrides(peeked.document, overrides) : null
+          const peeked = hasOverrides || note ? await peekPendingPlan(agent) : null
+          let confirmationDocument = peeked?.document
+          let confirmationStrategy = peeked?.strategy
+          let noteSummary = ''
+          if (note) {
+            const preview = peeked?.notePreview
+            if (!preview || preview.status !== 'ready' || preview.note !== note) {
+              throw new Error('备注尚未完成策略预览，或预览后又被修改。请先点击“解析并预览备注”。')
+            }
+            if (JSON.stringify(preview.overrides ?? {}) !== JSON.stringify(overrides)) {
+              throw new Error('任务参数在备注预览后发生变化，请重新点击“解析并预览备注”。')
+            }
+            confirmationDocument = preview.document
+            confirmationStrategy = preview.strategy
+            noteSummary = `｜备注策略：${preview.supported.join('、')}${preview.unsupported.length ? `｜未执行：${preview.unsupported.map(item => item.request).join('、')}` : ''}`
+            if (preview.adjustments?.length) noteSummary += `｜确认时调整：${preview.adjustments.join('、')}`
+            try {
+              const environment = await strategyEnvironment(signal)
+              const committed = await applyStrategyMemory(confirmationStrategy, { ...environment, includeStored: false })
+              confirmationStrategy = committed.strategy
+              noteSummary += memorySummary(committed.memory)
+            } catch (error) {
+              noteSummary += `｜策略记忆未更新：${error instanceof Error ? error.message : String(error)}`
+            }
+          }
+          const confirmationEnvironment = hasOverrides && !note ? await strategyEnvironment(signal) : null
+          const patched = hasOverrides && !note ? applyTaskPanelOverrides(confirmationDocument, overrides, confirmationEnvironment.capabilities) : null
           const adjustments = patched && patched.applied.length > 0 ? `｜确认时调整：${patched.applied.join('、')}` : ''
           const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
-          const planSummary = `${pending.planSummary}${adjustments}${note ? `｜备注（DSH 自行理解，不保证执行）：${note}` : ''}`
-          const result = await executeDocument(agent, signal, patched ? patched.document : pending.document, planSummary, { emulatorChecked: true, strategy: pending.strategy })
-          const text = formatCommandResult(result) + (note ? `\n\n备注（交给 DSH 自行理解，不保证执行）：${note}` : '')
-          return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text }
+          const planSummary = `${pending.planSummary}${adjustments}${noteSummary}`
+          const result = await executeDocument(agent, signal, patched ? patched.document : (confirmationDocument ?? pending.document), planSummary, { emulatorChecked: true, strategy: confirmationStrategy ?? pending.strategy })
+          const text = formatCommandResult(result)
+          return { kind: result.executionFeedback?.status !== 'failed' && !result.operatorBoxError ? 'success' : 'error', text }
         }
-        let document = buildTaskDocument(parsed.steps)
-        let summary = summarizePlan(parsed.steps)
+        const environment = await strategyEnvironment(signal)
+        let document = buildTaskDocument(parsed.steps, environment.capabilities)
+        let summary = summarizePlan(parsed.steps, environment.capabilities)
         // Parameter adjustments are validated against the same whitelist the
         // confirmation panel uses, and a bad value aborts before anything is
         // written or executed.
         const overrides = parsed.roguelikeOverrides ?? {}
         if (Object.keys(overrides).length > 0) {
-          const patched = applyTaskPanelOverrides(document, overrides)
+          const patched = applyTaskPanelOverrides(document, overrides, environment.capabilities)
           document = patched.document
           if (patched.applied.length > 0) summary = `${summary}｜参数：${patched.applied.join('、')}`
         }
@@ -445,7 +582,7 @@ export function apply(ctx) {
           }
         }
         const result = await executeDocument(agent, signal, document, summary)
-        return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text: formatCommandResult(result) }
+        return { kind: result.executionFeedback?.status !== 'failed' && !result.operatorBoxError ? 'success' : 'error', text: formatCommandResult(result) }
       } catch (error) {
         return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
       }
@@ -542,16 +679,15 @@ export function apply(ctx) {
     },
     output: { schema: PREPARE_RESULT_SCHEMA, render: renderResult },
     async execute(args, exec) {
-      const document = buildTaskDocument(args.steps)
+      const environment = await strategyEnvironment(exec.signal)
+      const document = buildTaskDocument(args.steps, environment.capabilities)
       let memory
       try {
-        const cliPath = await requireMaaCli()
-        const compatibility = await inspectMaaCompatibility(cliPath, exec.signal)
-        memory = await rememberPlanStrategies(args.steps, compatibility)
+        memory = await rememberPlanStrategies(args.steps, environment.compatibility, { capabilities: environment.capabilities })
       } catch (error) {
         memory = memoryFallback(error, args.steps.length)
       }
-      const planSummary = `${summarizePlan(args.steps)}${memorySummary(memory)}`
+      const planSummary = `${summarizePlan(args.steps, environment.capabilities)}${memorySummary(memory)}`
       const planJson = `${JSON.stringify(document, null, 2)}\n`
       const confirmation = await preparePendingPlan(exec.agent, { purpose: args.purpose, document, planJson, planSummary })
       exec.concludeTurn()
@@ -571,7 +707,7 @@ export function apply(ctx) {
         task: {
           type: 'object', additionalProperties: false,
           properties: {
-            theme: { type: 'string', enum: ['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'] },
+            theme: { type: 'string', description: 'Theme id discovered from the active MAA resources; the server validates it before preparation.' },
             mode: { type: 'integer' }, startsCount: { type: 'integer' }, difficulty: { type: 'integer' },
             squad: { type: 'string' }, coreChar: { type: 'string' }, roles: { type: 'string' },
             useSupport: { type: 'boolean' }, useNonFriendSupport: { type: 'boolean' },
@@ -610,27 +746,22 @@ export function apply(ctx) {
     output: { schema: STRATEGY_PREPARE_RESULT_SCHEMA, render: renderResult },
     async execute(args, exec) {
       let strategy = compileStrategyRequest(args)
-      const cliPath = await requireMaaCli()
-      const [directory, compatibilityResult] = await Promise.all([
-        runMaa(queryArguments('resource_dir'), { cliPath, signal: exec.signal, timeoutMs: 30_000 }),
-        inspectMaaCompatibility(cliPath, exec.signal).catch(error => ({ error })),
-      ])
-      const resourceDir = directory.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1)
-      if (directory.exitCode !== 0 || !resourceDir) throw new Error(`无法读取 MAA 资源目录：${directory.stderr || directory.stdout || `exit ${directory.exitCode}`}`)
+      const environment = await strategyEnvironment(exec.signal)
+      const { resourceDir, compatibility: compatibilityResult, capabilities } = environment
+      if (!capabilities.roguelike.themes.some(theme => strategy.kind !== 'Roguelike' || theme.id === strategy.theme)) {
+        throw new Error(`当前 MAA 资源不支持肉鸽主题 ${strategy.theme}`)
+      }
       let memory
-      if (compatibilityResult.error) memory = memoryFallback(compatibilityResult.error, 1)
-      else {
-        try {
-          const applied = await applyStrategyMemory(strategy, { resourceDir, compatibility: compatibilityResult })
-          strategy = applied.strategy
-          memory = applied.memory
-        } catch (error) {
-          memory = memoryFallback(error, 1)
-        }
+      try {
+        const applied = await applyStrategyMemory(strategy, { resourceDir, compatibility: compatibilityResult })
+        strategy = applied.strategy
+        memory = applied.memory
+      } catch (error) {
+        memory = memoryFallback(error, 1)
       }
       const preview = await previewStrategy(strategy, resourceDir)
       const document = strategy.kind === 'Roguelike'
-        ? buildTaskDocument([strategy.step])
+        ? buildTaskDocument([strategy.step], capabilities)
         : { tasks: [{ type: 'Copilot', params: { filename: GENERATED_COPILOT_MARKER, formation: strategy.formation } }] }
       const fallback = preview.unsupported.length ? `｜安全回退：${preview.unsupported.map(item => item.request).join('、')}` : ''
       const planSummary = `${args.purpose}｜生效：${preview.supported.join('、')}${fallback}${memorySummary(memory)}`

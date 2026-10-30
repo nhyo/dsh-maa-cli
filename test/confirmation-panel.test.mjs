@@ -16,6 +16,17 @@ test('parses a plain confirmation without overrides', () => {
   })
 })
 
+test('parses note preview and strategy memory management commands', () => {
+  assert.deepEqual(parseLocalMaaCommand('note-preview MAA-1A2B3C stage=1-7 note=%E5%A0%B5%E9%97%A8'), {
+    kind: 'note-preview', confirmationCode: 'MAA-1A2B3C', note: '%E5%A0%B5%E9%97%A8', overrides: { stage: '1-7' },
+  })
+  assert.deepEqual(parseLocalMaaCommand('strategies'), { kind: 'strategies' })
+  assert.deepEqual(parseLocalMaaCommand('strategy-disable 12345678-1234-1234-1234-123456789abc'), {
+    kind: 'strategy-disable', id: '12345678-1234-1234-1234-123456789abc',
+  })
+  assert.throws(() => parseLocalMaaCommand('note-preview MAA-1A2B3C stage=1-7'), /缺少 note/u)
+})
+
 test('parses roguelike parameters carried by the confirmation panel', () => {
   const parsed = parseLocalMaaCommand('confirm MAA-1A2B3C theme=Sarkaz startsCount=3 difficulty=12 useSupport=true stopAtFinalBoss=false')
   assert.equal(parsed.kind, 'confirm')
@@ -256,10 +267,11 @@ test('accepts the /maa rouge spelling and parses peek', () => {
   assert.equal(rouge.steps[0].theme, 'Sami')
   assert.equal(rouge.steps[0].startsCount, 2)
 
-  // No theme means default Phantom, no count means default 1
+  // No theme is resolved from the active capability descriptor later; no
+  // count still means one run.
   const def = parseLocalMaaCommand('rouge')
   assert.equal(def.kind, 'plan')
-  assert.equal(def.steps[0].theme, 'Phantom')
+  assert.equal(def.steps[0].theme, undefined)
   assert.equal(def.steps[0].startsCount, 1)
 
   assert.deepEqual(parseLocalMaaCommand('peek MAA-1A2B3C'), { kind: 'peek', confirmationCode: 'MAA-1A2B3C' })

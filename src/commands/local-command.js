@@ -16,8 +16,10 @@ const HELP = [
   '兼容旧写法：/maa fight 1-7 2、/maa rouge 萨米 3；它们也只会预填面板，不会直接执行。',
   '/maa stop         或  /maa 停止任务',
   '/maa confirm MAA-XXXXXX  确认并执行待确认计划（参数由面板自动附加）',
-  '                  末尾也可加 note=<URL 编码的备注>，备注只交给 DSH 自行参考，不保证执行',
+  '                  末尾也可加 note=<URL 编码的备注>，备注必须先在面板完成策略预览',
   '/maa peek MAA-XXXXXX     只读查看待确认计划的摘要与参数（面板内部使用，不会执行）',
+  '/maa note-preview MAA-XXXXXX note=<URL 编码>  编译备注并更新预览，不执行',
+  '/maa strategies          查看策略记忆；strategy-enable / disable / delete <id> 管理条目',
   '/maa setup        安装本机 MAA 运行时（首次使用）',
   '',
   '所有项目都必须在面板点击「确认并执行 MAA」后才会运行。',
@@ -52,6 +54,17 @@ export function parseLocalMaaCommand(rawInput) {
   const input = String(rawInput ?? '').trim()
   if (input === '' || /^(?:help|帮助|\?)$/iu.test(input)) return { kind: 'help', text: HELP }
 
+  const notePreview = input.match(/^note-preview\s+(MAA-[A-F0-9]{6})(?:\s+(.+))$/iu)
+  if (notePreview) {
+    const overrides = parseOverrides(notePreview[2])
+    if (overrides.note === undefined) throw new Error('备注预览缺少 note=<URL 编码的备注>。')
+    const note = overrides.note
+    delete overrides.note
+    return { kind: 'note-preview', confirmationCode: notePreview[1].toUpperCase(), note, overrides }
+  }
+  if (/^(?:strategies|策略记忆|策略库)$/iu.test(input)) return { kind: 'strategies' }
+  const strategyAction = input.match(/^(strategy-enable|strategy-disable|strategy-delete)\s+([0-9a-f-]{36})$/iu)
+  if (strategyAction) return { kind: strategyAction[1].toLowerCase(), id: strategyAction[2].toLowerCase() }
   const confirm = input.match(/^confirm\s+(MAA-[A-F0-9]{6})(?:\s+(.+))?$/iu)
   if (confirm) return { kind: 'confirm', confirmationCode: confirm[1].toUpperCase(), overrides: parseOverrides(confirm[2]) }
   const peek = input.match(/^(?:peek|查看计划)\s*(MAA-[A-F0-9]{6})?$/iu)
@@ -95,11 +108,20 @@ export function parseLocalMaaCommand(rawInput) {
   // the button runs `/maa confirm`, so nothing is executed without a click.
   const rogue = input.match(/^(?:rouge|rogue|roguelike|肉鸽|自动肉鸽)(?:\s+(\S+))?(?:\s+(\d+))?(?:\s+(.+))?$/iu)
   if (rogue) {
-    const theme = rogue[1] ? resolveRoguelikeTheme(rogue[1]) : 'Phantom'
+    let theme
+    if (rogue[1]) {
+      try { theme = resolveRoguelikeTheme(rogue[1]) }
+      catch (error) {
+        // New upstream theme ids are ASCII resource directory names. Preserve
+        // them here and let the active capability descriptor validate them.
+        if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/u.test(rogue[1])) throw error
+        theme = rogue[1]
+      }
+    }
     const count = rogue[2] === undefined ? 1 : Number(rogue[2])
     if (!Number.isInteger(count) || count < 1 || count > 99999) throw new Error('肉鸽次数必须是 1–99999。')
     return {
-      kind: 'plan', purpose: `肉鸽 ${theme} ×${count}`,
+      kind: 'plan', purpose: `肉鸽 ${theme ?? '当前默认主题'} ×${count}`,
       steps: [{ type: 'Roguelike', theme, startsCount: count }],
       roguelikeOverrides: parseOverrides(rogue[3]),
     }

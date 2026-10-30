@@ -5,9 +5,9 @@ import path from 'node:path'
 import test from 'node:test'
 import { actionArguments, DEFAULT_MAA_CLI_PATH, MAA_CLI_PATH, queryArguments, resolveMaaCliPath, runMaa } from '../src/runtime/runner.js'
 import { runtimeLayout } from '../src/runtime/runtime.js'
-import { apply } from '../src/index.js'
+import { apply, classifyMaaExecution } from '../src/index.js'
 import { buildTaskDocument, generatedTaskPath, summarizePlan, writeGeneratedTask } from '../src/commands/planner.js'
-import { clearPendingPlansForTest, consumeConfirmedPlan, consumePlanFromHumanGesture, preparePendingPlan } from '../src/commands/confirmation.js'
+import { clearPendingPlansForTest, consumeConfirmedPlan, consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, updatePendingPlan } from '../src/commands/confirmation.js'
 import { parseLocalMaaCommand } from '../src/commands/local-command.js'
 import { stateFilePath } from '../src/runtime/state.js'
 import { operatorBoxFilePath, saveOperatorBox } from '../src/operators/operator-box.js'
@@ -15,6 +15,13 @@ import { operatorBoxFilePath, saveOperatorBox } from '../src/operators/operator-
 // Pending plans now live on disk, so the tests keep them out of the real
 // ~/.dsh/maa-cli directory.
 process.env.DSH_MAA_CLI_STATE_DIR = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-confirmation-'))
+
+test('classifies MAA process completion separately from task execution', () => {
+  assert.equal(classifyMaaExecution({ exitCode: 0, stdout: '[Fight] Completed', stderr: '' }, true).status, 'verified')
+  assert.equal(classifyMaaExecution({ exitCode: 0, stdout: '[Copilot] Unstarted', stderr: '' }, true).status, 'unverified')
+  assert.equal(classifyMaaExecution({ exitCode: 0, stdout: '[Fight] Failed', stderr: '' }, true).status, 'failed')
+  assert.equal(classifyMaaExecution({ exitCode: 7, stdout: '', stderr: 'boom' }, false).status, 'failed')
+})
 
 test('registers a zero-token command plus prepare-only model tools', () => {
   const tools = []
@@ -60,6 +67,22 @@ test('registered slash command prepares and exposes the fight settings panel wit
   assert.equal(payload.panel.values.times, 1)
   assert.ok(payload.panel.fields.some(field => field.key === 'stage'))
   assert.ok(payload.panel.fields.some(field => field.key === 'medicine'))
+  await clearPendingPlansForTest()
+})
+
+test('stores a note preview without replacing or extending its confirmation', async () => {
+  await clearPendingPlansForTest()
+  const agent = { id: 'note-preview-state', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] } }
+  await preparePendingPlan(agent, { purpose: 'test', document: { tasks: [] } }, { code: 'MAA-ABC123', now: 1000 })
+  await updatePendingPlan(agent, current => ({ ...current, notePreview: { status: 'ready' } }), { now: 1100 })
+  const stored = await peekPendingPlan(agent)
+  assert.equal(stored.confirmationCode, 'MAA-ABC123')
+  assert.equal(stored.preparedAt, 1000)
+  assert.deepEqual(stored.notePreview, { status: 'ready' })
+  await assert.rejects(
+    updatePendingPlan(agent, current => ({ ...current, confirmationCode: 'MAA-000000' }), { now: 1200 }),
+    /不能替换确认码/u,
+  )
   await clearPendingPlansForTest()
 })
 

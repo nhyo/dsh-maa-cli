@@ -38,14 +38,61 @@ export async function readStrategyMemory(options = {}) {
   }
 }
 
+export async function listStrategyMemory(options = {}) {
+  const store = await readStrategyMemory(options)
+  return {
+    path: strategyMemoryFilePath(options.env ?? process.env),
+    limitPerCategory: STRATEGY_MEMORY_LIMIT,
+    categories: Object.entries(store.categories).sort(([a], [b]) => a.localeCompare(b)).map(([name, entries]) => ({
+      name,
+      entries: entries.slice().reverse().map(entry => ({
+        id: entry.id, semanticKey: entry.semanticKey,
+        label: entry.atom?.label ?? entry.atom?.step?.type ?? entry.semanticKey,
+        enabled: entry.enabled !== false, source: entry.source,
+        scope: memoryScope(entry.atom), applicability: entry.applicability ?? {},
+        updatedAt: entry.updatedAt ?? '', uses: Number.isInteger(entry.uses) ? entry.uses : 0,
+      })),
+    })),
+  }
+}
+
+export async function setStrategyMemoryEnabled(id, enabled, options = {}) {
+  const key = requireId(id)
+  if (typeof enabled !== 'boolean') throw new TypeError('enabled must be boolean')
+  return await updateMemory(options.env ?? process.env, store => {
+    const entry = findEntry(store, key)
+    if (!entry) throw new Error(`找不到策略记忆 ${key}`)
+    entry.enabled = enabled
+    entry.updatedAt = new Date().toISOString()
+    return { id: key, enabled, label: entry.atom?.label ?? entry.semanticKey }
+  })
+}
+
+export async function deleteStrategyMemory(id, options = {}) {
+  const key = requireId(id)
+  return await updateMemory(options.env ?? process.env, store => {
+    for (const [category, entries] of Object.entries(store.categories)) {
+      const index = entries.findIndex(entry => entry.id === key)
+      if (index < 0) continue
+      const [removed] = entries.splice(index, 1)
+      if (entries.length === 0) delete store.categories[category]
+      return { id: key, deleted: true, label: removed.atom?.label ?? removed.semanticKey }
+    }
+    throw new Error(`找不到策略记忆 ${key}`)
+  })
+}
+
 export async function applyStrategyMemory(strategy, options) {
   const resourceDir = requireAbsolute(options.resourceDir, 'MAA resource directory')
   const compatibility = normalizeCompatibility(options.compatibility)
   const env = options.env ?? process.env
   const snapshot = await readStrategyMemory({ env })
-  const atoms = dedupeStrategyAtoms(strategyAtoms(strategy)).map(current => {
+  const explicitAtoms = dedupeStrategyAtoms(strategyAtoms(strategy))
+  const explicitKeys = new Set(explicitAtoms.map(item => item.semanticKey))
+  const rememberedAtoms = options.includeStored === false ? [] : applicableStoredAtoms(snapshot, strategy).filter(item => !explicitKeys.has(item.semanticKey))
+  const atoms = [...rememberedAtoms, ...explicitAtoms].map(current => {
     const remembered = snapshot.categories[current.category]?.find(entry => entry.semanticKey === current.semanticKey)
-    if (!remembered || !compatibleEntry(remembered, current, compatibility)) return current
+    if (!remembered || remembered.atom?.operation !== current.operation || !compatibleEntry(remembered, current, compatibility)) return current
     // Reuse the persisted canonical unit when its parameters are unchanged.
     // Current applicability/order always wins, so cross-map tactics are
     // recalculated on the requested stage instead of reusing old coordinates.
@@ -75,7 +122,7 @@ export async function applyStrategyMemory(strategy, options) {
     }
   }
 
-  const memory = await updateMemory(env, store => {
+  const summarize = store => {
     let reused = 0
     let stored = 0
     const touched = new Set()
@@ -88,6 +135,7 @@ export async function applyStrategyMemory(strategy, options) {
       else stored += 1
       const entry = {
         id: existing?.id ?? randomUUID(),
+        enabled: existing?.enabled !== false,
         category: atom.category,
         semanticKey: atom.semanticKey,
         source: atom.source,
@@ -107,7 +155,10 @@ export async function applyStrategyMemory(strategy, options) {
       touched.add(atom.category)
     }
     return { reused, stored, categories: [...touched].sort() }
-  })
+  }
+  const memory = options.persist === false
+    ? previewMemoryUpdate(snapshot, valid, compatibility)
+    : await updateMemory(env, summarize)
 
   return {
     strategy: strategyFromAtoms(strategy, valid, rejected),
@@ -122,7 +173,7 @@ export async function rememberPlanStrategies(steps, compatibilityInput, options 
   const requested = steps.map((step, index) => planAtom(step, index))
   const atoms = requested.filter(atom => atom.step.type !== 'Custom')
   const rejected = requested.length - atoms.length
-  for (const atom of atoms) buildTaskDocument([atom.step])
+  for (const atom of atoms) buildTaskDocument([atom.step], options.capabilities)
   return await updateMemory(env, store => {
     let reused = 0
     let stored = 0
@@ -185,6 +236,25 @@ function strategyAtoms(strategy) {
   return atoms
 }
 
+function applicableStoredAtoms(store, strategy) {
+  const result = []
+  for (const entries of Object.values(store.categories)) for (const entry of entries) {
+    if (entry.enabled === false || entry.source !== 'strategy' || !plain(entry.atom)) continue
+    const current = structuredClone(entry.atom)
+    if (strategy.kind === 'Roguelike') {
+      if (current.category !== 'roguelike' || current.applicability?.theme !== strategy.theme) continue
+      if (current.operation === 'encounter' && (current.applicability?.mode ?? 0) !== (strategy.step.mode ?? 0)) continue
+      current.applicability = { theme: strategy.theme, mode: strategy.step.mode ?? 0 }
+    } else {
+      if (current.category !== 'combat') continue
+      if (current.operation === 'action' && current.applicability?.stageName !== strategy.stageName) continue
+      current.applicability = { stageName: strategy.stageName }
+    }
+    result.push(current)
+  }
+  return result
+}
+
 function strategyFromAtoms(base, atoms, rejected = []) {
   if (base.kind === 'Roguelike') {
     const result = {
@@ -231,6 +301,13 @@ function categoryForStep(type) {
   return String(type).replace(/([a-z])([A-Z])/gu, '$1-$2').toLowerCase()
 }
 
+function memoryScope(atomValue) {
+  if (atomValue?.operation?.startsWith('tactic_')) return 'global'
+  if (atomValue?.category === 'roguelike') return 'theme'
+  if (atomValue?.operation === 'action') return 'map'
+  return 'task'
+}
+
 function atom(category, semanticKey, operation, payload, applicability, label, conflictKey = '', order = 0) {
   return { category, semanticKey, source: 'strategy', operation, payload: structuredClone(payload), applicability, label, conflictKey, order }
 }
@@ -269,6 +346,19 @@ function compatibleEntry(entry, atom, compatibility) {
   return JSON.stringify(entry.applicability ?? {}) === JSON.stringify(atom.applicability ?? {})
 }
 
+function previewMemoryUpdate(store, atoms, compatibility) {
+  let reused = 0
+  let stored = 0
+  const categories = new Set()
+  for (const atom of atoms) {
+    const existing = store.categories[atom.category]?.find(entry => entry.semanticKey === atom.semanticKey)
+    if (existing && compatibleEntry(existing, atom, compatibility)) reused += 1
+    else stored += 1
+    categories.add(atom.category)
+  }
+  return { reused, stored, categories: [...categories].sort() }
+}
+
 function normalizeCompatibility(value) {
   if (!plain(value)) throw new TypeError('MAA compatibility is required')
   return {
@@ -294,6 +384,8 @@ function major(value) { return versionParts(value)[0] }
 function version(value, label) { const text = String(value ?? ''); if (!/^\d+\.\d+\.\d+$/u.test(text)) throw new TypeError(`${label} is invalid`); return text }
 function versionParts(value) { return version(value, 'version').split('.').map(Number) }
 function validEntry(value) { return plain(value) && typeof value.semanticKey === 'string' && typeof value.category === 'string' && plain(value.atom) }
+function findEntry(store, id) { for (const entries of Object.values(store.categories)) { const entry = entries.find(item => item.id === id); if (entry) return entry } return null }
+function requireId(value) { const result = String(value ?? '').trim(); if (!/^[0-9a-f-]{36}$/iu.test(result)) throw new TypeError('策略记忆 ID 无效'); return result }
 function emptyStore() { return { version: STORE_VERSION, categories: {} } }
 function plain(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) }
 function requireAbsolute(value, label) { if (typeof value !== 'string' || !path.isAbsolute(value)) throw new TypeError(`${label} must be an absolute path`); return path.resolve(value) }

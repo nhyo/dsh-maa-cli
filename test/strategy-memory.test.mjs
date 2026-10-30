@@ -6,9 +6,12 @@ import path from 'node:path'
 import { compileStrategyRequest } from '../src/strategy/compiler.js'
 import {
   applyStrategyMemory,
+  deleteStrategyMemory,
+  listStrategyMemory,
   parseMaaCompatibility,
   readStrategyMemory,
   rememberPlanStrategies,
+  setStrategyMemoryEnabled,
   STRATEGY_MEMORY_LIMIT,
 } from '../src/strategy/memory.js'
 
@@ -149,4 +152,51 @@ test('does not reuse an entry across an incompatible maa-cli line', async t => {
   })
   assert.equal(changed.memory.reused, 0)
   assert.equal(changed.memory.stored, 1)
+})
+
+test('lists, disables, excludes, re-enables, and deletes a strategy memory entry', async t => {
+  const env = await fixture()
+  t.after(env.cleanup)
+  const tactic = compileStrategyRequest({
+    kind: 'Copilot', task: { stageName: 'T-1' }, tactics: [{ kind: 'guard_blue', name: '塞雷娅' }],
+  })
+  await applyStrategyMemory(tactic, { resourceDir: env.resource, compatibility: COMPATIBILITY, env: env.env })
+  let listed = await listStrategyMemory({ env: env.env })
+  const entry = listed.categories.find(item => item.name === 'combat').entries[0]
+  assert.equal(entry.enabled, true)
+
+  await setStrategyMemoryEnabled(entry.id, false, { env: env.env })
+  listed = await listStrategyMemory({ env: env.env })
+  assert.equal(listed.categories[0].entries[0].enabled, false)
+  const actionOnly = compileStrategyRequest({
+    kind: 'Copilot', task: { stageName: 'T-1' }, actions: [{ type: 'Retreat', name: '山', kills: 10 }],
+  })
+  const applied = await applyStrategyMemory(actionOnly, {
+    resourceDir: env.resource, compatibility: COMPATIBILITY, env: env.env, persist: false,
+  })
+  assert.deepEqual(applied.strategy.tactics, [])
+
+  await setStrategyMemoryEnabled(entry.id, true, { env: env.env })
+  await deleteStrategyMemory(entry.id, { env: env.env })
+  listed = await listStrategyMemory({ env: env.env })
+  assert.equal(listed.categories.some(item => item.name === 'combat' && item.entries.some(current => current.id === entry.id)), false)
+})
+
+test('a current explicit instruction overrides a conflicting stored preference', async t => {
+  const env = await fixture()
+  t.after(env.cleanup)
+  const priority = compileStrategyRequest({
+    kind: 'Roguelike', task: { theme: 'Sami' }, shopping: { prioritize: ['锈蚀的铁锤'] },
+  })
+  await applyStrategyMemory(priority, { resourceDir: env.resource, compatibility: COMPATIBILITY, env: env.env })
+  const avoidance = compileStrategyRequest({
+    kind: 'Roguelike', task: { theme: 'Sami' }, shopping: { avoid: ['锈蚀的铁锤'] },
+  })
+  const applied = await applyStrategyMemory(avoidance, {
+    resourceDir: env.resource, compatibility: COMPATIBILITY, env: env.env, persist: false,
+  })
+
+  assert.deepEqual(applied.strategy.shopping.prioritize, [])
+  assert.deepEqual(applied.strategy.shopping.avoid, ['锈蚀的铁锤'])
+  assert.equal(applied.memory.rejected, 0)
 })

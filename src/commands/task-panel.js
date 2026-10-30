@@ -1,4 +1,5 @@
 import { applyRoguelikeOverrides, roguelikePanelFromDocument } from './planner.js'
+import { fallbackCapabilities, findRoguelikeTheme } from '../capabilities/discovery.js'
 
 const CLIENT_OPTIONS = [
   ['Official', '官服'], ['Bilibili', 'B 服'], ['Txwy', '繁中服'],
@@ -16,7 +17,7 @@ const DRONE_OPTIONS = [
 ]
 const STAR_OPTIONS = [1, 2, 3, 4, 5, 6].map(value => [value, `${value} 星`])
 
-function option(value, label) { return { value, label } }
+function option(value, label, extra = {}) { return { value, label, ...extra } }
 function options(entries) { return entries.map(([value, label]) => option(value, label)) }
 function field(key, label, kind, param, extra = {}) { return { key, label, kind, param, ...extra } }
 function note(text, when) { return when ? { text, when } : { text } }
@@ -213,7 +214,7 @@ function valuesFromTask(type, params) {
   return values
 }
 
-export function taskPanelFromDocument(document) {
+export function taskPanelFromDocument(document, capabilities = fallbackCapabilities()) {
   const tasks = isObject(document) && Array.isArray(document.tasks) ? document.tasks : []
   const onlyDataTasks = tasks.length > 0 && tasks.every(task => task && (task.type === 'OperBox' || task.type === 'Depot'))
   if (onlyDataTasks) {
@@ -229,7 +230,7 @@ export function taskPanelFromDocument(document) {
   if (tasks.length !== 1 || !tasks[0] || typeof tasks[0].type !== 'string') return null
   const task = tasks[0]
   if (task.type === 'Roguelike') {
-    return { type: 'Roguelike', title: '自动肉鸽', fields: [], values: roguelikePanelFromDocument(document) }
+    return roguelikePanel(document, capabilities)
   }
   const definition = PANELS[task.type]
   if (!definition) return null
@@ -297,10 +298,10 @@ function validateCombination(type, params) {
   }
 }
 
-export function applyTaskPanelOverrides(document, overrides) {
-  const panel = taskPanelFromDocument(document)
+export function applyTaskPanelOverrides(document, overrides, capabilities = fallbackCapabilities()) {
+  const panel = taskPanelFromDocument(document, capabilities)
   if (!panel) throw new Error('当前计划没有可编辑的 MAA 参数面板。')
-  if (panel.type === 'Roguelike') return applyRoguelikeOverrides(document, overrides)
+  if (panel.type === 'Roguelike') return applyRoguelikeOverrides(document, overrides, capabilities)
   const definition = PANELS[panel.type]
   const fields = new Map(definition.fields.map(item => [item.key, item]))
   for (const key of Object.keys(overrides)) if (!fields.has(key)) throw new Error(`当前 ${definition.title} 面板不支持参数：${key}`)
@@ -335,3 +336,88 @@ export function applyTaskPanelOverrides(document, overrides) {
 }
 
 export const TASK_PANEL_TYPES = Object.freeze(Object.keys(PANELS))
+
+function roguelikePanel(document, capabilities) {
+  const current = roguelikePanelFromDocument(document) ?? {}
+  const themes = capabilities?.roguelike?.themes ?? []
+  if (themes.length === 0) throw new Error('当前 MAA 能力描述中没有可用肉鸽主题。')
+  const selected = findRoguelikeTheme(capabilities, current.theme) ?? themes[0]
+  const defaults = selected.defaults ?? {}
+  const modeOptions = []
+  const difficultyOptions = []
+  const squadOptions = []
+  const roleOptions = []
+  const operatorOptions = []
+  for (const theme of themes) {
+    for (const mode of theme.modes ?? []) pushScoped(modeOptions, mode.value, mode.label, theme.id)
+    for (const difficulty of theme.difficulties ?? []) pushScoped(difficultyOptions, difficulty, String(difficulty), theme.id)
+    for (const value of theme.squads ?? []) pushScoped(squadOptions, value, recommended(value, theme.defaults?.squad), theme.id)
+    for (const value of theme.roles ?? []) pushScoped(roleOptions, value, recommended(value, theme.defaults?.roles), theme.id)
+    for (const value of theme.operators ?? []) pushScoped(operatorOptions, value, recommended(value, theme.defaults?.coreChar), theme.id)
+  }
+  const advanced = [
+    field('useNonFriendSupport', '使用非好友助战', 'boolean', 'use_nonfriend_support', { default: false, advanced: true, when: { key: 'useSupport', equals: true } }),
+    field('stopAtFinalBoss', '打到最终 Boss 停', 'boolean', 'stop_at_final_boss', { default: false, advanced: true, when: { key: 'supportsFinalBossStop', equals: true } }),
+    field('stopAtMaxLevel', '等级刷满停', 'boolean', 'stop_at_max_level', { default: false, advanced: true }),
+    field('investmentEnabled', '投资源石锭', 'boolean', 'investment_enabled', { default: true, advanced: true }),
+    field('investmentsCount', '投资次数', 'integer', 'investments_count', { default: 999, min: 0, max: 99999, advanced: true, when: { key: 'investmentEnabled', equals: true } }),
+    field('stopWhenInvestmentFull', '投资满停', 'boolean', 'stop_when_investment_full', { default: false, advanced: true, when: { key: 'investmentEnabled', equals: true } }),
+    field('investmentWithMoreScore', '投资后购物', 'boolean', 'investment_with_more_score', { default: false, advanced: true, when: { key: 'mode', equals: 1 } }),
+    field('startWithEliteTwo', '凹精二直升', 'boolean', 'start_with_elite_two', { default: false, advanced: true, when: { key: 'mode', equals: 4 } }),
+    field('onlyStartWithEliteTwo', '只凹精二直升', 'boolean', 'only_start_with_elite_two', { default: false, advanced: true, when: { all: [{ key: 'mode', equals: 4 }, { key: 'startWithEliteTwo', equals: true }] } }),
+    field('monthlySquadAutoIterate', '月度小队自动切换', 'boolean', 'monthly_squad_auto_iterate', { default: false, advanced: true, when: { key: 'mode', equals: 6 } }),
+    field('deepExplorationAutoIterate', '深入调查自动切换', 'boolean', 'deep_exploration_auto_iterate', { default: false, advanced: true, when: { key: 'mode', equals: 7 } }),
+    field('findPlayTimeTarget', '常乐节点', 'select', 'find_playTime_target', { default: 1, advanced: true, when: { key: 'mode', equals: 20001 }, options: options([[1, '令（掷地有声）'], [2, '黍（种因得果）'], [3, '年（三缺一）']]) }),
+    field('useFoldartal', '使用密文板', 'boolean', 'use_foldartal', { default: false, advanced: true, when: { key: 'supportsFoldartal', equals: true } }),
+    field('checkCollapsalParadigms', '检测坍缩范式', 'boolean', 'check_collapsal_paradigms', { default: false, advanced: true, when: { key: 'supportsFoldartal', equals: true } }),
+    field('refreshTraderWithDice', '骰子刷新商店', 'boolean', 'refresh_trader_with_dice', { default: false, advanced: true, when: { key: 'supportsDiceRefresh', equals: true } }),
+  ]
+  const reset = {
+    mode: 0, stopAtFinalBoss: false, useFoldartal: false, checkCollapsalParadigms: false,
+    refreshTraderWithDice: false, investmentWithMoreScore: false, startWithEliteTwo: false,
+    onlyStartWithEliteTwo: false, monthlySquadAutoIterate: false, deepExplorationAutoIterate: false,
+  }
+  return {
+    type: 'Roguelike', title: '自动肉鸽', capabilitySignature: capabilities.signature ?? '', capabilitySource: capabilities.source ?? 'adapter',
+    fields: [
+      field('theme', '主题', 'select', 'theme', { default: selected.id, options: themes.map(theme => option(theme.id, theme.label, { patch: { ...reset, theme: theme.id, ...theme.defaults, ...featureValues(theme) } })) }),
+      field('mode', '模式', 'select', 'mode', { default: 0, options: modeOptions }),
+      field('difficulty', '难度', 'select', 'difficulty', { default: defaults.difficulty ?? 0, options: difficultyOptions }),
+      field('startsCount', '刷取次数', 'integer', 'starts_count', { default: 9999, min: 1, max: 99999 }),
+      field('squad', '分队', 'select', 'squad', { default: defaults.squad ?? '', options: squadOptions }),
+      field('roles', '职业组', 'select', 'roles', { default: defaults.roles ?? '', options: roleOptions }),
+      field('coreChar', '开局干员', 'select', 'core_char', { default: defaults.coreChar ?? '', options: operatorOptions }),
+      field('useSupport', '使用助战', 'boolean', 'use_support', { default: defaults.useSupport === true }),
+      ...advanced,
+    ],
+    notes: capabilities.warning ? [note(capabilities.warning)] : [],
+    values: {
+      theme: selected.id, mode: current.mode ?? 0, startsCount: 9999, ...featureValues(selected),
+      difficulty: current.difficulty ?? defaults.difficulty ?? 0,
+      squad: current.squad ?? defaults.squad ?? '', roles: current.roles ?? defaults.roles ?? '',
+      coreChar: current.coreChar ?? defaults.coreChar ?? '', useSupport: current.useSupport ?? defaults.useSupport === true,
+      useNonFriendSupport: current.useNonFriendSupport === true, stopAtFinalBoss: current.stopAtFinalBoss === true,
+      stopAtMaxLevel: current.stopAtMaxLevel === true, investmentEnabled: current.investmentEnabled !== false,
+      investmentsCount: current.investmentsCount ?? 999, stopWhenInvestmentFull: current.stopWhenInvestmentFull === true,
+      investmentWithMoreScore: current.investmentWithMoreScore === true, startWithEliteTwo: current.startWithEliteTwo === true,
+      onlyStartWithEliteTwo: current.onlyStartWithEliteTwo === true, monthlySquadAutoIterate: current.monthlySquadAutoIterate === true,
+      deepExplorationAutoIterate: current.deepExplorationAutoIterate === true, findPlayTimeTarget: current.findPlayTimeTarget ?? 1,
+      useFoldartal: current.useFoldartal === true, checkCollapsalParadigms: current.checkCollapsalParadigms === true,
+      refreshTraderWithDice: current.refreshTraderWithDice === true, note: '',
+    },
+  }
+}
+
+function pushScoped(target, value, label, theme) {
+  let entry = target.find(item => item.value === value && item.label === label)
+  if (!entry) { entry = option(value, label, { when: { key: 'theme', in: [] } }); target.push(entry) }
+  if (!entry.when.in.includes(theme)) entry.when.in.push(theme)
+}
+function recommended(value, expected) { return value === expected ? `${value}【推荐】` : value }
+function featureValues(theme) {
+  return {
+    supportsFinalBossStop: theme?.features?.stopAtFinalBoss === true,
+    supportsFoldartal: theme?.features?.foldartal === true,
+    supportsDiceRefresh: theme?.features?.refreshTraderWithDice === true,
+  }
+}

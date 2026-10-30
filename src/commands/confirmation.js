@@ -62,6 +62,29 @@ export async function peekPendingPlan(agent, options = {}) {
   return pending
 }
 
+// Update preview-only data without changing the confirmation code, creation
+// turn, or expiry. The updater cannot consume or replace another Session's plan.
+export async function updatePendingPlan(agent, updater, options = {}) {
+  if (typeof updater !== 'function') throw new TypeError('pending plan updater must be a function')
+  const env = options.env ?? process.env
+  const sessionKey = requireSessionKey(agent)
+  const state = await readState(env)
+  const pending = state.plans[sessionKey]
+  if (!pending) throw new Error('当前 DSH 会话没有待确认的 MAA 计划，请重新生成计划。')
+  const now = options.now ?? Date.now()
+  if (now - pending.preparedAt > CONFIRMATION_TTL_MS) {
+    await dropPlan(sessionKey, env, state)
+    throw new Error('MAA 计划已超过 30 分钟，请重新生成。')
+  }
+  const next = await updater(structuredClone(pending))
+  if (!next || next.confirmationCode !== pending.confirmationCode || next.preparedAt !== pending.preparedAt) {
+    throw new Error('备注预览不能替换确认码或延长有效期。')
+  }
+  state.plans[sessionKey] = next
+  await writeState(state, env)
+  return next
+}
+
 // Used only by an explicit human gesture in the non-model command plane
 // (the /maa confirm command or the confirmation button that invokes it).
 // It deliberately does not inspect model-turn text: possession of the code is

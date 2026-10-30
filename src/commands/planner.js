@@ -1,37 +1,18 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { fallbackCapabilities, findRoguelikeTheme, resolveRoguelikeThemeId, roguelikeThemeIds } from '../capabilities/discovery.js'
 
 export const GENERATED_TASK_NAME = 'dsh-generated'
 
 const CLIENTS = new Set(['Official', 'Bilibili', 'Txwy', 'YoStarEN', 'YoStarJP', 'YoStarKR'])
 const FACILITIES = new Set(['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Recycle', 'Dorm', 'Processing', 'Training', 'AssistantChange'])
 const DRONES = new Set(['_NotUse', 'Money', 'SyntheticJade', 'CombatRecord', 'PureGold', 'OriginStone', 'Chip'])
-const ROGUELIKE_THEMES = new Set(['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'])
-
-export const ROGUELIKE_THEME_LABELS = {
-  Phantom: '傀影与猩红孤钻',
-  Mizuki: '水月与深蓝之树',
-  Sami: '探索者的银凇止境',
-  Sarkaz: '萨卡兹的无终奇语',
-  JieGarden: '岁的界园志异',
-  BlackFlow: '黑流树海',
-}
-
-const ROGUELIKE_THEME_ALIASES = {
-  傀影: 'Phantom', 傀影与猩红孤钻: 'Phantom',
-  水月: 'Mizuki', 水月与深蓝之树: 'Mizuki',
-  萨米: 'Sami', 探索者的银凇止境: 'Sami',
-  萨卡兹: 'Sarkaz', 萨卡兹的无终奇语: 'Sarkaz',
-  界园: 'JieGarden', 岁的界园志异: 'JieGarden',
-  黑流树海: 'BlackFlow',
-}
-
-export function resolveRoguelikeTheme(input) {
+export function resolveRoguelikeTheme(input, capabilities = fallbackCapabilities()) {
   const value = String(input ?? '').trim()
-  if (ROGUELIKE_THEMES.has(value)) return value
-  const mapped = ROGUELIKE_THEME_ALIASES[value]
-  if (mapped) return mapped
-  throw new Error(`无法识别肉鸽主题：${value || '(空)'}；可选 ${[...ROGUELIKE_THEMES].join(' / ')}（中文：傀影 / 水月 / 萨米 / 萨卡兹 / 界园 / 黑流树海）`)
+  const themes = new Set(roguelikeThemeIds(capabilities))
+  const resolved = resolveRoguelikeThemeId(capabilities, value)
+  if (resolved) return resolved
+  throw new Error(`无法识别肉鸽主题：${value || '(空)'}；当前 MAA 可选 ${[...themes].join(' / ')}`)
 }
 const STEP_TYPES = new Set([
   'StartUp', 'Fight', 'Infrast', 'Recruit', 'Mall', 'Award', 'Roguelike',
@@ -39,7 +20,7 @@ const STEP_TYPES = new Set([
 ])
 const COMMON_FIELDS = new Set(['type', 'clientType'])
 
-export function buildTaskDocument(steps) {
+export function buildTaskDocument(steps, capabilities = fallbackCapabilities()) {
   if (!Array.isArray(steps) || steps.length < 1 || steps.length > 20) {
     throw new TypeError('steps must contain 1-20 ordered MAA steps')
   }
@@ -48,12 +29,12 @@ export function buildTaskDocument(steps) {
   if (clients.length === 1) enumValue(clients[0], CLIENTS, 'clientType')
   return {
     ...(clients.length === 1 ? { client_type: clients[0] } : {}),
-    tasks: steps.map((step, index) => buildStep(step, index)),
+    tasks: steps.map((step, index) => buildStep(step, index, capabilities)),
   }
 }
 
-export function summarizePlan(steps) {
-  return steps.map((step, index) => `${index + 1}. ${summarizeStep(step)}`).join(' → ')
+export function summarizePlan(steps, capabilities = fallbackCapabilities()) {
+  return steps.map((step, index) => `${index + 1}. ${summarizeStep(step, capabilities)}`).join(' → ')
 }
 
 // Roguelike parameters a human may adjust on the confirmation panel. They are
@@ -62,8 +43,6 @@ export function summarizePlan(steps) {
 // still match MAA's own roguelike settings without re-asking the model.
 // MAA's own roguelike modes (see protocol/integration.md): 2 was removed and 3
 // is not open, so only the modes MaaCore still accepts are offered.
-export const ROGUELIKE_MODE_VALUES = [0, 1, 4, 5, 6, 7, 10001, 20001, 30001]
-
 const ROGUELIKE_OVERRIDES = {
   theme: { param: 'theme', kind: 'theme' },
   mode: { param: 'mode', kind: 'mode' },
@@ -102,33 +81,49 @@ const ROGUELIKE_OVERRIDE_LABELS = {
   checkCollapsalParadigms: '检测坍缩范式', refreshTraderWithDice: '骰子刷新商店',
 }
 
-export const ROGUELIKE_THEME_VALUES = [...ROGUELIKE_THEMES]
 export const ROGUELIKE_OVERRIDE_KEYS = Object.keys(ROGUELIKE_OVERRIDES)
 
-export function applyRoguelikeOverrides(document, overrides) {
+export function applyRoguelikeOverrides(document, overrides, capabilities = fallbackCapabilities()) {
   if (!isPlainObject(document) || !Array.isArray(document.tasks)) {
     throw new TypeError('MAA task document must contain a tasks array')
   }
-  const entries = isPlainObject(overrides) ? Object.entries(overrides) : []
+  const sourceEntries = isPlainObject(overrides) ? Object.entries(overrides) : []
+  const entries = sourceEntries.slice().sort(([left], [right]) => Number(right === 'theme') - Number(left === 'theme'))
   if (entries.length === 0) return { document, applied: [] }
+  const existingTask = document.tasks.find(task => isPlainObject(task) && task.type === 'Roguelike' && isPlainObject(task.params))
+  let effectiveTheme = existingTask?.params?.theme
   const applied = {}
   const described = []
   for (const [key, raw] of entries) {
     const spec = ROGUELIKE_OVERRIDES[key]
     if (!spec) throw new Error(`无法识别肉鸽参数 ${key}；可调整：${ROGUELIKE_OVERRIDE_KEYS.join(' / ')}`)
-    applied[spec.param] = coerceOverride(spec, raw, key)
+    applied[spec.param] = coerceOverride(spec, raw, key, capabilities, effectiveTheme)
+    if (key === 'theme') effectiveTheme = applied.theme
     described.push(`${ROGUELIKE_OVERRIDE_LABELS[key]}=${applied[spec.param]}`)
   }
   let touched = 0
   const tasks = document.tasks.map(task => {
     if (!isPlainObject(task) || task.type !== 'Roguelike' || !isPlainObject(task.params)) return task
     touched += 1
-    return { ...task, params: { ...task.params, ...applied } }
+    const params = { ...task.params, ...applied }
+    validateRoguelikeCapability(params, capabilities)
+    return { ...task, params }
   })
   if (touched === 0) throw new Error('该 MAA 计划里没有肉鸽任务，参数调整已取消。')
   // `applied` carries the human-readable summary back to the command handler;
   // it is never written into the task JSON MaaCore reads.
   return { document: { ...document, tasks }, applied: described }
+}
+
+function validateRoguelikeCapability(params, capabilities) {
+  const theme = findRoguelikeTheme(capabilities, params.theme)
+  if (!theme) throw new Error(`当前 MAA 资源不支持肉鸽主题 ${params.theme}`)
+  if (params.mode !== undefined && !(theme.modes ?? []).some(item => item.value === params.mode)) throw new Error(`主题 ${theme.id} 不支持 mode=${params.mode}`)
+  if (params.difficulty !== undefined && !theme.difficulties.includes(params.difficulty)) throw new Error(`主题 ${theme.id} 不支持难度 ${params.difficulty}`)
+  if (capabilities.source !== 'resource') return
+  for (const [param, values, label] of [['squad', theme.squads, '分队'], ['roles', theme.roles, '职业组'], ['core_char', theme.operators, '开局干员']]) {
+    if (params[param] && values.length > 0 && !values.includes(params[param])) throw new Error(`${label}不在当前 MAA 已发现选项中：${params[param]}`)
+  }
 }
 
 // MaaCore param name -> the camelCase key the confirmation panel edits. The
@@ -158,15 +153,18 @@ export function roguelikePanelFromDocument(document) {
   return panel
 }
 
-function coerceOverride(spec, raw, key) {
+function coerceOverride(spec, raw, key, capabilities, pendingTheme) {
   const value = raw === undefined || raw === null ? '' : String(raw).trim()
   if (spec.kind === 'theme') {
-    if (!ROGUELIKE_THEMES.has(value)) throw new Error(`肉鸽主题无效：${value || '(空)'}；可选 ${[...ROGUELIKE_THEMES].join(' / ')}`)
+    const ids = roguelikeThemeIds(capabilities)
+    if (!ids.includes(value)) throw new Error(`肉鸽主题无效：${value || '(空)'}；当前 MAA 可选 ${ids.join(' / ')}`)
     return value
   }
   if (spec.kind === 'mode') {
-    if (!/^\d+$/.test(value) || !ROGUELIKE_MODE_VALUES.includes(Number(value))) {
-      throw new Error(`肉鸽模式无效：${value || '(空)'}；可选 ${ROGUELIKE_MODE_VALUES.join(' / ')}`)
+    const theme = findRoguelikeTheme(capabilities, pendingTheme) ?? capabilities.roguelike.themes[0]
+    const allowed = (theme?.modes ?? []).map(item => item.value)
+    if (!/^\d+$/.test(value) || !allowed.includes(Number(value))) {
+      throw new Error(`肉鸽模式无效：${value || '(空)'}；主题 ${theme?.id ?? '未知'} 可选 ${allowed.join(' / ')}`)
     }
     return Number(value)
   }
@@ -200,7 +198,7 @@ export async function writeGeneratedTask(document, options = {}) {
   return { path: target, json }
 }
 
-function buildStep(step, index) {
+function buildStep(step, index, capabilities) {
   if (!isPlainObject(step) || !STEP_TYPES.has(step.type)) {
     throw new TypeError(`steps[${index}].type is unsupported`)
   }
@@ -282,14 +280,18 @@ function buildStep(step, index) {
       break
     case 'Roguelike':
       assertFields(step, new Set([...COMMON_FIELDS, 'theme', 'mode', 'squad', 'coreChar', 'roles', 'startsCount', 'difficulty', 'useSupport', 'useNonFriendSupport', 'stopAtFinalBoss']))
+      const effectiveTheme = step.theme ?? capabilities?.roguelike?.themes?.[0]?.id
+      const themeCapability = findRoguelikeTheme(capabilities, effectiveTheme)
+      if (!themeCapability) throw new TypeError(`Roguelike.theme is invalid for the current MAA resources: ${effectiveTheme ?? '(empty)'}`)
+      const modes = new Set(themeCapability.modes.map(item => item.value))
       params = compact({
-        theme: enumValue(step.theme, ROGUELIKE_THEMES, 'Roguelike.theme'),
-        mode: optionalInteger(step.mode, 0, 30001, 'Roguelike.mode', 0, new Set(ROGUELIKE_MODE_VALUES)),
+        theme: effectiveTheme,
+        mode: optionalInteger(step.mode, 0, 99999, 'Roguelike.mode', 0, modes),
         squad: optionalString(step.squad, 1, 32, null, 'Roguelike.squad'),
         core_char: optionalString(step.coreChar, 1, 32, null, 'Roguelike.coreChar'),
         roles: optionalString(step.roles, 1, 32, null, 'Roguelike.roles'),
         starts_count: integer(step.startsCount, 1, 99999, 'Roguelike.startsCount'),
-        difficulty: optionalInteger(step.difficulty, 0, 99, 'Roguelike.difficulty'),
+        difficulty: optionalInteger(step.difficulty, 0, Math.max(...themeCapability.difficulties, 0), 'Roguelike.difficulty'),
         use_support: optionalBoolean(step.useSupport, false),
         use_nonfriend_support: optionalBoolean(step.useNonFriendSupport, false),
         stop_at_final_boss: optionalBoolean(step.stopAtFinalBoss, false),
@@ -320,7 +322,7 @@ function buildStep(step, index) {
   return params === undefined ? { type } : { type, params }
 }
 
-function summarizeStep(step) {
+function summarizeStep(step, capabilities) {
   switch (step.type) {
     case 'StartUp': return `启动游戏(${step.clientType ?? 'Official'})`
     case 'Fight': return `作战 ${step.stage ?? '当前关卡'} ×${step.times}，连战${step.times <= 10 ? step.times : '自动分组'}，理智药${step.medicine ?? 0}，临期药${step.expiringMedicine ?? 0}，源石${step.stone ?? 0}`
@@ -328,7 +330,10 @@ function summarizeStep(step) {
     case 'Recruit': return `公招${step.times ?? 0}次${step.expedite ? '，使用加急许可' : ''}`
     case 'Mall': return `信用商店${step.shopping ? '并购物' : '仅收取/访问'}${step.forceShoppingIfCreditFull ? '，信用溢出时忽略黑名单' : ''}`
     case 'Award': return '领取指定奖励'
-    case 'Roguelike': return `肉鸽 ${ROGUELIKE_THEME_LABELS[step.theme] ?? step.theme} ×${step.startsCount}`
+    case 'Roguelike': {
+      const theme = findRoguelikeTheme(capabilities, step.theme) ?? capabilities?.roguelike?.themes?.[0]
+      return `肉鸽 ${theme?.label ?? step.theme ?? '当前默认主题'} ×${step.startsCount}`
+    }
     case 'ReclamationAlgorithm': return `生息演算 mode=${step.mode ?? 1}`
     case 'Depot': return '识别仓库'
     case 'OperBox': return '识别干员列表'
