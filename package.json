@@ -14,6 +14,7 @@
     "src",
     "config",
     "README.md",
+    "CHANGELOG.md",
     "scripts/install-runtime.mjs"
   ],
   "scripts": {
