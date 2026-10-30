@@ -16,6 +16,13 @@ import {
   stripOperBoxCallbacks,
 } from './operators/operator-box.js'
 import { buildTrainingAdvice, fetchCommunityRanking, formatTrainingAdvice, loadOperatorMetadata } from './operators/training-advice.js'
+import {
+  compileStrategyRequest,
+  GENERATED_COPILOT_MARKER,
+  materializeStrategy,
+  previewStrategy,
+} from './strategy/compiler.js'
+import { applyStrategyMemory, parseMaaCompatibility, rememberPlanStrategies } from './strategy/memory.js'
 
 export const name = 'maa-cli-tools'
 export const inject = ['tools', 'commands']
@@ -25,6 +32,14 @@ const BASE_RESULT_PROPERTIES = {
   stdout: { type: 'string' }, stderr: { type: 'string' },
 }
 const BASE_REQUIRED = Object.keys(BASE_RESULT_PROPERTIES)
+const MEMORY_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['reused', 'stored', 'rejected', 'categories'],
+  properties: {
+    reused: { type: 'integer' }, stored: { type: 'integer' }, rejected: { type: 'integer' },
+    categories: { type: 'array', items: { type: 'string' } }, error: { type: 'string' },
+  },
+}
 const RESULT_SCHEMA = { type: 'object', additionalProperties: false, required: BASE_REQUIRED, properties: BASE_RESULT_PROPERTIES }
 const PLAN_RESULT_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -33,10 +48,25 @@ const PLAN_RESULT_SCHEMA = {
 }
 const PREPARE_RESULT_SCHEMA = {
   type: 'object', additionalProperties: false,
-  required: ['purpose', 'planJson', 'planSummary', 'confirmationCode', 'confirmationPhrase', 'expiresAt'],
+  required: ['purpose', 'planJson', 'planSummary', 'confirmationCode', 'confirmationPhrase', 'expiresAt', 'memory'],
   properties: {
     purpose: { type: 'string' }, planJson: { type: 'string' }, planSummary: { type: 'string' },
     confirmationCode: { type: 'string' }, confirmationPhrase: { type: 'string' }, expiresAt: { type: 'string' },
+    memory: MEMORY_RESULT_SCHEMA,
+  },
+}
+const STRATEGY_PREPARE_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['purpose', 'planJson', 'planSummary', 'confirmationCode', 'confirmationPhrase', 'expiresAt', 'supported', 'unsupported', 'memory'],
+  properties: {
+    ...PREPARE_RESULT_SCHEMA.properties,
+    supported: { type: 'array', items: { type: 'string' } },
+    unsupported: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false, required: ['request', 'reason'],
+        properties: { request: { type: 'string' }, reason: { type: 'string' } },
+      },
+    },
   },
 }
 const DOCTOR_RESULT_SCHEMA = {
@@ -161,6 +191,21 @@ async function ensureMaaCli(signal) {
   return await requireMaaCli()
 }
 
+async function inspectMaaCompatibility(cliPath, signal) {
+  const result = await runMaa(queryArguments('version'), { cliPath, signal, timeoutMs: 20_000 })
+  if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout || `maa-cli version exit ${result.exitCode}`)
+  return parseMaaCompatibility(`${result.stdout}\n${result.stderr}`)
+}
+
+function memoryFallback(error, rejected = 0) {
+  return { reused: 0, stored: 0, rejected, categories: [], error: error instanceof Error ? error.message : String(error) }
+}
+
+function memorySummary(memory) {
+  if (memory.error) return `｜策略记忆未更新：${memory.error}`
+  return `｜策略记忆：复用 ${memory.reused}，新增 ${memory.stored}${memory.rejected ? `，拒绝 ${memory.rejected}` : ''}`
+}
+
 const STEP_PROPERTIES = {
   type: { type: 'string', enum: ['StartUp', 'Fight', 'Infrast', 'Recruit', 'Mall', 'Award', 'Roguelike', 'ReclamationAlgorithm', 'Depot', 'OperBox', 'Custom', 'CloseDown'] },
   clientType: { type: 'string', enum: ['Official', 'Bilibili', 'Txwy', 'YoStarEN', 'YoStarJP', 'YoStarKR'], description: 'Optional game client for the whole plan. It may appear on any step; all provided values must match.' },
@@ -220,6 +265,7 @@ function formatCommandResult(result) {
 }
 
 const activeExecutions = new Map()
+let activeStrategyExecution = false
 
 function agentKey(agent) {
   if (!agent || agent.id === undefined) throw new Error('当前命令没有可用的 DSH 会话。')
@@ -241,6 +287,8 @@ async function executeDocument(agent, signal, document, planSummary, options = {
   const executionSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
   const active = { controller, planSummary }
   activeExecutions.set(key, active)
+  let strategyExecution = null
+  let strategyReserved = false
   try {
     const cliPath = await ensureMaaCli(executionSignal)
     const maintenance = isRuntimePath(cliPath)
@@ -258,9 +306,24 @@ async function executeDocument(agent, signal, document, planSummary, options = {
     if (configResult.exitCode !== 0 || !configDir) {
       throw new Error(`无法确定 maa-cli 配置目录：${configResult.stderr || configResult.stdout || `exit ${configResult.exitCode}`}`)
     }
-    const written = await writeGeneratedTask(document, { configDir })
-    const hasOperatorBox = document.tasks.some(task => task.type === 'OperBox')
-    const result = await runMaa(actionArguments('run_task', GENERATED_TASK_NAME, true), {
+    let executionDocument = document
+    if (options.strategy) {
+      if (activeStrategyExecution) throw new Error('另一条 MAA 策略正在覆盖共享资源，请等它结束后再确认。')
+      activeStrategyExecution = true
+      strategyReserved = true
+      const resourceResult = await runMaa(queryArguments('resource_dir'), { signal: executionSignal, timeoutMs: 20_000 })
+      const resourceDir = resourceResult.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1)
+      if (resourceResult.exitCode !== 0 || !resourceDir) {
+        throw new Error(`无法确定 MAA 资源目录：${resourceResult.stderr || resourceResult.stdout || `exit ${resourceResult.exitCode}`}`)
+      }
+      strategyExecution = await materializeStrategy(document, options.strategy, { resourceDir, configDir })
+      executionDocument = strategyExecution.document
+      const runtimeFallbacks = strategyExecution.unsupported.filter(item => !planSummary.includes(item.request))
+      if (runtimeFallbacks.length) planSummary = `${planSummary}｜执行时安全回退：${runtimeFallbacks.map(item => item.request).join('、')}`
+    }
+    const written = await writeGeneratedTask(executionDocument, { configDir })
+    const hasOperatorBox = executionDocument.tasks.some(task => task.type === 'OperBox')
+    const result = await runMaa(actionArguments('run_task', GENERATED_TASK_NAME, true, strategyExecution?.userResource === true), {
       signal: executionSignal,
       timeoutMs: 30 * 60_000,
       outputLimit: hasOperatorBox ? 16 * 1024 * 1024 : undefined,
@@ -283,7 +346,12 @@ async function executeDocument(agent, signal, document, planSummary, options = {
       }
     }
   } finally {
-    if (activeExecutions.get(key) === active) activeExecutions.delete(key)
+    try {
+      if (strategyExecution) await strategyExecution.restore()
+    } finally {
+      if (strategyReserved) activeStrategyExecution = false
+      if (activeExecutions.get(key) === active) activeExecutions.delete(key)
+    }
   }
 }
 
@@ -351,7 +419,7 @@ export function apply(ctx) {
           const adjustments = patched && patched.applied.length > 0 ? `｜确认时调整：${patched.applied.join('、')}` : ''
           const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
           const planSummary = `${pending.planSummary}${adjustments}${note ? `｜备注（DSH 自行理解，不保证执行）：${note}` : ''}`
-          const result = await executeDocument(agent, signal, patched ? patched.document : pending.document, planSummary, { emulatorChecked: true })
+          const result = await executeDocument(agent, signal, patched ? patched.document : pending.document, planSummary, { emulatorChecked: true, strategy: pending.strategy })
           const text = formatCommandResult(result) + (note ? `\n\n备注（交给 DSH 自行理解，不保证执行）：${note}` : '')
           return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text }
         }
@@ -475,13 +543,107 @@ export function apply(ctx) {
     output: { schema: PREPARE_RESULT_SCHEMA, render: renderResult },
     async execute(args, exec) {
       const document = buildTaskDocument(args.steps)
-      const planSummary = summarizePlan(args.steps)
+      let memory
+      try {
+        const cliPath = await requireMaaCli()
+        const compatibility = await inspectMaaCompatibility(cliPath, exec.signal)
+        memory = await rememberPlanStrategies(args.steps, compatibility)
+      } catch (error) {
+        memory = memoryFallback(error, args.steps.length)
+      }
+      const planSummary = `${summarizePlan(args.steps)}${memorySummary(memory)}`
       const planJson = `${JSON.stringify(document, null, 2)}\n`
       const confirmation = await preparePendingPlan(exec.agent, { purpose: args.purpose, document, planJson, planSummary })
       exec.concludeTurn()
-      return { purpose: args.purpose, planJson, planSummary, confirmationCode: confirmation.confirmationCode, confirmationPhrase: confirmation.confirmationPhrase, expiresAt: confirmation.expiresAt }
+      return { purpose: args.purpose, planJson, planSummary, confirmationCode: confirmation.confirmationCode, confirmationPhrase: confirmation.confirmationPhrase, expiresAt: confirmation.expiresAt, memory }
     },
     presentCall: args => ({ card: 'terminal', title: `准备MAA计划：${args.purpose}` }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_prepare_strategy',
+    description: `Compile a user's free-form, multi-intent MAA strategy into real Integrated Strategy resource changes or a real Copilot job, then prepare the existing one-time confirmation flow. Use this instead of maa_prepare_plan when the request changes operator recruitment/E2 priorities, team-completeness conditions, collectible purchase/ban priorities, encounter choices, theme-specific strategy, tactical placement (including guarding the blue box or blocking the entrance), deployment order/location/direction, or kill-count-triggered actions. The model translates synonyms and context into these structured fields; the plugin validates them against the installed MAA resources. Never invent an operator group, collectible, event, map coordinate, or successful execution. Put any part that cannot be represented reliably in unsupportedRequirements with a concrete reason; supported parts may still run after confirmation. Roguelike resource files are changed only for the confirmed execution and are restored afterward (and recovered on the next run after interruption). Copilot coordinates use [x,y], actions run in array order, and kills is the MAA kill-count wait condition. This tool only prepares; it never operates the game until the user confirms.` ,
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['purpose', 'kind', 'task'],
+      properties: {
+        purpose: { type: 'string' },
+        kind: { type: 'string', enum: ['Roguelike', 'Copilot'] },
+        task: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            theme: { type: 'string', enum: ['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'] },
+            mode: { type: 'integer' }, startsCount: { type: 'integer' }, difficulty: { type: 'integer' },
+            squad: { type: 'string' }, coreChar: { type: 'string' }, roles: { type: 'string' },
+            useSupport: { type: 'boolean' }, useNonFriendSupport: { type: 'boolean' },
+            stageName: { type: 'string' }, formation: { type: 'boolean' },
+          },
+        },
+        recruitment: {
+          type: 'object', additionalProperties: false, properties: {
+            prioritize: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string' }, priority: { type: 'integer' }, skill: { type: 'integer' } } } },
+            promote: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string' }, priority: { type: 'integer' } } } },
+            teamComplete: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['groups', 'threshold'], properties: { groups: { type: 'array', items: { type: 'string' } }, threshold: { type: 'integer' } } } },
+          },
+        },
+        shopping: {
+          type: 'object', additionalProperties: false, properties: {
+            prioritize: { type: 'array', items: { type: 'string' } }, avoid: { type: 'array', items: { type: 'string' } },
+          },
+        },
+        encounters: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'choose'], properties: { name: { type: 'string' }, choose: { type: 'integer' }, optionCount: { type: 'integer' } } } },
+        operators: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string' }, skill: { type: 'integer' }, skillUsage: { type: 'integer' }, skillTimes: { type: 'integer' } } } },
+        groups: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'opers'], properties: { name: { type: 'string' }, opers: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string' }, skill: { type: 'integer' }, skillUsage: { type: 'integer' }, skillTimes: { type: 'integer' } } } } } } },
+        tactics: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['kind', 'name'], properties: { kind: { type: 'string', enum: ['guard_blue', 'block_entrance'] }, name: { type: 'string' }, kills: { type: 'integer' } } } },
+        actions: {
+          type: 'array', items: {
+            type: 'object', additionalProperties: false, required: ['type'], properties: {
+              type: { type: 'string', enum: ['Deploy', 'Skill', 'Retreat', 'SpeedUp', 'BulletTime', 'SkillUsage', 'Output', 'SkillDaemon', 'ResetStopwatch', 'SetUnitLocation'] },
+              name: { type: 'string' }, location: { type: 'array', items: { type: 'integer' } }, direction: { type: 'string' },
+              kills: { type: 'integer' }, costs: { type: 'integer' }, preDelay: { type: 'integer' }, postDelay: { type: 'integer' }, timeout: { type: 'integer' },
+              skillUsage: { type: 'integer' }, skillTimes: { type: 'integer' },
+            },
+          },
+        },
+        unsupportedRequirements: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['request', 'reason'], properties: { request: { type: 'string' }, reason: { type: 'string' } } } },
+      },
+    },
+    output: { schema: STRATEGY_PREPARE_RESULT_SCHEMA, render: renderResult },
+    async execute(args, exec) {
+      let strategy = compileStrategyRequest(args)
+      const cliPath = await requireMaaCli()
+      const [directory, compatibilityResult] = await Promise.all([
+        runMaa(queryArguments('resource_dir'), { cliPath, signal: exec.signal, timeoutMs: 30_000 }),
+        inspectMaaCompatibility(cliPath, exec.signal).catch(error => ({ error })),
+      ])
+      const resourceDir = directory.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1)
+      if (directory.exitCode !== 0 || !resourceDir) throw new Error(`无法读取 MAA 资源目录：${directory.stderr || directory.stdout || `exit ${directory.exitCode}`}`)
+      let memory
+      if (compatibilityResult.error) memory = memoryFallback(compatibilityResult.error, 1)
+      else {
+        try {
+          const applied = await applyStrategyMemory(strategy, { resourceDir, compatibility: compatibilityResult })
+          strategy = applied.strategy
+          memory = applied.memory
+        } catch (error) {
+          memory = memoryFallback(error, 1)
+        }
+      }
+      const preview = await previewStrategy(strategy, resourceDir)
+      const document = strategy.kind === 'Roguelike'
+        ? buildTaskDocument([strategy.step])
+        : { tasks: [{ type: 'Copilot', params: { filename: GENERATED_COPILOT_MARKER, formation: strategy.formation } }] }
+      const fallback = preview.unsupported.length ? `｜安全回退：${preview.unsupported.map(item => item.request).join('、')}` : ''
+      const planSummary = `${args.purpose}｜生效：${preview.supported.join('、')}${fallback}${memorySummary(memory)}`
+      const planJson = `${JSON.stringify(document, null, 2)}\n`
+      const confirmation = await preparePendingPlan(exec.agent, { purpose: args.purpose, document, planJson, planSummary, strategy })
+      exec.concludeTurn()
+      return {
+        purpose: args.purpose, planJson, planSummary,
+        confirmationCode: confirmation.confirmationCode, confirmationPhrase: confirmation.confirmationPhrase, expiresAt: confirmation.expiresAt,
+        supported: preview.supported, unsupported: preview.unsupported, memory,
+      }
+    },
+    presentCall: args => ({ card: 'terminal', title: `编译MAA策略：${args.purpose}` }),
   })
 
   ctx.tools.register({

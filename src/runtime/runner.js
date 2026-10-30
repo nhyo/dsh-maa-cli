@@ -67,14 +67,14 @@ export function queryArguments(operation) {
   return [...args]
 }
 
-export function actionArguments(action, taskName, batch = false) {
+export function actionArguments(action, taskName, batch = false, userResource = false) {
   const fixed = ACTION_ARGUMENTS[action]
   if (fixed !== undefined) return [...fixed]
   if (action !== 'run_task') throw new TypeError(`Unsupported maa-cli action: ${action}`)
   if (typeof taskName !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(taskName)) {
     throw new TypeError('taskName must use 1-64 ASCII letters, digits, dot, underscore, or hyphen')
   }
-  return ['run', taskName, ...(batch ? ['--batch'] : [])]
+  return ['run', taskName, ...(userResource ? ['--user-resource'] : []), ...(batch ? ['--batch'] : [])]
 }
 
 export async function runMaa(args, options = {}) {

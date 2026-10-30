@@ -24,14 +24,16 @@ test('registers a zero-token command plus prepare-only model tools', () => {
     commands: { register: command => commands.push(command) },
   })
   assert.deepEqual(commands.map(command => command.name), ['maa'])
-  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_operator_box', 'maa_training_advice', 'maa_prepare_plan', 'maa_doctor', 'maa_runtime'])
+  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_operator_box', 'maa_training_advice', 'maa_prepare_plan', 'maa_prepare_strategy', 'maa_doctor', 'maa_runtime'])
   assert.deepEqual(tools[0].parameters.required, ['operation'])
   assert.deepEqual(tools[2].parameters.required, ['useCached'])
   assert.match(tools[2].description, /MANDATORY for every operator training-advice request/)
   assert.match(tools[2].description, /restarting DSH Desktop/)
   assert.match(tools[2].description, /do not perform unnecessary recursive searches or repeated scans/)
   assert.deepEqual(tools[3].parameters.required, ['purpose', 'steps'])
-  assert.deepEqual(tools[4].parameters.properties, {})
+  assert.deepEqual(tools[4].parameters.required, ['purpose', 'kind', 'task'])
+  assert.match(tools[4].description, /real Integrated Strategy resource changes or a real Copilot job/)
+  assert.deepEqual(tools[5].parameters.properties, {})
   assert.match(tools[3].description, /does not create another model call/)
   assert.match(tools[1].description, /Always call this/)
 })
@@ -164,6 +166,7 @@ test('maps the approved action vocabulary', () => {
   assert.deepEqual(actionArguments('closedown'), ['closedown'])
   assert.deepEqual(actionArguments('run_task', 'daily-safe'), ['run', 'daily-safe'])
   assert.deepEqual(actionArguments('run_task', 'dsh-generated', true), ['run', 'dsh-generated', '--batch'])
+  assert.deepEqual(actionArguments('run_task', 'dsh-generated', true, true), ['run', 'dsh-generated', '--user-resource', '--batch'])
 })
 
 test('builds an ordered natural-language plan with resource-safe defaults', () => {
