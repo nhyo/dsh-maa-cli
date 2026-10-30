@@ -1,6 +1,9 @@
+import { resolveRoguelikeTheme } from './planner.js'
+
 const HELP = [
   '常用 MAA 本地命令（不会调用模型）：',
   '/maa fight 1-7 2  或  /maa 刷 1-7 2次',
+  '/maa rouge        或  /maa 肉鸽（零模型准备肉鸽计划，默认主题 傀影，默认 1 局；可追加 主题 [次数] [key=value…]）',
   '/maa startup      或  /maa 启动游戏',
   '/maa infrast      或  /maa 基建换班',
   '/maa award        或  /maa 领取奖励',
@@ -9,6 +12,7 @@ const HELP = [
   '/maa stop         或  /maa 停止任务',
   '/maa confirm MAA-XXXXXX  确认并执行待确认计划（可附加肉鸽参数，如 theme=Sarkaz mode=0 difficulty=4 squad=蓝图测绘分队）',
   '                  末尾也可加 note=<URL 编码的备注>，备注只交给 DSH 自行参考，不保证执行',
+  '/maa peek MAA-XXXXXX     只读查看待确认计划的摘要与参数（面板内部使用，不会执行）',
   '/maa setup        安装本机 MAA 运行时（首次使用）',
   '',
   '作战默认不使用理智药、临期理智药或源石；基建默认不使用无人机。',
@@ -45,6 +49,8 @@ export function parseLocalMaaCommand(rawInput) {
 
   const confirm = input.match(/^confirm\s+(MAA-[A-F0-9]{6})(?:\s+(.+))?$/iu)
   if (confirm) return { kind: 'confirm', confirmationCode: confirm[1].toUpperCase(), overrides: parseOverrides(confirm[2]) }
+  const peek = input.match(/^(?:peek|查看计划)\s*(MAA-[A-F0-9]{6})?$/iu)
+  if (peek) return { kind: 'peek', confirmationCode: peek[1] ? peek[1].toUpperCase() : '' }
   if (/^(?:stop|停止|停止任务|终止任务)$/iu.test(input)) return { kind: 'stop' }
   if (/^(?:setup|安装运行时|初始化)$/iu.test(input)) return { kind: 'setup' }
 
@@ -64,6 +70,22 @@ export function parseLocalMaaCommand(rawInput) {
     return {
       kind: 'execute', purpose: '扫描干员 Box',
       steps: [{ type: 'StartUp', clientType: 'Official' }, { type: 'OperBox' }],
+    }
+  }
+
+  // Zero-model roguelike: `/maa rogue <theme> [次数] [key=value ...]`. It only
+  // PREPARES the same Roguelike task the model's plan tool would produce; the
+  // client turns the returned notice into the composer confirmation panel and
+  // the button runs `/maa confirm`, so nothing is executed without a click.
+  const rogue = input.match(/^(?:rouge|rogue|roguelike|肉鸽|自动肉鸽)(?:\s+(\S+))?(?:\s+(\d+))?(?:\s+(.+))?$/iu)
+  if (rogue) {
+    const theme = rogue[1] ? resolveRoguelikeTheme(rogue[1]) : 'Phantom'
+    const count = rogue[2] === undefined ? 1 : Number(rogue[2])
+    if (!Number.isInteger(count) || count < 1 || count > 99999) throw new Error('肉鸽次数必须是 1–99999。')
+    return {
+      kind: 'plan', purpose: `肉鸽 ${theme} ×${count}`,
+      steps: [{ type: 'Roguelike', theme, startsCount: count }],
+      roguelikeOverrides: parseOverrides(rogue[3]),
     }
   }
 

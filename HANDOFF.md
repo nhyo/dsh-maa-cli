@@ -8,7 +8,7 @@
 - 运行环境：Windows 11 x64 + DSH Desktop 0.2.1-rc.3（Electron，nightly）；插件以 `link:E:/DESK/dsh-maa-cli` 的形式装进 `C:\Users\nhyo\.dsh\profiles\desktop`，改完代码**必须重启 DSH Desktop** 才生效。
 - 判断「改动是否真的加载了」：`Get-Process *DeepSeek* | Select Id,StartTime` 的启动时间必须晚于 `client.js` / `index.js` 的 `LastWriteTime`。另外模型侧 `maa_prepare_plan` 的工具说明里也能看出服务端版本（旧版本写 `startsCount (1-20)`，新版本写 `(1-99999; the confirmation panel starts at 9999)`）。
 - 版本：`package.json` 已是 **0.9.2**（未发布）；npm 上的 0.9.1 是旧代码，不含本轮任何改动。
-- 测试：`node --test`，当前 **82/82 通过**，无第三方依赖，无需安装。
+- 测试：`node --test`，当前 **88/88 通过**，无第三方依赖，无需安装。
 
 ## 2. 本轮改动（按文件）
 
@@ -18,13 +18,17 @@
 - `ROGUELIKE_MODE_VALUES = [0, 1, 4, 5, 6, 7, 10001, 20001, 30001]`，并在 `buildStep` 里用白名单校验 `mode`（此前是 `optionalInteger(..., 0, 5)`，会把 6/7/10001/20001/30001 直接判为越界）。
 - `startsCount` 上限从 20 放宽到 **99999**（`ROGUELIKE_OVERRIDES` 与 `buildStep` 两处），对应 MaaCore `starts_count`。
 - `ROGUELIKE_OVERRIDES` 新增三个开关：`useFoldartal`（`use_foldartal`）、`checkCollapsalParadigms`（`check_collapsal_paradigms`）、`refreshTraderWithDice`（`refresh_trader_with_dice`），`ROGUELIKE_OVERRIDE_LABELS` 同步补中文名。现在共 23 个可调键。
+- 新增 `roguelikePanelFromDocument(document)`：把 `Roguelike` 任务的 snake_case `params` 映射回面板的 camelCase 键（`PANEL_KEY_BY_PARAM`），供 `/maa peek` 回读；计划里没有肉鸽任务时返回 `null`。
 - `applyRoguelikeOverrides(document, overrides)` 仍然只在参数合法时才改动任务 JSON，并且**不会**把插件专用键写进 MaaCore 任务文件（有测试断言）。
+- 新增 `ROGUELIKE_THEME_LABELS`（英文值 → 中文全名）让计划摘要显示「肉鸽 萨卡兹的无终奇语 ×3」而不是 `Sarkaz`；新增 `ROGUELIKE_THEME_ALIASES` + `resolveRoguelikeTheme(input)`（中英文/全名 → 规范英文值，非法值抛「无法识别肉鸽主题」）。
 
 ### `local-command.js` —— 确认命令的表单
 
 - confirm 正则改为 `^confirm\s+(MAA-[A-F0-9]{6})(?:\s+(.+))?$`，把 `key=value` 列表放进 `overrides`。
+- **零模型肉鸽命令**：`/^(?:rouge|rogue|roguelike|肉鸽|自动肉鸽)(?:\s+(\S+))?(?:\s+(\d+))?(?:\s+(.+))?$/`，返回 `{ kind:'plan', steps:[{type:'Roguelike', theme, startsCount}], roguelikeOverrides }`——**只准备、不执行**，客户端收到命令结果后弹面板。主题可省略（默认 `Phantom`）并走 `resolveRoguelikeTheme`，位置参数是局数（默认 1，1–99999），其余 token 交给 `parseOverrides`。
+- `peek`：`/^(?:peek|查看计划)\s*(MAA-[A-F0-9]{6})?$/`，返回 `{ kind:'peek', confirmationCode }`，只读回读待确认计划（面板用它填参数），不消费。
 - `parseOverrides(raw)` 解析 `key=value`；token 不合法时抛「无法识别的确认参数」。
-- HELP 文本补了 `note=` 的说明。
+- HELP 文本补了 `rogue` 与 `note=` 的说明。
 
 ### `confirmation.js` —— 消费确认码前的只读查看
 
@@ -35,7 +39,10 @@
 - confirm 分支的新顺序：`ensureMaaCli` → `checkEmulator` → `peekPendingPlan`（仅当带参数）→ `applyRoguelikeOverrides` → `consumePlanFromHumanGesture` → `executeDocument(patched.document ?? pending.document, ...)`。**参数非法时计划不会被消耗**，用户可以改完再点。
 - 新增 `export function decodeConfirmationNote(raw)`：`decodeURIComponent`（非法编码报错）→ 把 `\r\n\t` 折成空格 → trim → 空值返回 `''` → 超过 120 字符报错。备注不进 MaaCore，只拼进结果文本和执行摘要（`｜备注（DSH 自行理解，不保证执行）：…`）。
 - `maa_prepare_plan` 的工具说明改了两处：`startsCount` 写成 `(1-99999; the confirmation panel starts at 9999)`；补一句面板里有备注栏、备注由 DSH 自行理解但不保证执行。
-- `/maa` 命令的 `input.hint` 增加 `note=%E5%A4%87%E6%B3%A8` 示例。
+- `/maa` 命令的 `input.hint` 增加 `note=%E5%A4%87%E6%B3%A8` 与 `rogue Sami 3 mode=0 difficulty=4` 示例。
+- 命令 handler 里，`plan` 分支（`/maa rouge`）只做 `buildTaskDocument` + `applyRoguelikeOverrides` + `preparePendingPlan(agent, { planSummary, document })`，然后返回「MAA 计划待确认：… 确认码 MAA-XXXXXX」——**不执行**。客户端靠这段固定文案识别计划通知。
+- `peek` 分支返回 `JSON.stringify({ code, summary, panel: roguelikePanelFromDocument(document) })`；只读、不消费，面板用它填初值。
+- `execute` 分支（fight/startup/… 等）保持原样：`buildTaskDocument` → 可选 `applyRoguelikeOverrides`（摘要追加 `｜参数：…`）→ `executeDocument`。
 
 ### `client.js` —— 客户端确认面板（单文件改动最大，+421 行）
 
@@ -74,12 +81,14 @@
 6. 备注栏：用户在「30 分钟内有效」右侧写一句话，随确认命令回到 DSH，由 DSH 自行理解执行、不保证执行；服务端强制 120 字上限与 URL 编码校验。
 7. 参数错误时计划不被消耗（先 `peekPendingPlan` 校验，再 `consumePlanFromHumanGesture`）。
 8. 面板可最小化 / 删除，不再挡屏幕；宽度与圆角与输入框一致。
+8.1 客户端监听 `command/executed`：见到含「MAA 计划待确认」的命令结果就 `/maa peek <code>` 回读计划，把参数塞进 dock store 并弹出面板——这条路径不经过模型。
+9. **肉鸽可以零模型调用**：`/maa rouge <主题> [次数] [key=value…]`（别名 `rogue` / `roguelike` / `肉鸽` / `自动肉鸽`）只准备计划并弹出参数面板，点「确认并执行 MAA」才跑；面板、改参数、确认都在本地命令通道，全程零模型调用。
 
 ## 4. 验证方式（可复现）
 
 ```powershell
 cd E:\DESK\dsh-maa-cli
-node --test                                        # 82/82 通过
+node --test                                        # 88/88 通过
 node -e "const fs=require('fs'); new Function('window', fs.readFileSync('client.js','utf8')); console.log('syntax ok')"
 node -e "import('./index.js').then(m=>{const c={commands:[],tools:[]};m.apply({commands:{register:d=>c.commands.push(d.name)},tools:{register:d=>c.tools.push(d.name)}});console.log(c)})"
 ```
@@ -94,7 +103,10 @@ node -e "import('./index.js').then(m=>{const c={commands:[],tools:[]};m.apply({c
 - 分队 / 职业组 / 干员名单在 MAA 资源里是图片识别，没有文本表；本地 `MAA.dll` 里也取不到主题显示名。现有名单是手工固化 + 官方文档「推荐开局」表，更新要人工同步。
 - 面板默认值顺序：计划值 → 主题推荐 → 内置默认；**刷取次数例外，永远从 9999 起**。
 - 备注只走 `note=`，解码后不进任务 JSON；`decodeConfirmationNote` 对非法 URL 编码、超 120 字会抛错。
+- `client.js` 的 `panelDefaults(step)` 是面板初值的唯一来源（推荐开局 + 计划覆盖）；`commandRunner(ctx, sessionId)` 是本地命令的唯一出口，工具卡与命令通知都复用它。
 - `client.js` 是字符串拼接式的 `h(...)`，没有 JSX/编译步骤；改完用 `new Function('window', src)` 做语法检查最快。
+- 零模型肉鸽命令**不直接执行**：`/maa rouge` 只 `preparePendingPlan`，再由客户端 `command/executed` 监听器 `/maa peek` 回读并弹面板；点确认才 `/maa confirm`。别把它改回直跑，否则又变成「敲命令即开打」。命令里的局数默认 **1**，面板里可再改（默认 9999）。
+- `planner.js` 的 `ROGUELIKE_THEME_LABELS`（英文→中文）只用于摘要显示；`ROGUELIKE_THEMES`（Set）才是 MaaCore 接受的规范值。
 
 ## 6. 未完成 / 建议下一步
 

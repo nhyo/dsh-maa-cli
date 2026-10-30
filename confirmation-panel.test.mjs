@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { parseLocalMaaCommand } from './local-command.js'
-import { applyRoguelikeOverrides, buildTaskDocument } from './planner.js'
+import { applyRoguelikeOverrides, buildTaskDocument, resolveRoguelikeTheme, roguelikePanelFromDocument } from './planner.js'
 import { decodeConfirmationNote } from './index.js'
 
 function documentOf(steps) {
@@ -186,4 +186,98 @@ test('decodes the 备注 for DSH and rejects unusable values', () => {
   assert.equal(decodeConfirmationNote('a%0Ab'), 'a b')
   assert.throws(() => decodeConfirmationNote('%E6%89'), /URL 编码不合法/)
   assert.throws(() => decodeConfirmationNote('x'.repeat(121)), /最多 120 个字符/)
+})
+
+test('resolves english and chinese roguelike theme names', () => {
+  assert.equal(resolveRoguelikeTheme('Sami'), 'Sami')
+  assert.equal(resolveRoguelikeTheme('萨米'), 'Sami')
+  assert.equal(resolveRoguelikeTheme('探索者的银凇止境'), 'Sami')
+  assert.equal(resolveRoguelikeTheme('界园'), 'JieGarden')
+  assert.equal(resolveRoguelikeTheme('黑流树海'), 'BlackFlow')
+  assert.throws(() => resolveRoguelikeTheme('乌萨斯'), /无法识别肉鸽主题/)
+  assert.throws(() => resolveRoguelikeTheme(''), /无法识别肉鸽主题/)
+})
+
+test('parses the zero-model rogue command', () => {
+  assert.deepEqual(parseLocalMaaCommand('rogue 萨米 3'), {
+    kind: 'plan',
+    purpose: '肉鸽 Sami ×3',
+    steps: [{ type: 'Roguelike', theme: 'Sami', startsCount: 3 }],
+    roguelikeOverrides: {},
+  })
+
+  // No count means one run; the theme may also be the full chinese name.
+  const one = parseLocalMaaCommand('肉鸽 黑流树海')
+  assert.equal(one.steps[0].theme, 'BlackFlow')
+  assert.equal(one.steps[0].startsCount, 1)
+
+  // key=value tokens are pulled out for applyRoguelikeOverrides.
+  const tuned = parseLocalMaaCommand('roguelike Sarkaz 2 mode=0 difficulty=4 useSupport=true')
+  assert.equal(tuned.steps[0].theme, 'Sarkaz')
+  assert.equal(tuned.steps[0].startsCount, 2)
+  assert.deepEqual(tuned.roguelikeOverrides, { mode: '0', difficulty: '4', useSupport: 'true' })
+
+  // A mode-only invocation keeps the default count.
+  const modeOnly = parseLocalMaaCommand('rogue JieGarden mode=20001')
+  assert.equal(modeOnly.steps[0].startsCount, 1)
+  assert.deepEqual(modeOnly.roguelikeOverrides, { mode: '20001' })
+})
+
+test('rejects bad zero-model rogue commands', () => {
+  assert.throws(() => parseLocalMaaCommand('rogue 乌萨斯 1'), /无法识别肉鸽主题/)
+  assert.throws(() => parseLocalMaaCommand('rogue Sami 0'), /肉鸽次数必须是 1–99999/)
+  assert.throws(() => parseLocalMaaCommand('rogue Sami 100000'), /肉鸽次数必须是 1–99999/)
+  // 'rogue' without arguments is now valid (defaults to Phantom ×1)
+  assert.throws(() => parseLocalMaaCommand('rogue Sami 2 theme'), /无法识别的确认参数/)
+})
+
+test('builds the zero-model rogue task exactly like the panel path', () => {
+  const parsed = parseLocalMaaCommand('rogue 萨卡兹 3 difficulty=4 squad=蓝图测绘分队 roles=稳扎稳打 coreChar=维什戴尔 useSupport=false')
+  const document = buildTaskDocument(parsed.steps)
+  const outcome = applyRoguelikeOverrides(document, parsed.roguelikeOverrides)
+  const params = outcome.document.tasks[0].params
+
+  assert.equal(outcome.document.tasks[0].type, 'Roguelike')
+  assert.equal(params.theme, 'Sarkaz')
+  assert.equal(params.starts_count, 3)
+  assert.equal(params.difficulty, 4)
+  assert.equal(params.squad, '蓝图测绘分队')
+  assert.equal(params.roles, '稳扎稳打')
+  assert.equal(params.core_char, '维什戴尔')
+  assert.equal(params.use_support, false)
+  // The plugin-only summary never leaks into the MaaCore task JSON.
+  assert.deepEqual(Object.keys(outcome.document), ['tasks'])
+})
+
+test('accepts the /maa rouge spelling and parses peek', () => {
+  const rouge = parseLocalMaaCommand('rouge 萨米 2')
+  assert.equal(rouge.kind, 'plan')
+  assert.equal(rouge.steps[0].theme, 'Sami')
+  assert.equal(rouge.steps[0].startsCount, 2)
+
+  // No theme means default Phantom, no count means default 1
+  const def = parseLocalMaaCommand('rouge')
+  assert.equal(def.kind, 'plan')
+  assert.equal(def.steps[0].theme, 'Phantom')
+  assert.equal(def.steps[0].startsCount, 1)
+
+  assert.deepEqual(parseLocalMaaCommand('peek MAA-1A2B3C'), { kind: 'peek', confirmationCode: 'MAA-1A2B3C' })
+  assert.deepEqual(parseLocalMaaCommand('查看计划'), { kind: 'peek', confirmationCode: '' })
+})
+
+test('maps a pending document back to the confirmation panel', () => {
+  const document = buildTaskDocument([{ type: 'Roguelike', theme: 'Sarkaz', startsCount: 3, difficulty: 4, squad: '蓝图测绘分队' }])
+  const patched = applyRoguelikeOverrides(document, { useSupport: 'true', startWithEliteTwo: 'true' }).document
+  const panel = roguelikePanelFromDocument(patched)
+
+  assert.equal(panel.theme, 'Sarkaz')
+  assert.equal(panel.startsCount, 3)
+  assert.equal(panel.difficulty, 4)
+  assert.equal(panel.squad, '蓝图测绘分队')
+  assert.equal(panel.useSupport, true)
+  assert.equal(panel.startWithEliteTwo, true)
+  // Panel keys are camelCase; no MaaCore snake_case key leaks out.
+  assert.equal(panel.starts_count, undefined)
+
+  assert.equal(roguelikePanelFromDocument(buildTaskDocument([{ type: 'StartUp' }])), null)
 })

@@ -196,36 +196,44 @@ window.__ModuleLoader__.load({
       const steps = args && Array.isArray(args.steps) ? args.steps : []
       const step = steps.find(item => item && item.type === 'Roguelike')
       if (!step) return null
-      const theme = ROGUELIKE_PRESETS[step.theme] ? step.theme : 'Phantom'
+      return panelDefaults(step)
+    }
+
+    // Panel values for one roguelike step. Missing fields fall back to the
+    // 推荐开局 values MAA publishes for that theme, so a plan that only names a
+    // theme still opens a complete, sane form.
+    function panelDefaults(step) {
+      const value = step || {}
+      const theme = ROGUELIKE_PRESETS[value.theme] ? value.theme : 'Phantom'
       const preset = ROGUELIKE_PRESETS[theme]
-      const char = typeof step.coreChar === 'string' && step.coreChar ? step.coreChar : preset.coreChar
+      const char = typeof value.coreChar === 'string' && value.coreChar ? value.coreChar : preset.coreChar
       const charPreset = preset.chars.find(function (item) { return item.name === char })
       return {
         theme: theme,
-        mode: Number.isInteger(step.mode) ? step.mode : 0,
+        mode: Number.isInteger(value.mode) ? value.mode : 0,
         // The panel always starts at 9999 (MAA's own default is effectively
         // unlimited); the field is a digit input so any count can be typed.
         startsCount: 9999,
-        difficulty: Number.isInteger(step.difficulty) ? step.difficulty : preset.difficulty,
-        squad: typeof step.squad === 'string' && step.squad ? step.squad : preset.squad,
-        roles: typeof step.roles === 'string' && step.roles ? step.roles : preset.roles[0],
+        difficulty: Number.isInteger(value.difficulty) ? value.difficulty : preset.difficulty,
+        squad: typeof value.squad === 'string' && value.squad ? value.squad : preset.squad,
+        roles: typeof value.roles === 'string' && value.roles ? value.roles : preset.roles[0],
         coreChar: char,
-        useSupport: typeof step.useSupport === 'boolean' ? step.useSupport : Boolean(charPreset && charPreset.useSupport),
-        useNonFriendSupport: step.useNonFriendSupport === true,
-        stopAtFinalBoss: step.stopAtFinalBoss === true,
-        stopAtMaxLevel: step.stopAtMaxLevel === true,
-        investmentEnabled: step.investmentEnabled !== false,
-        investmentsCount: Number.isInteger(step.investmentsCount) ? step.investmentsCount : 999,
-        stopWhenInvestmentFull: step.stopWhenInvestmentFull === true,
-        investmentWithMoreScore: step.investmentWithMoreScore === true,
-        startWithEliteTwo: step.startWithEliteTwo === true,
-        onlyStartWithEliteTwo: step.onlyStartWithEliteTwo === true,
-        monthlySquadAutoIterate: step.monthlySquadAutoIterate === true,
-        deepExplorationAutoIterate: step.deepExplorationAutoIterate === true,
-        findPlayTimeTarget: Number.isInteger(step.findPlayTimeTarget) ? step.findPlayTimeTarget : 1,
-        useFoldartal: step.useFoldartal === true,
-        checkCollapsalParadigms: step.checkCollapsalParadigms === true,
-        refreshTraderWithDice: step.refreshTraderWithDice === true,
+        useSupport: typeof value.useSupport === 'boolean' ? value.useSupport : Boolean(charPreset && charPreset.useSupport),
+        useNonFriendSupport: value.useNonFriendSupport === true,
+        stopAtFinalBoss: value.stopAtFinalBoss === true,
+        stopAtMaxLevel: value.stopAtMaxLevel === true,
+        investmentEnabled: value.investmentEnabled !== false,
+        investmentsCount: Number.isInteger(value.investmentsCount) ? value.investmentsCount : 999,
+        stopWhenInvestmentFull: value.stopWhenInvestmentFull === true,
+        investmentWithMoreScore: value.investmentWithMoreScore === true,
+        startWithEliteTwo: value.startWithEliteTwo === true,
+        onlyStartWithEliteTwo: value.onlyStartWithEliteTwo === true,
+        monthlySquadAutoIterate: value.monthlySquadAutoIterate === true,
+        deepExplorationAutoIterate: value.deepExplorationAutoIterate === true,
+        findPlayTimeTarget: Number.isInteger(value.findPlayTimeTarget) ? value.findPlayTimeTarget : 1,
+        useFoldartal: value.useFoldartal === true,
+        checkCollapsalParadigms: value.checkCollapsalParadigms === true,
+        refreshTraderWithDice: value.refreshTraderWithDice === true,
         // Free-form note for DSH itself; it never reaches MaaCore.
         note: '',
       }
@@ -741,23 +749,67 @@ window.__ModuleLoader__.load({
     }
 
     const inject = ['slots', 'remote', 'remote.commands']
+
+    // Run one `/maa …` line on the local command plane (zero model calls) and
+    // hand the settled result back to the caller.
+    function commandRunner(ctx, sessionId) {
+      return async function (line) {
+        const response = await ctx.remote.commands.execute(sessionId, line, [])
+        if (!response || response.ok !== true) {
+          const failure = response && response.error
+          throw new Error(failure && failure.message ? failure.message : '无法连接 DSH 本地命令服务。')
+        }
+        if (!response.value) return { kind: 'error', text: 'DSH 未识别 /maa 命令。' }
+        return response.value.result
+      }
+    }
+
+    // `/maa rouge …` only prepares a plan on the host. Its command result is a
+    // plain notice, so this listener turns that notice into the composer
+    // confirmation panel: it reads the pending plan back with the read-only
+    // `/maa peek`, then raises the dock. Execution still needs the user's click
+    // and runs through `/maa confirm`; no model turn is involved anywhere.
+    function attachPlanNotices(ctx) {
+      ctx.on('command/executed', function (sessionId, name, result) {
+        if (name !== 'maa' || !result || result.kind === 'error' || typeof result.text !== 'string') return
+        if (result.text.indexOf('MAA 计划待确认') < 0) return
+        const match = result.text.match(/MAA-[A-F0-9]{6}/)
+        if (!match) return
+        const code = match[0].toUpperCase()
+        const execute = commandRunner(ctx, sessionId)
+        const store = storeFor(sessionId)
+        Promise.resolve(execute('/maa peek ' + code)).then(function (peeked) {
+          if (!peeked || typeof peeked.text !== 'string') return
+          let payload = null
+          try {
+            payload = JSON.parse(peeked.text)
+          } catch (error) {
+            return
+          }
+          if (!payload || payload.code !== code) return
+          const panel = payload.panel && typeof payload.panel === 'object' ? payload.panel : null
+          const defaults = panelDefaults(panel ? { theme: panel.theme } : null)
+          store.set({
+            code: code,
+            summary: typeof payload.summary === 'string' && payload.summary ? payload.summary : 'MAA 计划',
+            execute: execute,
+            roguelike: panel ? Object.assign(defaults, panel) : defaults,
+            params: null,
+          })
+        }, function () {})
+      })
+    }
+
     function apply(ctx) {
       installStyles()
+      attachPlanNotices(ctx)
       ctx.slots.inject('tool.call.toolview', function () {
         return ctx.slots.register({
           name: 'tool.call.toolview',
           key: 'maa_prepare_plan',
           inject: function (sessionId) {
             return {
-              execute: async function (line) {
-                const response = await ctx.remote.commands.execute(sessionId, line, [])
-                if (!response || response.ok !== true) {
-                  const failure = response && response.error
-                  throw new Error(failure && failure.message ? failure.message : '无法连接 DSH 本地命令服务。')
-                }
-                if (!response.value) return { kind: 'error', text: 'DSH 未识别 /maa 命令。' }
-                return response.value.result
-              },
+              execute: commandRunner(ctx, sessionId),
               store: storeFor(sessionId),
             }
           },

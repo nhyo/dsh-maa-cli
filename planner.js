@@ -7,6 +7,32 @@ const CLIENTS = new Set(['Official', 'Bilibili', 'Txwy', 'YoStarEN', 'YoStarJP',
 const FACILITIES = new Set(['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Dorm'])
 const DRONES = new Set(['_NotUse', 'Money', 'SyntheticJade', 'CombatRecord', 'PureGold', 'OriginStone', 'Chip'])
 const ROGUELIKE_THEMES = new Set(['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'])
+
+export const ROGUELIKE_THEME_LABELS = {
+  Phantom: '傀影与猩红孤钻',
+  Mizuki: '水月与深蓝之树',
+  Sami: '探索者的银凇止境',
+  Sarkaz: '萨卡兹的无终奇语',
+  JieGarden: '岁的界园志异',
+  BlackFlow: '黑流树海',
+}
+
+const ROGUELIKE_THEME_ALIASES = {
+  傀影: 'Phantom', 傀影与猩红孤钻: 'Phantom',
+  水月: 'Mizuki', 水月与深蓝之树: 'Mizuki',
+  萨米: 'Sami', 探索者的银凇止境: 'Sami',
+  萨卡兹: 'Sarkaz', 萨卡兹的无终奇语: 'Sarkaz',
+  界园: 'JieGarden', 岁的界园志异: 'JieGarden',
+  黑流树海: 'BlackFlow',
+}
+
+export function resolveRoguelikeTheme(input) {
+  const value = String(input ?? '').trim()
+  if (ROGUELIKE_THEMES.has(value)) return value
+  const mapped = ROGUELIKE_THEME_ALIASES[value]
+  if (mapped) return mapped
+  throw new Error(`无法识别肉鸽主题：${value || '(空)'}；可选 ${[...ROGUELIKE_THEMES].join(' / ')}（中文：傀影 / 水月 / 萨米 / 萨卡兹 / 界园 / 黑流树海）`)
+}
 const STEP_TYPES = new Set([
   'StartUp', 'Fight', 'Infrast', 'Recruit', 'Mall', 'Award', 'Roguelike',
   'ReclamationAlgorithm', 'Depot', 'OperBox', 'Custom', 'CloseDown',
@@ -103,6 +129,33 @@ export function applyRoguelikeOverrides(document, overrides) {
   // `applied` carries the human-readable summary back to the command handler;
   // it is never written into the task JSON MaaCore reads.
   return { document: { ...document, tasks }, applied: described }
+}
+
+// MaaCore param name -> the camelCase key the confirmation panel edits. The
+// panel is rendered from the pending document so `/maa rogue` can open exactly
+// the settings that will be executed, without a model turn.
+const PANEL_KEY_BY_PARAM = {
+  theme: 'theme', mode: 'mode', squad: 'squad', core_char: 'coreChar', roles: 'roles',
+  starts_count: 'startsCount', difficulty: 'difficulty', use_support: 'useSupport',
+  use_nonfriend_support: 'useNonFriendSupport', stop_at_final_boss: 'stopAtFinalBoss',
+  stop_at_max_level: 'stopAtMaxLevel', investment_enabled: 'investmentEnabled',
+  investments_count: 'investmentsCount', stop_when_investment_full: 'stopWhenInvestmentFull',
+  investment_with_more_score: 'investmentWithMoreScore', start_with_elite_two: 'startWithEliteTwo',
+  only_start_with_elite_two: 'onlyStartWithEliteTwo', monthly_squad_auto_iterate: 'monthlySquadAutoIterate',
+  deep_exploration_auto_iterate: 'deepExplorationAutoIterate', find_playTime_target: 'findPlayTimeTarget',
+  use_foldartal: 'useFoldartal', check_collapsal_paradigms: 'checkCollapsalParadigms',
+  refresh_trader_with_dice: 'refreshTraderWithDice',
+}
+
+export function roguelikePanelFromDocument(document) {
+  const tasks = isPlainObject(document) && Array.isArray(document.tasks) ? document.tasks : []
+  const task = tasks.find(item => isPlainObject(item) && item.type === 'Roguelike' && isPlainObject(item.params))
+  if (!task) return null
+  const panel = {}
+  for (const [param, key] of Object.entries(PANEL_KEY_BY_PARAM)) {
+    if (task.params[param] !== undefined) panel[key] = task.params[param]
+  }
+  return panel
 }
 
 function coerceOverride(spec, raw, key) {
@@ -273,7 +326,7 @@ function summarizeStep(step) {
     case 'Recruit': return `公招${step.times ?? 0}次${step.expedite ? '，使用加急许可' : ''}`
     case 'Mall': return `信用商店${step.shopping ? '并购物' : '仅收取/访问'}${step.forceShoppingIfCreditFull ? '，信用溢出时忽略黑名单' : ''}`
     case 'Award': return '领取指定奖励'
-    case 'Roguelike': return `肉鸽 ${step.theme} ×${step.startsCount}`
+    case 'Roguelike': return `肉鸽 ${ROGUELIKE_THEME_LABELS[step.theme] ?? step.theme} ×${step.startsCount}`
     case 'ReclamationAlgorithm': return `生息演算 mode=${step.mode ?? 1}`
     case 'Depot': return '识别仓库'
     case 'OperBox': return '识别干员列表'

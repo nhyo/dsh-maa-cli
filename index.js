@@ -1,5 +1,5 @@
 import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa } from './runner.js'
-import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask, applyRoguelikeOverrides } from './planner.js'
+import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask, applyRoguelikeOverrides, roguelikePanelFromDocument } from './planner.js'
 import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan } from './confirmation.js'
 import { parseLocalMaaCommand } from './local-command.js'
 import { formatReport, runDoctor } from './doctor.js'
@@ -291,7 +291,7 @@ export function apply(ctx) {
     name: 'maa',
     definitionId: 'dsh-maa-cli/maa',
     description: '直接运行常用 MAA 操作，不调用模型',
-    input: { hint: '<help | setup | fight 1-7 2 | startup | infrast | award | closedown | stop | confirm MAA-XXXXXX theme=Sarkaz mode=0 difficulty=4 squad=蓝图测绘分队 roles=稳扎稳打 coreChar=维什戴尔 note=%E5%A4%87%E6%B3%A8>' },
+    input: { hint: '<help | setup | fight 1-7 2 | rouge [主题] [n] [key=value…] | peek MAA-XXXXXX | startup | infrast | award | closedown | stop | confirm MAA-XXXXXX theme=Sarkaz mode=0 difficulty=4 squad=蓝图测绘分队 roles=稳扎稳打 coreChar=维什戴尔 note=%E5%A4%87%E6%B3%A8>' },
     async handler({ agent, rawInput, signal }) {
       try {
         const parsed = parseLocalMaaCommand(rawInput)
@@ -313,6 +313,23 @@ export function apply(ctx) {
           return stopActiveExecution(agent)
             ? { kind: 'success', text: '已停止当前 DSH 会话启动的 MAA 任务。游戏和模拟器没有被关闭。' }
             : { kind: 'error', text: '当前 DSH 会话没有正在执行的 MAA 任务。' }
+        }
+        if (parsed.kind === 'peek') {
+          // Read-only: the confirmation panel asks for the pending plan's
+          // summary and current roguelike settings so `/maa rogue` can show the
+          // panel without any model turn. Nothing is consumed here.
+          const pending = await peekPendingPlan(agent)
+          if (parsed.confirmationCode && parsed.confirmationCode !== pending.confirmationCode) {
+            throw new Error('MAA 确认码与待确认计划不一致。')
+          }
+          return {
+            kind: 'success',
+            text: JSON.stringify({
+              code: pending.confirmationCode,
+              summary: pending.planSummary,
+              panel: roguelikePanelFromDocument(pending.document),
+            }),
+          }
         }
         if (parsed.kind === 'confirm') {
           // The slash command or the button that invokes it is the explicit
@@ -338,8 +355,27 @@ export function apply(ctx) {
           const text = formatCommandResult(result) + (note ? `\n\n备注（交给 DSH 自行理解，不保证执行）：${note}` : '')
           return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text }
         }
-        const document = buildTaskDocument(parsed.steps)
-        const summary = summarizePlan(parsed.steps)
+        let document = buildTaskDocument(parsed.steps)
+        let summary = summarizePlan(parsed.steps)
+        // Parameter adjustments are validated against the same whitelist the
+        // confirmation panel uses, and a bad value aborts before anything is
+        // written or executed.
+        const overrides = parsed.roguelikeOverrides ?? {}
+        if (Object.keys(overrides).length > 0) {
+          const patched = applyRoguelikeOverrides(document, overrides)
+          document = patched.document
+          if (patched.applied.length > 0) summary = `${summary}｜参数：${patched.applied.join('、')}`
+        }
+        if (parsed.kind === 'plan') {
+          // `/maa rogue` only prepares: the client turns this notice into the
+          // composer confirmation panel, and the button executes `/maa confirm`
+          // on the local command plane. No model turn, no tokens.
+          const pending = await preparePendingPlan(agent, { planSummary: summary, document })
+          return {
+            kind: 'success',
+            text: `MAA 计划待确认：${summary}\n确认码 ${pending.confirmationCode}（30 分钟内有效）。参数面板已在输入框上方打开，确认后执行；也可以输入 /maa confirm ${pending.confirmationCode}。`,
+          }
+        }
         const result = await executeDocument(agent, signal, document, summary)
         return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text: formatCommandResult(result) }
       } catch (error) {

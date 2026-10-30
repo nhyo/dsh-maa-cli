@@ -59,6 +59,7 @@ dsh plugin --profile web add dsh-maa-cli
 | --- | --- | --- |
 | `/maa help` | `帮助`、`?` | 显示命令帮助 |
 | `/maa fight <stage> [n]` | `刷`、`作战` | 作战，默认 1 次，最多 100 次 |
+| `/maa rouge [主题] [n] [key=value…]` | `rogue`、`roguelike`、`肉鸽`、`自动肉鸽` | 零模型准备肉鸽计划并弹出参数面板：主题默认 `Phantom`，默认 1 局，其余参数以 `key=value` 追加 |
 | `/maa startup` | `启动`、`启动游戏`、`打开游戏`、`打开明日方舟` | 启动游戏并进入主界面 |
 | `/maa infrast` | `基建`、`基建换班` | 基建换班，默认不使用无人机 |
 | `/maa award` | `领取奖励`、`领奖` | 领取日常与周常奖励 |
@@ -75,6 +76,8 @@ dsh plugin --profile web add dsh-maa-cli
 /maa 刷 1-7 两次        # 中文数字也认：一 ~ 十
 /maa 基建换班
 /maa box                # 不调用模型；会操作模拟器扫描干员页
+/maa rouge 萨米 3       # 零模型准备三局萨米（面板里确认）
+/maa 肉鸽 Sarkaz 2 mode=0 difficulty=4 squad=蓝图测绘分队
 ```
 
 约定：
@@ -83,6 +86,22 @@ dsh plugin --profile web add dsh-maa-cli
 - **连续作战**：请求 1–10 次时，`times` 与 `series` 同时设为该次数（10 次即 `times: 10, series: 10`，走游戏内连战）；超过 10 次时 `series: 0`，由 MaaCore 自动分组，避免逐局重复点击。
 - 执行期间确认条上会出现「停止任务」按钮，等价于 `/maa stop`。MaaCore 没有可靠的暂停/继续接口，因此停止后不会自动补完剩余局数。
 
+### 零模型肉鸽（面板确认）
+
+肉鸽不需要模型：`/maa rouge` 只**准备**计划，插件把结果显示成输入框上方的参数面板，点「确认并执行 MAA」才会真正跑——面板、参数改动和确认全部走本地命令通道，一轮模型调用都没有。
+
+```text
+/maa rouge 萨米 3                       # 三局萨米，打开面板等你确认
+/maa 肉鸽 Sarkaz 2 mode=0 difficulty=4  # 顺手指定模式与难度
+/maa rouge 黑流树海 1 squad=特勤分队 roles=坚不可摧 coreChar=机械师
+```
+
+- 主题可以是英文（`Phantom` / `Mizuki` / `Sami` / `Sarkaz` / `JieGarden` / `BlackFlow`）或中文（`傀影` / `水月` / `萨米` / `萨卡兹` / `界园` / `黑流树海`，也认全名）；别名 `rouge` / `rogue` / `roguelike` / `肉鸽` / `自动肉鸽`。
+- 第二个位置参数是局数，默认 1，范围 1–99999；面板里可以继续改（包括刷取次数）。
+- 其余 `key=value` 与确认面板共用同一套 23 键白名单和校验，非法值在准备阶段就报错，不会生成计划。
+- 面板里的参数来自待确认计划本身（`/maa peek` 只读回读），所以打开时看到的就是将要执行的值。
+- 不点确认就什么都不会执行；计划 30 分钟有效、一次性，`/maa confirm MAA-XXXXXX …` 也能手动执行。
+- `/maa peek MAA-XXXXXX` 是面板用的只读命令，手工用只会打印计划的 JSON，不会执行。
 ### 干员 Box 查询
 
 `/maa box` 会执行 `StartUp + OperBox`，并把识别出的已拥有干员精简保存到 `~/.dsh/maa-cli/operator-box.json`。缓存只包含干员 ID、名称、星级、精英化、等级、潜能和扫描时间，不包含账号凭据。
@@ -339,6 +358,7 @@ MaaCore 没有可靠的暂停/继续接口，只能停止（`/maa stop`），停
 - **修复插件整体加载失败**：`maa_training_advice` 的返回 schema 用了 DSH 不支持的 `anyOf`，DSH 校验工具参数时抛 `JsonSchemaError`，导致 `apply()` 回滚、6 个工具与 `/maa` 命令全部消失（日志表现为 `1 entry did not activate`）。改用等价的 `oneOf`（`integer` 与 `null` 互斥），其余关键字保持在 DSH 支持的子集内（`type` / `oneOf` / `properties` / `required` / `additionalProperties` / `items` / `enum` / `const`）。
 - **新增只读工具**：`maa_operator_box`（读 Box 缓存）、`maa_training_advice`（按社区杯级 + MAA 职业数据出培养建议，蒂蒂固定置顶）。
 - **自动肉鸽参数面板**：计划含 `Roguelike` 步骤时，确认条与工具卡都出现参数区，默认值取 MAA 官方推荐开局并标 `【推荐】`；切换主题会重置该主题的推荐值与专属开关。
+- **新增零模型肉鸽命令**：`/maa rouge <主题> [次数] [key=value…]`（别名 `rogue` / `roguelike` / `肉鸽` / `自动肉鸽`）只准备计划并弹出参数面板，点确认才执行；主题支持中英文，参数与确认面板共用同一套校验，默认 1 局。
 - **主题补齐到 6 个并按上线顺序排列**（傀影 → 水月 → 萨米 → 萨卡兹 → 界园 → 黑流树海），新增 `BlackFlow` 主题与它专属的「刷襁褓动物(30001)」模式。
 - **面板全部改为选项**：除刷取次数外一律下拉，开关只有「是 / 否」；刷取次数默认 **9999**、可手输（只收数字，1–99999）。
 - **备注栏**：确认按钮旁「30 分钟内有效」右侧新增备注输入，随确认命令以 URL 编码的 `note=` 回到 DSH，由 DSH 自行理解（不保证执行），绝不写入 MaaCore 任务 JSON。
