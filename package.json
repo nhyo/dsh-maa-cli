@@ -23,12 +23,13 @@
     "state.js",
     "runtime.js",
     "operator-box.js",
+    "training-advice.js",
     "README.md",
     "scripts/install-runtime.mjs",
     "cordis.patch.yml"
   ],
   "scripts": {
-    "test": "node --test runner.test.mjs doctor.test.mjs paths.test.mjs preflight.test.mjs state.test.mjs emulator.test.mjs runtime.test.mjs operator-box.test.mjs"
+    "test": "node --test runner.test.mjs doctor.test.mjs paths.test.mjs preflight.test.mjs state.test.mjs emulator.test.mjs runtime.test.mjs operator-box.test.mjs training-advice.test.mjs"
   },
   "dsh": {
     "manifestVersion": 1,

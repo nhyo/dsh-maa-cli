@@ -144,7 +144,7 @@ export function formatOperatorBoxScanResult(snapshot) {
   const valid = validateSnapshot(snapshot)
   const sixStars = valid.operators.filter(operator => operator.rarity === 6)
   const names = sixStars.map(operator => operator.name).join('、') || '无'
-  return `干员 Box 识别完成：共识别到 ${valid.operators.length} 名已拥有干员，其中六星 ${sixStars.length} 名。\n六星干员：${names}\n结果已保存；之后可以直接询问等级、精英化和潜能。`
+  return `干员 Box 识别完成：共识别到 ${valid.operators.length} 名已拥有干员，其中六星 ${sixStars.length} 名。\n六星干员：${names}\n结果已保存；之后可以直接询问等级、精英化和潜能。\n\n是否需要根据这次 Box 生成培养建议？回复“需要培养建议”即可。`
 }
 
 function formatOperatorBoxSummary(snapshot, filters) {

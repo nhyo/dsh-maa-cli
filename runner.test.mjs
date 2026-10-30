@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -10,6 +10,7 @@ import { buildTaskDocument, generatedTaskPath, summarizePlan, writeGeneratedTask
 import { clearPendingPlansForTest, consumeConfirmedPlan, consumePlanFromHumanGesture, preparePendingPlan } from './confirmation.js'
 import { parseLocalMaaCommand } from './local-command.js'
 import { stateFilePath } from './state.js'
+import { operatorBoxFilePath, saveOperatorBox } from './operator-box.js'
 
 // Pending plans now live on disk, so the tests keep them out of the real
 // ~/.dsh/maa-cli directory.
@@ -23,12 +24,30 @@ test('registers a zero-token command plus prepare-only model tools', () => {
     commands: { register: command => commands.push(command) },
   })
   assert.deepEqual(commands.map(command => command.name), ['maa'])
-  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_operator_box', 'maa_prepare_plan', 'maa_doctor', 'maa_runtime'])
+  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_operator_box', 'maa_training_advice', 'maa_prepare_plan', 'maa_doctor', 'maa_runtime'])
   assert.deepEqual(tools[0].parameters.required, ['operation'])
-  assert.deepEqual(tools[2].parameters.required, ['purpose', 'steps'])
-  assert.deepEqual(tools[3].parameters.properties, {})
-  assert.match(tools[2].description, /does not create another model call/)
+  assert.deepEqual(tools[2].parameters.required, ['useCached'])
+  assert.deepEqual(tools[3].parameters.required, ['purpose', 'steps'])
+  assert.deepEqual(tools[4].parameters.properties, {})
+  assert.match(tools[3].description, /does not create another model call/)
   assert.match(tools[1].description, /Always call this/)
+})
+
+test('training advice asks about the cache before any recommendation', async () => {
+  const tools = []
+  apply({ tools: { register: tool => tools.push(tool) }, commands: { register: () => {} } })
+  const advice = tools.find(tool => tool.name === 'maa_training_advice')
+  await rm(operatorBoxFilePath(), { force: true })
+  assert.equal((await advice.execute({ useCached: false }, {})).status, 'needs_scan')
+
+  await saveOperatorBox({
+    version: 1, scannedAt: '2026-10-29T12:00:00.000Z',
+    operators: [{ id: 'char_1035_wisdel', name: '维什戴尔', rarity: 6, elite: 1, level: 80, potential: 1 }],
+  })
+  const cached = await advice.execute({ useCached: false }, {})
+  assert.equal(cached.status, 'needs_choice')
+  assert.match(cached.summary, /直接使用这份缓存生成培养建议，还是重新扫描/)
+  await rm(operatorBoxFilePath(), { force: true })
 })
 
 test('parses common slash commands without a model', () => {

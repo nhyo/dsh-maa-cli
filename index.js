@@ -14,6 +14,7 @@ import {
   saveOperatorBox,
   stripOperBoxCallbacks,
 } from './operator-box.js'
+import { buildTrainingAdvice, fetchCommunityRanking, formatTrainingAdvice, loadOperatorMetadata } from './training-advice.js'
 
 export const name = 'maa-cli-tools'
 export const inject = ['tools', 'commands']
@@ -92,6 +93,44 @@ const OPERATOR_BOX_RESULT_SCHEMA = {
       items: { type: 'object', additionalProperties: false, required: Object.keys(OPERATOR_PROPERTIES), properties: OPERATOR_PROPERTIES },
     },
     summary: { type: 'string' },
+  },
+}
+
+const TRAINING_ADVICE_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['status', 'scannedAt', 'summary'],
+  properties: {
+    status: { type: 'string', enum: ['needs_scan', 'needs_choice', 'ready', 'source_error'] },
+    scannedAt: { type: 'string' }, summary: { type: 'string' }, policy: { type: 'string' },
+    recommendations: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'name', 'profession', 'professionName', 'tier', 'overallRank', 'professionRank', 'coverageBoost', 'elite', 'level', 'reasons'],
+        properties: {
+          id: { type: 'string' }, name: { type: 'string' }, profession: { type: 'string' }, professionName: { type: 'string' }, tier: { type: 'string' },
+          overallRank: { anyOf: [{ type: 'integer' }, { type: 'null' }] }, professionRank: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
+          coverageBoost: { type: 'boolean' }, elite: { type: 'integer' }, level: { type: 'integer' },
+          reasons: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+    coverage: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false,
+        required: ['profession', 'professionName', 'ownedCount', 'usableCount', 'shortage'],
+        properties: {
+          profession: { type: 'string' }, professionName: { type: 'string' }, ownedCount: { type: 'integer' }, usableCount: { type: 'integer' }, shortage: { type: 'boolean' },
+        },
+      },
+    },
+    source: {
+      type: 'object', additionalProperties: false,
+      required: ['name', 'url', 'topicId', 'topicTitle', 'topicClosedAt', 'voteCount', 'retrievedAt'],
+      properties: {
+        name: { type: 'string' }, url: { type: 'string' }, topicId: { type: 'string' }, topicTitle: { type: 'string' },
+        topicClosedAt: { type: 'string' }, voteCount: { type: 'integer' }, retrievedAt: { type: 'string' },
+      },
+    },
   },
 }
 
@@ -303,6 +342,54 @@ export function apply(ctx) {
     },
     async execute(args) { return queryOperatorBox(await readOperatorBox(), args) },
     presentCall: () => ({ card: 'terminal', title: '读取干员 Box 缓存' }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_training_advice',
+    description: 'Generate ordered operator training advice from the private local Box cache without operating the game. On the user\'s first advice request, ALWAYS call with useCached=false: if a cache exists, present the returned choice and ask whether to use it or rescan; if no cache exists, guide the user to a confirmed StartUp + OperBox scan. Call again with useCached=true only after the user explicitly chooses the cache, or answers yes to the advice question immediately following a completed scan. Ratings come from the latest published ArknightsVote community result; professions come from the installed MAA resource. Never invent missing ratings or profession ranks.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['useCached'],
+      properties: {
+        useCached: { type: 'boolean', description: 'false for the initial request; true only after the user explicitly accepts the cached scan.' },
+        maxResults: { type: 'integer', minimum: 1, maximum: 30, description: 'Maximum recommendations; defaults to 10.' },
+      },
+    },
+    output: {
+      schema: TRAINING_ADVICE_RESULT_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: value.status === 'ready' ? formatTrainingAdvice(value) : value.summary }],
+    },
+    async execute(args, exec) {
+      const snapshot = await readOperatorBox()
+      if (snapshot === null) {
+        return {
+          status: 'needs_scan', scannedAt: '',
+          summary: '尚无干员 Box 缓存。请先准备并确认一次 StartUp + OperBox 扫描；扫描完成后会主动询问是否需要培养建议。',
+        }
+      }
+      if (args.useCached !== true) {
+        return {
+          status: 'needs_choice', scannedAt: snapshot.scannedAt,
+          summary: `发现上次 Box 缓存（扫描时间：${snapshot.scannedAt}，共 ${snapshot.operators.length} 名干员）。请询问用户：直接使用这份缓存生成培养建议，还是重新扫描？重新扫描会操作游戏，必须另行确认。`,
+        }
+      }
+      try {
+        await requireMaaCli()
+        const directory = await runMaa(queryArguments('resource_dir'), { signal: exec.signal, timeoutMs: 30_000 })
+        const resourceDirectory = directory.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1)
+        if (directory.exitCode !== 0 || !resourceDirectory) throw new Error(`无法读取 MAA 资源目录：${directory.stderr || directory.stdout || `exit ${directory.exitCode}`}`)
+        const [metadata, ranking] = await Promise.all([
+          loadOperatorMetadata(resourceDirectory),
+          fetchCommunityRanking({ signal: exec.signal }),
+        ])
+        return buildTrainingAdvice(snapshot, metadata, ranking, { maxResults: args.maxResults })
+      } catch (error) {
+        return {
+          status: 'source_error', scannedAt: snapshot.scannedAt,
+          summary: `无法在不编造数据的前提下生成培养建议：${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+    },
+    presentCall: () => ({ card: 'terminal', title: '读取 Box 并生成培养建议' }),
   })
 
   ctx.tools.register({
