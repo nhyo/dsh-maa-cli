@@ -1,6 +1,6 @@
 {
   "name": "dsh-maa-cli",
-  "version": "0.9.3",
+  "version": "1.0.0",
   "description": "A DeepSeek Harness tool bundle for Arknights: prepares and executes maa-cli plans and bootstraps its own MAA runtime.",
   "type": "module",
   "main": "src/index.js",
