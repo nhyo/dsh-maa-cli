@@ -8,7 +8,7 @@
 - 运行环境：Windows 11 x64 + DSH Desktop 0.2.1-rc.3（Electron，nightly）；插件以 `link:E:/DESK/dsh-maa-cli` 的形式装进 `C:\Users\nhyo\.dsh\profiles\desktop`，改完代码**必须重启 DSH Desktop** 才生效。
 - 判断「改动是否真的加载了」：`Get-Process *DeepSeek* | Select Id,StartTime` 的启动时间必须晚于 `src/client/index.js` / `src/index.js` 的 `LastWriteTime`。另外模型侧 `maa_prepare_plan` 的工具说明里也能看出服务端版本（旧版本写 `startsCount (1-20)`，新版本写 `(1-99999; the confirmation panel starts at 9999)`）。
 - 版本：`package.json` 已是 **0.9.2**（未发布）；npm 上的 0.9.1 是旧代码，不含本轮任何改动。
-- 测试：`node --test`，当前 **93/93 通过**，无第三方依赖，无需安装。
+- 测试：`node --test`，当前 **94/94 通过**，无第三方依赖，无需安装。
 
 ## 2. 本轮改动（按文件）
 
@@ -73,11 +73,12 @@
 - `confirmLine(code, params)`：逐键拼 `key=value`，并在 `params.theme` 存在时过滤掉 `allowedAdvancedKeys` 之外的键，保证不会发出 MAA 会忽略的开关。
 - 卡片外观：`MaaConfirmDock` 支持折叠（`−` / `+`）与删除（`×`），`dismissedPlans` 让被删的卡片在工具卡上也同步隐藏；宽度 / 圆角直接复用 DSH 前端令牌（`--dsh-composer-card-max-width`、`--dsw-radius-panel`、`--dsh-composer-dock-inset`），不是写死像素。
 - 新增通用 `TaskSettingsPanel`：按服务端字段描述渲染复选框、下拉框、数字框、文本框和多选组；肉鸽继续使用专用 `RoguelikePanel`。
+- 通用面板会渲染服务端字段的 `description` 与按 `when` 条件显示的任务 `notes`；固定的「参考 MAA.exe；修改只在确认后生效」提示已移除。生息演算按五种模式显示 MAA 6.18.0 对应的详细前置条件和流程。
 - `confirmLine(code, params, fields)` 只发送当前任务白名单中的可见字段，字符串使用 URL 编码，数组使用逗号传输。
 
 ### `test/confirmation-panel.test.mjs` / `README.md` / `package.json`
 
-- 测试现为 93 项；新增项目名入口、9 类面板映射、各 MaaCore 参数类型转换、更新数据组合、跨字段拒绝用例，以及注册后的 `/maa fight` → `/maa peek` 面板链路测试。
+- 测试现为 94 项；新增项目名入口、9 类面板映射、各 MaaCore 参数类型转换、更新数据组合、跨字段拒绝用例、MAA 说明文字，以及注册后的 `/maa fight` → `/maa peek` 面板链路测试。
 - README 更新：主题表补黑流树海并改名「岁的界园志异」、基础字段表、高级功能表（四列，含出现条件）、备注语义、校验范围 1–99999、只有刷取次数可手输、新增「更新日志」章节。
 - `package.json` 的 `scripts.test` 统一运行 `test/`；version 0.9.2（未发布）。
 
@@ -98,7 +99,7 @@
 
 ```powershell
 cd E:\DESK\dsh-maa-cli
-node --test test/*.test.mjs                        # 93/93 通过
+node --test test/*.test.mjs                        # 94/94 通过
 node -e "const fs=require('fs'); new Function('window', fs.readFileSync('src/client/index.js','utf8')); console.log('syntax ok')"
 node -e "import('./src/index.js').then(m=>{const c={commands:[],tools:[]};m.apply({commands:{register:d=>c.commands.push(d.name)},tools:{register:d=>c.tools.push(d.name)}});console.log(c)})"
 ```

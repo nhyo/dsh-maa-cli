@@ -109,6 +109,17 @@ window.__ModuleLoader__.load({
       { value: 20001, label: '刷常乐节点', themes: ['JieGarden'] },
       { value: 30001, label: '刷襁褓动物', themes: ['BlackFlow'] },
     ]
+    const ROGUELIKE_MODE_NOTES = {
+      0: '刷等级/奖励点数：尽可能稳定地探索更多层数。',
+      1: '刷源石锭：完成投资目标后自动退出；可在高级设置中决定是否购物、招募并进入第二层。',
+      4: '凹开局：反复重开以获取期望奖励或让开局干员直升精二。',
+      5: '刷坍缩范式：遇到不符合目标的坍缩范式后直接重开，仅适用于萨米主题。',
+      6: '刷月度小队：尽可能稳定地探索更多层数，可在高级设置中自动切换小队。',
+      7: '刷深入调查：尽可能稳定地探索更多层数，可在高级设置中自动切换调查。',
+      10001: '快速通过第一层后结束，适合萨卡兹主题的快速循环。',
+      20001: '第一层进入洞中寻找指定常乐节点，未找到时重开，仅适用于界园主题。',
+      30001: '寻找并刷取指定襁褓动物，仅适用于黑流树海主题。',
+    }
 
     function modesForTheme(theme) {
       return ROGUELIKE_MODES.filter(function (item) {
@@ -157,6 +168,11 @@ window.__ModuleLoader__.load({
       '.maa-task-options{display:flex;flex-wrap:wrap;gap:6px 12px;padding:4px 0}',
       '.maa-task-option{display:inline-flex;align-items:center;gap:5px;color:var(--dsw-alias-label-primary);font-size:12px;white-space:nowrap}',
       '.maa-task-option input{accent-color:var(--dsw-alias-brand-primary)}',
+      '.maa-task-field-block{display:flex;flex-direction:column;gap:4px;min-width:0}',
+      '.maa-task-description{padding-left:72px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap}',
+      '.maa-task-notes{margin-top:10px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-2)}',
+      '.maa-task-note{font-size:11px;line-height:17px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap}',
+      '.maa-task-note+.maa-task-note{margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2)}',
       '.maa-rogue-advanced{margin-top:10px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2)}',
       '.maa-rogue-summary{display:block;margin-bottom:8px;font-size:12px;font-weight:600;cursor:pointer;color:var(--dsw-alias-label-secondary)}',
       '.maa-rogue-summary::-webkit-details-marker{display:none}',
@@ -498,21 +514,26 @@ window.__ModuleLoader__.load({
       const disabled = props.disabled === true
       const update = function (patch) { props.onChange(Object.assign({}, value, patch)) }
       const fields = Array.isArray(panel.fields) ? panel.fields : []
+      const wrapField = function (item, control) {
+        return h('div', { className: 'maa-task-field-block', key: item.key },
+          control,
+          item.description ? h('div', { className: 'maa-task-description' }, item.description) : null)
+      }
 
       const renderField = function (item) {
         if (!fieldVisible(item, value)) return null
         const current = value[item.key]
         if (item.kind === 'boolean') {
-          return h('label', { className: 'maa-rogue-toggle', key: item.key },
+          return wrapField(item, h('label', { className: 'maa-rogue-toggle' },
             h('input', {
               type: 'checkbox', checked: current === true, disabled: disabled,
               onChange: function (event) { update({ [item.key]: event.target.checked }) },
             }),
-            h('span', null, item.label))
+            h('span', null, item.label)))
         }
         if (item.kind === 'multi') {
           const selected = Array.isArray(current) ? current : []
-          return h('div', { className: 'maa-rogue-field', key: item.key, style: { alignItems: 'flex-start' } },
+          return wrapField(item, h('div', { className: 'maa-rogue-field', style: { alignItems: 'flex-start' } },
             h('span', { className: 'maa-rogue-label' }, item.label),
             h('div', { className: 'maa-task-options' }, (item.options || []).map(function (entry) {
               const checked = selected.some(function (choice) { return String(choice) === String(entry.value) })
@@ -525,10 +546,10 @@ window.__ModuleLoader__.load({
                     update({ [item.key]: next })
                   },
                 }), entry.label)
-            })))
+            }))))
         }
         if (item.kind === 'select') {
-          return h('label', { className: 'maa-rogue-field', key: item.key },
+          return wrapField(item, h('label', { className: 'maa-rogue-field' },
             h('span', { className: 'maa-rogue-label' }, item.label),
             h('select', {
               className: 'maa-rogue-control', value: current === undefined ? '' : String(current), disabled: disabled,
@@ -538,10 +559,10 @@ window.__ModuleLoader__.load({
               },
             }, (item.options || []).map(function (entry) {
               return h('option', { key: String(entry.value), value: String(entry.value) }, entry.label)
-            })))
+            }))))
         }
         const numeric = item.kind === 'integer' || item.kind === 'number'
-        return h('label', { className: 'maa-rogue-field', key: item.key },
+        return wrapField(item, h('label', { className: 'maa-rogue-field' },
           h('span', { className: 'maa-rogue-label' }, item.label),
           h('input', {
             className: 'maa-rogue-control', type: numeric ? 'number' : 'text',
@@ -553,16 +574,21 @@ window.__ModuleLoader__.load({
               const raw = event.target.value
               update({ [item.key]: numeric && raw !== '' ? Number(raw) : raw })
             },
-          }))
+          })))
       }
 
       const basic = fields.filter(function (item) { return !item.advanced }).map(renderField).filter(Boolean)
       const advanced = fields.filter(function (item) { return item.advanced }).map(renderField).filter(Boolean)
+      const notes = (Array.isArray(panel.notes) ? panel.notes : []).filter(function (item) {
+        return item && typeof item.text === 'string' && fieldVisible(item, value)
+      })
       return h('div', { className: 'maa-rogue-panel' },
         h('div', { className: 'maa-rogue-head' },
-          h('span', null, panel.title + '参数'),
-          h('span', { className: 'maa-rogue-hint' }, '参考 MAA.exe；修改只在确认后生效')),
+          h('span', null, panel.title + '参数')),
         basic.length ? h('div', { className: 'maa-rogue-grid' }, basic) : h('div', { className: 'maa-rogue-note' }, '此项目没有可调参数。'),
+        notes.length ? h('div', { className: 'maa-task-notes' }, notes.map(function (item, index) {
+          return h('div', { className: 'maa-task-note', key: String(index) }, item.text)
+        })) : null,
         advanced.length ? h('details', { className: 'maa-rogue-advanced' },
           h('summary', { className: 'maa-rogue-summary' }, '高级设置'),
           h('div', { className: 'maa-rogue-grid' }, advanced)) : null)
@@ -700,6 +726,10 @@ window.__ModuleLoader__.load({
           default: return boolPick(ADVANCED_LABELS[key] || key, key)
         }
       })
+      const roguelikeNotes = [ROGUELIKE_MODE_NOTES[value.mode]].filter(Boolean)
+      if (value.theme === 'JieGarden') {
+        roguelikeNotes.push('界园提示：解锁相关科技后，指挥分队在 N3 及以上难度会额外携带“时光之末”，可用于“一战一跳”存钱；未解锁该科技时不要选择 N3 及以上难度。')
+      }
       return h('div', { className: 'maa-rogue-panel' },
         h('div', { className: 'maa-rogue-head' },
           h('span', null, '自动肉鸽参数'),
@@ -727,6 +757,9 @@ window.__ModuleLoader__.load({
           pick('职业组', 'roles', roleOptions),
           pick('开局干员', 'coreChar', charOptions),
           boolPick('使用助战', 'useSupport')),
+        roguelikeNotes.length ? h('div', { className: 'maa-task-notes' }, roguelikeNotes.map(function (text, index) {
+          return h('div', { className: 'maa-task-note', key: String(index) }, text)
+        })) : null,
         h('details', { className: 'maa-rogue-advanced' },
           h('summary', { className: 'maa-rogue-summary' }, '高级功能（MAA 高级设置）'),
           h('div', { className: 'maa-rogue-grid' }, advancedNodes),

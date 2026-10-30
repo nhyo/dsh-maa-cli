@@ -365,6 +365,31 @@ test('updates Box and depot selections without inventing a MaaCore task type', (
   )
 })
 
+test('carries MAA remarks and mode-specific reclamation instructions into panels', () => {
+  const reclamation = taskPanelFromDocument(buildTaskDocument(parseLocalMaaCommand('reclamation').steps))
+  assert.equal(reclamation.notes.length, 5)
+  assert.match(reclamation.notes.find(note => note.when.equals === 0).text, /误删存档/)
+  assert.match(reclamation.notes.find(note => note.when.equals === 1).text, /荧光棒/)
+  assert.match(reclamation.notes.find(note => note.when.equals === 16).text, /RA-1 自动循环/)
+  assert.match(reclamation.notes.find(note => note.when.equals === 32).text, /圣聆初雪/)
+  assert.match(reclamation.notes.find(note => note.when.equals === 48).text, /维什戴尔/)
+
+  const fight = taskPanelFromDocument(buildTaskDocument(parseLocalMaaCommand('fight').steps))
+  assert.match(fight.fields.find(field => field.key === 'series').description, /自动最大倍率/)
+  assert.match(fight.fields.find(field => field.key === 'drGrandet').description, /1 点理智/)
+
+  const infrast = taskPanelFromDocument(buildTaskDocument(parseLocalMaaCommand('infrast').steps))
+  assert.match(infrast.notes.find(note => note.when.equals === 20000).text, /整队替换/)
+  assert.match(infrast.fields.find(field => field.key === 'receptionClueExchange').description, /10 张/)
+
+  const recruit = taskPanelFromDocument(buildTaskDocument(parseLocalMaaCommand('recruit').steps))
+  assert.match(recruit.fields.find(field => field.key === 'expedite').description, /应急场景/)
+  const mall = taskPanelFromDocument(buildTaskDocument(parseLocalMaaCommand('mall').steps))
+  assert.match(mall.fields.find(field => field.key === 'onlyBuyDiscount').description, /信用点溢出/)
+  const award = taskPanelFromDocument(buildTaskDocument(parseLocalMaaCommand('award').steps))
+  assert.match(award.fields.find(field => field.key === 'freePull').description, /误抽风险/)
+})
+
 test('rejects invalid cross-field MAA panel combinations', () => {
   const infrast = buildTaskDocument(parseLocalMaaCommand('infrast').steps)
   assert.throws(() => applyTaskPanelOverrides(infrast, { mode: '10000', filename: '' }), /必须选择排班文件/)
