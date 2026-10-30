@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { stateDirectory } from './state.js'
+import { stateDirectory } from '../runtime/state.js'
 
 const VOTE_API = 'https://api.vote.ltsc.vip'
 const VOTE_SITE = 'https://vote.ltsc.vip'

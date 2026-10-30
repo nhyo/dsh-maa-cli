@@ -3,14 +3,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { actionArguments, DEFAULT_MAA_CLI_PATH, MAA_CLI_PATH, queryArguments, resolveMaaCliPath, runMaa } from './runner.js'
-import { runtimeLayout } from './runtime.js'
-import { apply } from './index.js'
-import { buildTaskDocument, generatedTaskPath, summarizePlan, writeGeneratedTask } from './planner.js'
-import { clearPendingPlansForTest, consumeConfirmedPlan, consumePlanFromHumanGesture, preparePendingPlan } from './confirmation.js'
-import { parseLocalMaaCommand } from './local-command.js'
-import { stateFilePath } from './state.js'
-import { operatorBoxFilePath, saveOperatorBox } from './operator-box.js'
+import { actionArguments, DEFAULT_MAA_CLI_PATH, MAA_CLI_PATH, queryArguments, resolveMaaCliPath, runMaa } from '../src/runtime/runner.js'
+import { runtimeLayout } from '../src/runtime/runtime.js'
+import { apply } from '../src/index.js'
+import { buildTaskDocument, generatedTaskPath, summarizePlan, writeGeneratedTask } from '../src/commands/planner.js'
+import { clearPendingPlansForTest, consumeConfirmedPlan, consumePlanFromHumanGesture, preparePendingPlan } from '../src/commands/confirmation.js'
+import { parseLocalMaaCommand } from '../src/commands/local-command.js'
+import { stateFilePath } from '../src/runtime/state.js'
+import { operatorBoxFilePath, saveOperatorBox } from '../src/operators/operator-box.js'
 
 // Pending plans now live on disk, so the tests keep them out of the real
 // ~/.dsh/maa-cli directory.
@@ -36,6 +36,31 @@ test('registers a zero-token command plus prepare-only model tools', () => {
   assert.match(tools[1].description, /Always call this/)
 })
 
+test('registered slash command prepares and exposes the fight settings panel without executing MAA', async () => {
+  const commands = []
+  apply({ tools: { register: () => {} }, commands: { register: command => commands.push(command) } })
+  const maa = commands.find(command => command.name === 'maa')
+  const agent = {
+    id: 'slash-panel-test',
+    session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] },
+  }
+  await clearPendingPlansForTest()
+
+  const prepared = await maa.handler({ agent, rawInput: 'fight', signal: AbortSignal.timeout(2_000) })
+  assert.equal(prepared.kind, 'success')
+  assert.match(prepared.text, /MAA 计划待确认/)
+
+  const peeked = await maa.handler({ agent, rawInput: 'peek', signal: AbortSignal.timeout(2_000) })
+  assert.equal(peeked.kind, 'success')
+  const payload = JSON.parse(peeked.text)
+  assert.equal(payload.panel.type, 'Fight')
+  assert.equal(payload.panel.title, '理智作战')
+  assert.equal(payload.panel.values.times, 1)
+  assert.ok(payload.panel.fields.some(field => field.key === 'stage'))
+  assert.ok(payload.panel.fields.some(field => field.key === 'medicine'))
+  await clearPendingPlansForTest()
+})
+
 test('training advice asks about the cache before any recommendation', async () => {
   const tools = []
   apply({ tools: { register: tool => tools.push(tool) }, commands: { register: () => {} } })
@@ -58,12 +83,14 @@ test('parses common slash commands without a model', () => {
     type: 'Fight', stage: '1-7', times: 2, medicine: 0, expiringMedicine: 0, stone: 0,
   })
   assert.equal(parseLocalMaaCommand('刷 1-7 两次').steps[0].times, 2)
+  assert.equal(parseLocalMaaCommand('启动游戏').kind, 'plan')
   assert.equal(parseLocalMaaCommand('启动游戏').steps[0].type, 'StartUp')
   assert.equal(parseLocalMaaCommand('基建换班').steps[0].drones, '_NotUse')
   assert.equal(parseLocalMaaCommand('confirm maa-a1b2c3').confirmationCode, 'MAA-A1B2C3')
   assert.equal(parseLocalMaaCommand('停止任务').kind, 'stop')
   assert.equal(parseLocalMaaCommand('setup').kind, 'setup')
-  assert.deepEqual(parseLocalMaaCommand('扫描干员Box').steps.map(step => step.type), ['StartUp', 'OperBox'])
+  assert.deepEqual(parseLocalMaaCommand('扫描干员Box').steps.map(step => step.type), ['OperBox'])
+  assert.deepEqual(parseLocalMaaCommand('更新数据').steps.map(step => step.type), ['OperBox', 'Depot'])
   assert.throws(() => parseLocalMaaCommand('任意 shell 命令'), /无法识别/)
 })
 

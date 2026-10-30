@@ -1,11 +1,12 @@
-import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa } from './runner.js'
-import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask, applyRoguelikeOverrides, roguelikePanelFromDocument } from './planner.js'
-import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan } from './confirmation.js'
-import { parseLocalMaaCommand } from './local-command.js'
-import { formatReport, runDoctor } from './doctor.js'
-import { prepareRuntimeDirectories } from './preflight.js'
-import { checkEmulator, emulatorErrorMessage } from './emulator.js'
-import { bootstrapRuntime, exists, formatRuntimeReport, inspectRuntime, maybeAutoUpdateRuntime, updateManifest, updateRuntime } from './runtime.js'
+import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa } from './runtime/runner.js'
+import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './commands/planner.js'
+import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan } from './commands/confirmation.js'
+import { parseLocalMaaCommand } from './commands/local-command.js'
+import { applyTaskPanelOverrides, taskPanelFromDocument } from './commands/task-panel.js'
+import { formatReport, runDoctor } from './runtime/doctor.js'
+import { prepareRuntimeDirectories } from './runtime/preflight.js'
+import { checkEmulator, emulatorErrorMessage } from './runtime/emulator.js'
+import { bootstrapRuntime, exists, formatRuntimeReport, inspectRuntime, maybeAutoUpdateRuntime, updateManifest, updateRuntime } from './runtime/runtime.js'
 import {
   formatOperatorBoxScanResult,
   parseCompletedOperatorBox,
@@ -13,8 +14,8 @@ import {
   readOperatorBox,
   saveOperatorBox,
   stripOperBoxCallbacks,
-} from './operator-box.js'
-import { buildTrainingAdvice, fetchCommunityRanking, formatTrainingAdvice, loadOperatorMetadata } from './training-advice.js'
+} from './operators/operator-box.js'
+import { buildTrainingAdvice, fetchCommunityRanking, formatTrainingAdvice, loadOperatorMetadata } from './operators/training-advice.js'
 
 export const name = 'maa-cli-tools'
 export const inject = ['tools', 'commands']
@@ -291,7 +292,7 @@ export function apply(ctx) {
     name: 'maa',
     definitionId: 'dsh-maa-cli/maa',
     description: '直接运行常用 MAA 操作，不调用模型',
-    input: { hint: '<help | setup | fight 1-7 2 | rouge [主题] [n] [key=value…] | peek MAA-XXXXXX | startup | infrast | award | closedown | stop | confirm MAA-XXXXXX theme=Sarkaz mode=0 difficulty=4 squad=蓝图测绘分队 roles=稳扎稳打 coreChar=维什戴尔 note=%E5%A4%87%E6%B3%A8>' },
+    input: { hint: '<startup | fight | infrast | recruit | mall | award | rouge | reclamation | update | closedown | help>' },
     async handler({ agent, rawInput, signal }) {
       try {
         const parsed = parseLocalMaaCommand(rawInput)
@@ -315,9 +316,8 @@ export function apply(ctx) {
             : { kind: 'error', text: '当前 DSH 会话没有正在执行的 MAA 任务。' }
         }
         if (parsed.kind === 'peek') {
-          // Read-only: the confirmation panel asks for the pending plan's
-          // summary and current roguelike settings so `/maa rogue` can show the
-          // panel without any model turn. Nothing is consumed here.
+          // Read-only: the local client asks for the pending plan's MAA-style
+          // field definitions and current values. Nothing is consumed here.
           const pending = await peekPendingPlan(agent)
           if (parsed.confirmationCode && parsed.confirmationCode !== pending.confirmationCode) {
             throw new Error('MAA 确认码与待确认计划不一致。')
@@ -327,7 +327,7 @@ export function apply(ctx) {
             text: JSON.stringify({
               code: pending.confirmationCode,
               summary: pending.planSummary,
-              panel: roguelikePanelFromDocument(pending.document),
+              panel: taskPanelFromDocument(pending.document),
             }),
           }
         }
@@ -347,7 +347,7 @@ export function apply(ctx) {
           }
           const hasOverrides = Object.keys(overrides).length > 0
           const peeked = hasOverrides ? await peekPendingPlan(agent) : null
-          const patched = peeked ? applyRoguelikeOverrides(peeked.document, overrides) : null
+          const patched = peeked ? applyTaskPanelOverrides(peeked.document, overrides) : null
           const adjustments = patched && patched.applied.length > 0 ? `｜确认时调整：${patched.applied.join('、')}` : ''
           const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
           const planSummary = `${pending.planSummary}${adjustments}${note ? `｜备注（DSH 自行理解，不保证执行）：${note}` : ''}`
@@ -362,14 +362,14 @@ export function apply(ctx) {
         // written or executed.
         const overrides = parsed.roguelikeOverrides ?? {}
         if (Object.keys(overrides).length > 0) {
-          const patched = applyRoguelikeOverrides(document, overrides)
+          const patched = applyTaskPanelOverrides(document, overrides)
           document = patched.document
           if (patched.applied.length > 0) summary = `${summary}｜参数：${patched.applied.join('、')}`
         }
         if (parsed.kind === 'plan') {
-          // `/maa rogue` only prepares: the client turns this notice into the
-          // composer confirmation panel, and the button executes `/maa confirm`
-          // on the local command plane. No model turn, no tokens.
+          // Every zero-model task only prepares: the client turns this notice
+          // into its MAA-style parameter panel, and the button executes
+          // `/maa confirm` on the local command plane. No model turn, no tokens.
           const pending = await preparePendingPlan(agent, { planSummary: summary, document })
           return {
             kind: 'success',

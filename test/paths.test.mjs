@@ -11,7 +11,7 @@ import {
   isInsidePath,
   packagedAppCandidates,
   resolveEffectivePath,
-} from './paths.js'
+} from '../src/runtime/paths.js'
 
 test('expands %NAME% references and keeps unknown names intact', () => {
   assert.equal(expandEnvironment('%AAA%\\x', { AAA: 'C:\\a' }), 'C:\\a\\x')

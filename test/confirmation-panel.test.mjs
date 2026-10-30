@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { parseLocalMaaCommand } from './local-command.js'
-import { applyRoguelikeOverrides, buildTaskDocument, resolveRoguelikeTheme, roguelikePanelFromDocument } from './planner.js'
-import { decodeConfirmationNote } from './index.js'
+import { parseLocalMaaCommand } from '../src/commands/local-command.js'
+import { applyRoguelikeOverrides, buildTaskDocument, resolveRoguelikeTheme, roguelikePanelFromDocument } from '../src/commands/planner.js'
+import { decodeConfirmationNote } from '../src/index.js'
+import { applyTaskPanelOverrides, taskPanelFromDocument } from '../src/commands/task-panel.js'
 
 function documentOf(steps) {
   return buildTaskDocument(steps)
@@ -280,4 +281,96 @@ test('maps a pending document back to the confirmation panel', () => {
   assert.equal(panel.starts_count, undefined)
 
   assert.equal(roguelikePanelFromDocument(buildTaskDocument([{ type: 'StartUp' }])), null)
+})
+
+test('opens every MAA task from a project-only zero-model command', () => {
+  const cases = [
+    ['startup', ['StartUp'], 'StartUp'],
+    ['fight', ['Fight'], 'Fight'],
+    ['flight', ['Fight'], 'Fight'],
+    ['infrast', ['Infrast'], 'Infrast'],
+    ['recruit', ['Recruit'], 'Recruit'],
+    ['mall', ['Mall'], 'Mall'],
+    ['award', ['Award'], 'Award'],
+    ['rouge', ['Roguelike'], 'Roguelike'],
+    ['reclamation', ['ReclamationAlgorithm'], 'ReclamationAlgorithm'],
+    ['update', ['OperBox', 'Depot'], 'UserDataUpdate'],
+  ]
+  for (const [command, types, panelType] of cases) {
+    const parsed = parseLocalMaaCommand(command)
+    assert.equal(parsed.kind, 'plan', command)
+    assert.deepEqual(parsed.steps.map(step => step.type), types, command)
+    const panel = taskPanelFromDocument(buildTaskDocument(parsed.steps))
+    assert.equal(panel.type, panelType, command)
+    assert.equal(typeof panel.title, 'string')
+    assert.equal(typeof panel.values, 'object')
+  }
+})
+
+test('applies MAA panel values to each core task with typed validation', () => {
+  const startup = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('startup').steps), {
+    clientType: 'Bilibili', startGameEnabled: 'true', accountName: 'doctor%20123',
+  }).document.tasks[0].params
+  assert.equal(startup.client_type, 'Bilibili')
+  assert.equal(startup.account_name, 'doctor 123')
+
+  const fight = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('fight').steps), {
+    stage: '1-7', times: '10', series: '10', medicine: '0', medicineExpireDays: '2', stone: '0', drGrandet: 'false',
+  }).document.tasks[0].params
+  assert.equal(fight.stage, '1-7')
+  assert.equal(fight.times, 10)
+  assert.equal(fight.series, 10)
+  assert.equal(fight.medicine_expire_days, 2)
+
+  const infrast = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('infrast').steps), {
+    mode: '0', facilities: 'Mfg,Trade,Recycle', drones: 'PureGold', threshold: '0.3', replenish: 'true',
+  }).document.tasks[0].params
+  assert.deepEqual(infrast.facility, ['Mfg', 'Trade', 'Recycle'])
+  assert.equal(infrast.drones, 'PureGold')
+
+  const recruit = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('recruit').steps), {
+    refresh: 'true', select: '4,5,6', confirm: '3,4', times: '4', setTime: 'true', expedite: 'false', preserveTags: '%E6%94%AF%E6%8F%B4%E6%9C%BA%E6%A2%B0',
+  }).document.tasks[0].params
+  assert.deepEqual(recruit.confirm, [3, 4])
+  assert.deepEqual(recruit.preserve_tags, ['支援机械'])
+
+  const mall = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('mall').steps), {
+    visitFriends: 'true', shopping: 'true', buyFirst: '%E6%8B%9B%E8%81%98%E8%AE%B8%E5%8F%AF%3B%E9%BE%99%E9%97%A8%E5%B8%81', blacklist: '', creditFight: 'false',
+  }).document.tasks[0].params
+  assert.deepEqual(mall.buy_first, ['招聘许可', '龙门币'])
+  assert.deepEqual(mall.blacklist, [])
+
+  const award = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('award').steps), {
+    dailyWeekly: 'true', mail: 'true', freePull: 'false', orundum: 'false', mining: 'true', specialAccess: 'false', signInEvent: 'false',
+  }).document.tasks[0].params
+  assert.equal(award.mail, true)
+  assert.equal(award.mining, true)
+
+  const reclamation = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('reclamation').steps), {
+    theme: 'Tales', mode: '1', toolToCraft: '%E8%8D%A7%E5%85%89%E6%A3%92%3B%E5%8F%91%E7%94%B5%E6%9C%BA', numCraftBatches: '12', incrementMode: '0',
+  }).document.tasks[0].params
+  assert.deepEqual(reclamation.tools_to_craft, ['荧光棒', '发电机'])
+  assert.equal(reclamation.num_craft_batches, 12)
+})
+
+test('updates Box and depot selections without inventing a MaaCore task type', () => {
+  const document = buildTaskDocument(parseLocalMaaCommand('update').steps)
+  const panel = taskPanelFromDocument(document)
+  assert.deepEqual(panel.values, { updateOperBox: true, updateDepot: true })
+  const onlyBox = applyTaskPanelOverrides(document, { updateOperBox: 'true', updateDepot: 'false' })
+  assert.deepEqual(onlyBox.document.tasks.map(task => task.type), ['OperBox'])
+  assert.throws(
+    () => applyTaskPanelOverrides(document, { updateOperBox: 'false', updateDepot: 'false' }),
+    /至少选择干员 Box 或仓库/,
+  )
+})
+
+test('rejects invalid cross-field MAA panel combinations', () => {
+  const infrast = buildTaskDocument(parseLocalMaaCommand('infrast').steps)
+  assert.throws(() => applyTaskPanelOverrides(infrast, { mode: '10000', filename: '' }), /必须选择排班文件/)
+  const reclamation = buildTaskDocument(parseLocalMaaCommand('reclamation').steps)
+  assert.throws(() => applyTaskPanelOverrides(reclamation, { theme: 'RelaunchAnchor', mode: '1' }), /不支持所选模式/)
+  const fight = buildTaskDocument(parseLocalMaaCommand('fight').steps)
+  assert.throws(() => applyTaskPanelOverrides(fight, { stone: '21' }), /必须在 0–20 范围内/)
+  assert.throws(() => applyTaskPanelOverrides(fight, { shell: 'whoami' }), /不支持参数/)
 })

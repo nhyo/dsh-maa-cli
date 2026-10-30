@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { buildTrainingAdvice, fetchCommunityRanking, loadOperatorMetadata, readCommunityRankingCache } from './training-advice.js'
+import { buildTrainingAdvice, fetchCommunityRanking, loadOperatorMetadata, readCommunityRankingCache } from '../src/operators/training-advice.js'
 
 function snapshot(operators) {
   return { version: 1, scannedAt: '2026-10-29T12:00:00.000Z', operators }

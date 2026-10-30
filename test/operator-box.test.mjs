@@ -13,7 +13,7 @@ import {
   readOperatorBox,
   saveOperatorBox,
   stripOperBoxCallbacks,
-} from './operator-box.js'
+} from '../src/operators/operator-box.js'
 
 const progress = {
   taskchain: 'OperBox', what: 'OperBoxInfo',

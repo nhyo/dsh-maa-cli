@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { checkEmulator, emulatorErrorMessage, MUMU_NOT_RUNNING_MESSAGE, resolveEmulatorEndpoint } from './emulator.js'
+import { checkEmulator, emulatorErrorMessage, MUMU_NOT_RUNNING_MESSAGE, resolveEmulatorEndpoint } from '../src/runtime/emulator.js'
 
 const RESPONSE = stdout => ({ command: 'maa-cli', exitCode: 0, terminationSignal: '', stdout, stderr: '' })
 

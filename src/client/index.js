@@ -154,6 +154,9 @@ window.__ModuleLoader__.load({
       '.maa-rogue-control:disabled{opacity:.55;cursor:default}',
       '.maa-rogue-toggle{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary);min-width:0}',
       '.maa-rogue-toggle input{accent-color:var(--dsw-alias-brand-primary)}',
+      '.maa-task-options{display:flex;flex-wrap:wrap;gap:6px 12px;padding:4px 0}',
+      '.maa-task-option{display:inline-flex;align-items:center;gap:5px;color:var(--dsw-alias-label-primary);font-size:12px;white-space:nowrap}',
+      '.maa-task-option input{accent-color:var(--dsw-alias-brand-primary)}',
       '.maa-rogue-advanced{margin-top:10px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2)}',
       '.maa-rogue-summary{display:block;margin-bottom:8px;font-size:12px;font-weight:600;cursor:pointer;color:var(--dsw-alias-label-secondary)}',
       '.maa-rogue-summary::-webkit-details-marker{display:none}',
@@ -303,20 +306,39 @@ window.__ModuleLoader__.load({
       return keys
     }
 
-    function confirmLine(code, params) {
+    function fieldVisible(field, values) {
+      const when = field && field.when
+      if (!when) return true
+      if (Object.prototype.hasOwnProperty.call(when, 'equals')) return values[when.key] === when.equals
+      if (Object.prototype.hasOwnProperty.call(when, 'notEquals')) return values[when.key] !== when.notEquals
+      return true
+    }
+
+    function encodedPanelValue(value) {
+      if (Array.isArray(value)) return value.map(function (item) { return encodeURIComponent(String(item)) }).join(',')
+      if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+      return encodeURIComponent(String(value))
+    }
+
+    function confirmLine(code, params, fields) {
       const parts = ['/maa confirm', code]
       if (params) {
-        const allowed = params.theme ? allowedAdvancedKeys(params) : []
-        CONFIRM_PARAM_KEYS.forEach(function (key) {
-          const value = params[key]
-          if (value === undefined || value === null || value === '') return
-          if (ADVANCED_KEYS.indexOf(key) >= 0 && params.theme && allowed.indexOf(key) < 0) return
-          if (typeof value === 'number' || typeof value === 'boolean') {
-            parts.push(key + '=' + value)
-            return
-          }
-          parts.push(key + '=' + String(value).replace(/\s+/gu, ''))
-        })
+        if (Array.isArray(fields)) {
+          fields.forEach(function (field) {
+            if (!fieldVisible(field, params)) return
+            const value = params[field.key]
+            if (value === undefined || value === null) return
+            parts.push(field.key + '=' + encodedPanelValue(value))
+          })
+        } else {
+          const allowed = params.theme ? allowedAdvancedKeys(params) : []
+          CONFIRM_PARAM_KEYS.forEach(function (key) {
+            const value = params[key]
+            if (value === undefined || value === null || value === '') return
+            if (ADVANCED_KEYS.indexOf(key) >= 0 && params.theme && allowed.indexOf(key) < 0) return
+            parts.push(key + '=' + encodedPanelValue(value))
+          })
+        }
         // The note is for DSH, not MaaCore: it travels URL-encoded so spaces and
         // punctuation survive the whitespace-separated key=value tokens.
         const note = typeof params.note === 'string' ? params.note.trim() : ''
@@ -465,6 +487,85 @@ window.__ModuleLoader__.load({
         }),
         action.error ? h('div', { className: 'maa-plan-error' }, action.error) : null,
         action.result ? h('div', { className: 'maa-plan-result', role: 'status' }, action.result) : null)
+    }
+
+    // Generic MAA task settings. The host supplies the field definitions from
+    // the same whitelist that validates `/maa confirm`, so the browser does not
+    // maintain a second, drifting copy of task parameters.
+    function TaskSettingsPanel(props) {
+      const panel = props.panel
+      const value = props.value || {}
+      const disabled = props.disabled === true
+      const update = function (patch) { props.onChange(Object.assign({}, value, patch)) }
+      const fields = Array.isArray(panel.fields) ? panel.fields : []
+
+      const renderField = function (item) {
+        if (!fieldVisible(item, value)) return null
+        const current = value[item.key]
+        if (item.kind === 'boolean') {
+          return h('label', { className: 'maa-rogue-toggle', key: item.key },
+            h('input', {
+              type: 'checkbox', checked: current === true, disabled: disabled,
+              onChange: function (event) { update({ [item.key]: event.target.checked }) },
+            }),
+            h('span', null, item.label))
+        }
+        if (item.kind === 'multi') {
+          const selected = Array.isArray(current) ? current : []
+          return h('div', { className: 'maa-rogue-field', key: item.key, style: { alignItems: 'flex-start' } },
+            h('span', { className: 'maa-rogue-label' }, item.label),
+            h('div', { className: 'maa-task-options' }, (item.options || []).map(function (entry) {
+              const checked = selected.some(function (choice) { return String(choice) === String(entry.value) })
+              return h('label', { className: 'maa-task-option', key: String(entry.value) },
+                h('input', {
+                  type: 'checkbox', checked: checked, disabled: disabled,
+                  onChange: function (event) {
+                    const next = selected.filter(function (choice) { return String(choice) !== String(entry.value) })
+                    if (event.target.checked) next.push(entry.value)
+                    update({ [item.key]: next })
+                  },
+                }), entry.label)
+            })))
+        }
+        if (item.kind === 'select') {
+          return h('label', { className: 'maa-rogue-field', key: item.key },
+            h('span', { className: 'maa-rogue-label' }, item.label),
+            h('select', {
+              className: 'maa-rogue-control', value: current === undefined ? '' : String(current), disabled: disabled,
+              onChange: function (event) {
+                const match = (item.options || []).find(function (entry) { return String(entry.value) === event.target.value })
+                update({ [item.key]: match ? match.value : event.target.value })
+              },
+            }, (item.options || []).map(function (entry) {
+              return h('option', { key: String(entry.value), value: String(entry.value) }, entry.label)
+            })))
+        }
+        const numeric = item.kind === 'integer' || item.kind === 'number'
+        return h('label', { className: 'maa-rogue-field', key: item.key },
+          h('span', { className: 'maa-rogue-label' }, item.label),
+          h('input', {
+            className: 'maa-rogue-control', type: numeric ? 'number' : 'text',
+            min: numeric ? item.min : undefined, max: numeric ? item.max : undefined,
+            step: numeric ? (item.step || 1) : undefined, maxLength: numeric ? undefined : item.maxLength,
+            value: current === undefined || current === null ? '' : String(current),
+            placeholder: item.placeholder || '', disabled: disabled,
+            onChange: function (event) {
+              const raw = event.target.value
+              update({ [item.key]: numeric && raw !== '' ? Number(raw) : raw })
+            },
+          }))
+      }
+
+      const basic = fields.filter(function (item) { return !item.advanced }).map(renderField).filter(Boolean)
+      const advanced = fields.filter(function (item) { return item.advanced }).map(renderField).filter(Boolean)
+      return h('div', { className: 'maa-rogue-panel' },
+        h('div', { className: 'maa-rogue-head' },
+          h('span', null, panel.title + '参数'),
+          h('span', { className: 'maa-rogue-hint' }, '参考 MAA.exe；修改只在确认后生效')),
+        basic.length ? h('div', { className: 'maa-rogue-grid' }, basic) : h('div', { className: 'maa-rogue-note' }, '此项目没有可调参数。'),
+        advanced.length ? h('details', { className: 'maa-rogue-advanced' },
+          h('summary', { className: 'maa-rogue-summary' }, '高级设置'),
+          h('div', { className: 'maa-rogue-grid' }, advanced)) : null)
     }
 
     // Mirrors MAA's roguelike settings dialog. Theme, difficulty, squad, role
@@ -688,7 +789,7 @@ window.__ModuleLoader__.load({
       // A fresh plan always opens expanded; collapsing is a per-plan choice.
       React.useEffect(function () { setCollapsed(false) }, [code])
       if (!plan) return null
-      const effective = plan.params || plan.roguelike || null
+      const effective = plan.params || plan.roguelike || (plan.taskPanel ? plan.taskPanel.values : null) || null
       const dismiss = function () {
         dismissedPlans.add(plan.code)
         props.store.clear(plan.code)
@@ -735,11 +836,19 @@ window.__ModuleLoader__.load({
               onChange: function (next) { props.store.setParams(plan.code, next) },
             })
           : null,
+        plan.taskPanel && effective
+          ? h(TaskSettingsPanel, {
+              panel: plan.taskPanel,
+              value: effective,
+              disabled: false,
+              onChange: function (next) { props.store.setParams(plan.code, next) },
+            })
+          : null,
         h('div', { className: 'maa-plan-actions' },
           h(ConfirmButton, {
             code: plan.code,
             execute: plan.execute,
-            line: confirmLine(plan.code, effective),
+            line: confirmLine(plan.code, effective, plan.taskPanel ? plan.taskPanel.fields : undefined),
             note: effective && typeof effective.note === 'string' ? effective.note : '',
             onNoteChange: function (next) {
               props.store.setParams(plan.code, Object.assign({}, effective, { note: next }))
@@ -788,14 +897,19 @@ window.__ModuleLoader__.load({
           }
           if (!payload || payload.code !== code) return
           const panel = payload.panel && typeof payload.panel === 'object' ? payload.panel : null
-          const defaults = panelDefaults(panel ? { theme: panel.theme } : null)
-          store.set({
+          if (!panel || typeof panel.type !== 'string' || !panel.values || typeof panel.values !== 'object') return
+          const common = {
             code: code,
             summary: typeof payload.summary === 'string' && payload.summary ? payload.summary : 'MAA 计划',
             execute: execute,
-            roguelike: panel ? Object.assign(defaults, panel) : defaults,
             params: null,
-          })
+          }
+          if (panel.type === 'Roguelike') {
+            const defaults = panelDefaults({ theme: panel.values.theme })
+            store.set(Object.assign(common, { roguelike: Object.assign(defaults, panel.values) }))
+          } else {
+            store.set(Object.assign(common, { taskPanel: panel }))
+          }
         }, function () {})
       })
     }

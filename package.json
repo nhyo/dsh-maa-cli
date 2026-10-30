@@ -3,39 +3,26 @@
   "version": "0.9.2",
   "description": "A DeepSeek Harness tool bundle for Arknights: prepares and executes maa-cli plans and bootstraps its own MAA runtime.",
   "type": "module",
-  "main": "index.js",
+  "main": "src/index.js",
   "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
-    "./cordis.patch.yml": "./cordis.patch.yml",
+    ".": "./src/index.js",
+    "./client": "./src/client/index.js",
+    "./cordis.patch.yml": "./config/cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
-    "index.js",
-    "client.js",
-    "local-command.js",
-    "confirmation.js",
-    "planner.js",
-    "runner.js",
-    "doctor.js",
-    "emulator.js",
-    "paths.js",
-    "preflight.js",
-    "state.js",
-    "runtime.js",
-    "operator-box.js",
-    "training-advice.js",
+    "src",
+    "config",
     "README.md",
-    "scripts/install-runtime.mjs",
-    "cordis.patch.yml"
+    "scripts/install-runtime.mjs"
   ],
   "scripts": {
-    "test": "node --test runner.test.mjs doctor.test.mjs paths.test.mjs preflight.test.mjs state.test.mjs emulator.test.mjs runtime.test.mjs operator-box.test.mjs training-advice.test.mjs confirmation-panel.test.mjs"
+    "test": "node --test test/*.test.mjs"
   },
   "dsh": {
     "manifestVersion": 1,
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": "./config/cordis.patch.yml"
     },
     "client": {
       "platform": "web",

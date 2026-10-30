@@ -4,7 +4,7 @@ import path from 'node:path'
 export const GENERATED_TASK_NAME = 'dsh-generated'
 
 const CLIENTS = new Set(['Official', 'Bilibili', 'Txwy', 'YoStarEN', 'YoStarJP', 'YoStarKR'])
-const FACILITIES = new Set(['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Dorm'])
+const FACILITIES = new Set(['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Recycle', 'Dorm', 'Processing', 'Training', 'AssistantChange'])
 const DRONES = new Set(['_NotUse', 'Money', 'SyntheticJade', 'CombatRecord', 'PureGold', 'OriginStone', 'Chip'])
 const ROGUELIKE_THEMES = new Set(['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'])
 
@@ -263,7 +263,7 @@ function buildStep(step, index) {
         blacklist: stringArray(step.blacklist ?? [], 20, 32, 'Mall.blacklist'),
         force_shopping_if_credit_full: optionalBoolean(step.forceShoppingIfCreditFull, false),
         only_buy_discount: optionalBoolean(step.onlyBuyDiscount, false),
-        reserve_max_credit: optionalBoolean(step.reserveMaxCredit, true),
+        reserve_max_credit: optionalBoolean(step.reserveMaxCredit, false),
         visit_friends: optionalBoolean(step.visitFriends, false),
         credit_fight: optionalBoolean(step.creditFight, false),
       }
@@ -296,12 +296,14 @@ function buildStep(step, index) {
       })
       break
     case 'ReclamationAlgorithm':
-      assertFields(step, new Set([...COMMON_FIELDS, 'mode', 'toolToCraft', 'numCraftBatches']))
+      assertFields(step, new Set([...COMMON_FIELDS, 'theme', 'mode', 'toolToCraft', 'toolsToCraft', 'numCraftBatches', 'incrementMode', 'clearStore']))
       params = {
-        theme: 'Tales',
-        mode: optionalInteger(step.mode, 0, 1, 'ReclamationAlgorithm.mode', 1),
-        tools_to_craft: optionalString(step.toolToCraft, 1, 32, null, 'ReclamationAlgorithm.toolToCraft') ?? '荧光棒',
-        num_craft_batches: optionalInteger(step.numCraftBatches, 1, 16, 'ReclamationAlgorithm.numCraftBatches', 1),
+        theme: enumValue(step.theme ?? 'Tales', new Set(['Tales', 'RelaunchAnchor']), 'ReclamationAlgorithm.theme'),
+        mode: optionalInteger(step.mode, 0, 48, 'ReclamationAlgorithm.mode', 0, new Set([0, 1, 16, 32, 48])),
+        tools_to_craft: stringArray(step.toolsToCraft ?? (step.toolToCraft ? [step.toolToCraft] : []), 10, 32, 'ReclamationAlgorithm.toolsToCraft'),
+        num_craft_batches: optionalInteger(step.numCraftBatches, 1, 16, 'ReclamationAlgorithm.numCraftBatches', 16),
+        increment_mode: optionalInteger(step.incrementMode, 0, 1, 'ReclamationAlgorithm.incrementMode', 0),
+        clear_store: optionalBoolean(step.clearStore, false),
       }
       break
     case 'Custom':

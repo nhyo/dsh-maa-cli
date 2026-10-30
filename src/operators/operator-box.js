@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { stateDirectory } from './state.js'
+import { stateDirectory } from '../runtime/state.js'
 
 const CACHE_VERSION = 1
 const OPER_BOX_MARKER = 'OperBox:'

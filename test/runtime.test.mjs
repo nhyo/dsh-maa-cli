@@ -18,7 +18,7 @@ import {
   updateRuntime,
   pruneInstallCaches,
   exists,
-} from './runtime.js'
+} from '../src/runtime/runtime.js'
 
 async function tempRoot(prefix = 'dsh-maa-runtime-') {
   return await mkdtemp(path.join(os.tmpdir(), prefix))

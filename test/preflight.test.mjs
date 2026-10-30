@@ -4,8 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { PREFLIGHT_DIR_QUERIES, prepareRuntimeDirectories, summarizePreflight } from './preflight.js'
-import { exists } from './paths.js'
+import { PREFLIGHT_DIR_QUERIES, prepareRuntimeDirectories, summarizePreflight } from '../src/runtime/preflight.js'
+import { exists } from '../src/runtime/paths.js'
 
 const RESPONSE = stdout => ({ command: 'maa-cli', exitCode: 0, terminationSignal: '', stdout, stderr: '' })
 

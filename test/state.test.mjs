@@ -15,7 +15,7 @@ import {
   stateDirectory,
   stateFilePath,
   writeState,
-} from './state.js'
+} from '../src/runtime/state.js'
 
 async function makeEnv() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-state-'))

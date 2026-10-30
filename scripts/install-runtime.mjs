@@ -1,5 +1,5 @@
-import { bootstrapRuntime, inspectRuntime, formatRuntimeReport, runtimeLayout } from '../runtime.js'
-import { runMaa } from '../runner.js'
+import { bootstrapRuntime, inspectRuntime, formatRuntimeReport, runtimeLayout } from '../src/runtime/runtime.js'
+import { runMaa } from '../src/runtime/runner.js'
 
 const started = Date.now()
 try {

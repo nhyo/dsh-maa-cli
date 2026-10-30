@@ -1,21 +1,26 @@
 import { resolveRoguelikeTheme } from './planner.js'
 
 const HELP = [
-  '常用 MAA 本地命令（不会调用模型）：',
-  '/maa fight 1-7 2  或  /maa 刷 1-7 2次',
-  '/maa rouge        或  /maa 肉鸽（零模型准备肉鸽计划，默认主题 傀影，默认 1 局；可追加 主题 [次数] [key=value…]）',
-  '/maa startup      或  /maa 启动游戏',
-  '/maa infrast      或  /maa 基建换班',
-  '/maa award        或  /maa 领取奖励',
-  '/maa box          或  /maa 扫描干员Box',
-  '/maa closedown    或  /maa 关闭游戏',
+  'MAA 零模型任务（输入项目名后在确认面板修改参数，不会立即操作游戏）：',
+  '/maa startup      开始唤醒',
+  '/maa fight        理智作战（也接受 flight / 作战）',
+  '/maa infrast      基建换班',
+  '/maa recruit      自动公招',
+  '/maa mall         信用收支',
+  '/maa award        领取奖励',
+  '/maa rouge        自动肉鸽',
+  '/maa reclamation  生息演算',
+  '/maa update       更新干员 Box / 仓库数据',
+  '/maa closedown    关闭游戏',
+  '',
+  '兼容旧写法：/maa fight 1-7 2、/maa rouge 萨米 3；它们也只会预填面板，不会直接执行。',
   '/maa stop         或  /maa 停止任务',
-  '/maa confirm MAA-XXXXXX  确认并执行待确认计划（可附加肉鸽参数，如 theme=Sarkaz mode=0 difficulty=4 squad=蓝图测绘分队）',
+  '/maa confirm MAA-XXXXXX  确认并执行待确认计划（参数由面板自动附加）',
   '                  末尾也可加 note=<URL 编码的备注>，备注只交给 DSH 自行参考，不保证执行',
   '/maa peek MAA-XXXXXX     只读查看待确认计划的摘要与参数（面板内部使用，不会执行）',
   '/maa setup        安装本机 MAA 运行时（首次使用）',
   '',
-  '作战默认不使用理智药、临期理智药或源石；基建默认不使用无人机。',
+  '所有项目都必须在面板点击「确认并执行 MAA」后才会运行。',
 ].join('\n')
 
 const CHINESE_COUNT = new Map([['一', 1], ['两', 2], ['二', 2], ['三', 3], ['四', 4], ['五', 5], ['六', 6], ['七', 7], ['八', 8], ['九', 9], ['十', 10]])
@@ -33,7 +38,7 @@ function parseOverrides(raw) {
   const overrides = {}
   for (const token of raw.trim().split(/\s+/u)) {
     const index = token.indexOf('=')
-    if (index <= 0 || index === token.length - 1) {
+    if (index <= 0) {
       throw new Error(`无法识别的确认参数：${token}（应为 key=value，例如 theme=Sarkaz）\n\n${HELP}`)
     }
     const key = token.slice(0, index)
@@ -55,22 +60,33 @@ export function parseLocalMaaCommand(rawInput) {
   if (/^(?:setup|安装运行时|初始化)$/iu.test(input)) return { kind: 'setup' }
 
   if (/^(?:startup|启动|启动游戏|打开游戏|打开明日方舟)$/iu.test(input)) {
-    return { kind: 'execute', purpose: '启动明日方舟', steps: [{ type: 'StartUp', clientType: 'Official' }] }
+    return { kind: 'plan', purpose: '开始唤醒', steps: [{ type: 'StartUp', clientType: 'Official' }] }
   }
   if (/^(?:closedown|关闭|关闭游戏|关闭明日方舟)$/iu.test(input)) {
-    return { kind: 'execute', purpose: '关闭明日方舟', steps: [{ type: 'CloseDown' }] }
+    return { kind: 'plan', purpose: '关闭明日方舟', steps: [{ type: 'CloseDown' }] }
   }
   if (/^(?:infrast|基建|基建换班)$/iu.test(input)) {
-    return { kind: 'execute', purpose: '基建换班（不使用无人机）', steps: [{ type: 'Infrast', drones: '_NotUse' }] }
+    return { kind: 'plan', purpose: '基建换班', steps: [{ type: 'Infrast', mode: 0, drones: '_NotUse' }] }
+  }
+  if (/^(?:recruit|公招|自动公招)$/iu.test(input)) {
+    return { kind: 'plan', purpose: '自动公招', steps: [{ type: 'Recruit', refresh: false, select: [4, 5, 6], confirm: [], times: 0, setTime: true, expedite: false }] }
+  }
+  if (/^(?:mall|credit|信用|信用收支)$/iu.test(input)) {
+    return { kind: 'plan', purpose: '信用收支', steps: [{ type: 'Mall', visitFriends: true, shopping: true, buyFirst: ['招聘许可'], blacklist: ['碳', '家具', '加急许可'] }] }
   }
   if (/^(?:award|领取奖励|领奖)$/iu.test(input)) {
-    return { kind: 'execute', purpose: '领取日常和周常奖励', steps: [{ type: 'Award', dailyWeekly: true }] }
+    return { kind: 'plan', purpose: '领取奖励', steps: [{ type: 'Award', dailyWeekly: true }] }
   }
   if (/^(?:box|operbox|扫描干员(?:box|列表)?|识别干员(?:box|列表)?)$/iu.test(input)) {
     return {
-      kind: 'execute', purpose: '扫描干员 Box',
-      steps: [{ type: 'StartUp', clientType: 'Official' }, { type: 'OperBox' }],
+      kind: 'plan', purpose: '更新干员 Box', steps: [{ type: 'OperBox' }],
     }
+  }
+  if (/^(?:update|data|更新|更新数据)$/iu.test(input)) {
+    return { kind: 'plan', purpose: '更新干员 Box 和仓库数据', steps: [{ type: 'OperBox' }, { type: 'Depot' }] }
+  }
+  if (/^(?:reclamation|reclamationalgorithm|生息|生息演算)$/iu.test(input)) {
+    return { kind: 'plan', purpose: '生息演算', steps: [{ type: 'ReclamationAlgorithm', mode: 0 }] }
   }
 
   // Zero-model roguelike: `/maa rogue <theme> [次数] [key=value ...]`. It only
@@ -89,12 +105,12 @@ export function parseLocalMaaCommand(rawInput) {
     }
   }
 
-  const fight = input.match(/^(?:fight|刷|作战)\s*([A-Za-z0-9._-]+)(?:\s*(\d+|[一二两三四五六七八九十])\s*(?:次)?)?$/iu)
+  const fight = input.match(/^(?:fight|flight|刷|作战)(?:\s+([A-Za-z0-9._-]+))?(?:\s*(\d+|[一二两三四五六七八九十])\s*(?:次)?)?$/iu)
   if (fight) {
     const times = countOf(fight[2] ?? '1')
     if (!Number.isInteger(times) || times < 1 || times > 100) throw new Error('作战次数必须是 1–100。')
     return {
-      kind: 'execute', purpose: `刷 ${fight[1]} ×${times}`,
+      kind: 'plan', purpose: `理智作战 ${fight[1] || '当前/上次关卡'} ×${times}`,
       steps: [{ type: 'Fight', stage: fight[1], times, medicine: 0, expiringMedicine: 0, stone: 0 }],
     }
   }

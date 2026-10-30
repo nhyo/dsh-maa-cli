@@ -13,7 +13,7 @@ import {
   parseVersionOutput,
   runDoctor,
   summarizeChecks,
-} from './doctor.js'
+} from '../src/runtime/doctor.js'
 
 const RESPONSE = stdout => ({ command: 'maa-cli', exitCode: 0, terminationSignal: '', stdout, stderr: '' })
 
