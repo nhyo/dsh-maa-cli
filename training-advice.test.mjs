@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { buildTrainingAdvice, fetchCommunityRanking, loadOperatorMetadata } from './training-advice.js'
+import { buildTrainingAdvice, fetchCommunityRanking, loadOperatorMetadata, readCommunityRankingCache } from './training-advice.js'
 
 function snapshot(operators) {
   return { version: 1, scannedAt: '2026-10-29T12:00:00.000Z', operators }
@@ -58,12 +58,34 @@ test('keeps cup priority, uses profession rank, and explains coverage boosts', (
 })
 
 test('derives cup levels from the published vote order and ignores zero-vote entries', async () => {
-  const responses = [
-    { data: { topics: [{ id: 'new', title: '新主题', topic_type: 'Pairwise', close_time: '2026-07-17T21:00:00Z' }] } },
-    { data: { items: Array.from({ length: 10 }, (_, index) => ({ name: `干员${index}`, win: index === 9 ? 0 : 10, lose: index === 9 ? 0 : 1, rate: '90%' })), count: 99 } },
-  ]
-  const fetchImpl = async () => ({ ok: true, json: async () => responses.shift() })
-  const result = await fetchCommunityRanking({ fetchImpl, now: Date.parse('2026-10-29T12:00:00Z'), fresh: true })
-  assert.equal(result.items.length, 9)
-  assert.deepEqual(result.items.map(item => item.tier), ['超大杯上', '超大杯中', '超大杯下', '大杯', '大杯', '大杯', '中杯', '中杯', '中杯'])
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-ranking-'))
+  const env = { DSH_MAA_CLI_STATE_DIR: root }
+  try {
+    const responses = [
+      { data: { topics: [{ id: 'new', title: '新主题', topic_type: 'Pairwise', close_time: '2026-07-17T21:00:00Z' }] } },
+      { data: { items: Array.from({ length: 10 }, (_, index) => ({ name: `干员${index}`, win: index === 9 ? 0 : 10, lose: index === 9 ? 0 : 1, rate: '90%' })), count: 99 } },
+    ]
+    const fetchImpl = async () => ({ ok: true, json: async () => responses.shift() })
+    const result = await fetchCommunityRanking({ fetchImpl, env, now: Date.parse('2026-10-29T12:00:00Z') })
+    assert.equal(result.items.length, 9)
+    assert.equal(result.update.updated, true)
+    assert.deepEqual(result.items.map(item => item.tier), ['超大杯上', '超大杯中', '超大杯下', '大杯', '大杯', '大杯', '中杯', '中杯', '中杯'])
+    assert.equal((await readCommunityRankingCache({ env })).source.topicId, 'new')
+
+    let calls = 0
+    const sameTopic = async () => {
+      calls += 1
+      return { ok: true, json: async () => ({ data: { topics: [{ id: 'new', title: '新主题', topic_type: 'Pairwise', close_time: '2026-07-17T21:00:00Z' }] } }) }
+    }
+    const unchanged = await fetchCommunityRanking({ fetchImpl: sameTopic, env, now: Date.parse('2026-10-29T13:00:00Z') })
+    assert.equal(calls, 1)
+    assert.equal(unchanged.update.updated, false)
+
+    const fallback = await fetchCommunityRanking({ fetchImpl: async () => { throw new Error('offline') }, env, now: Date.parse('2026-10-29T14:00:00Z') })
+    assert.equal(fallback.update.fallback, true)
+    assert.match(fallback.update.warning, /继续使用缓存/)
+    assert.equal(fallback.source.topicId, 'new')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

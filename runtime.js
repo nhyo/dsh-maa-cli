@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { access, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { access, copyFile, link, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -18,6 +18,7 @@ import path from 'node:path'
 export const RUNTIME_DIR_ENV = 'DSH_MAA_CLI_RUNTIME_DIR'
 export const ASSET_URL_ENV = 'DSH_MAA_CLI_ASSET_URL'
 export const RELEASE_API_URL = 'https://api.github.com/repos/MaaAssistantArknights/maa-cli/releases/latest'
+export const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60_000
 
 const TARGETS = Object.freeze({
   win32: { x64: ['x86_64-pc-windows-msvc', '.zip'], arm64: ['aarch64-pc-windows-msvc', '.zip'] },
@@ -26,6 +27,10 @@ const TARGETS = Object.freeze({
 })
 
 const EXECUTABLE_CANDIDATES = Object.freeze(['maa.exe', 'maa-cli.exe', 'maa', 'maa-cli'])
+const UPDATE_BACKUP_SUFFIX = '.dsh-update-backup'
+const UPDATE_COMMIT_MARKER = '.dsh-update-committed'
+let runtimeUpdatePromise = null
+let autoUpdatePromise = null
 
 export function runtimeRoot(env = process.env) {
   const override = (env[RUNTIME_DIR_ENV] ?? '').trim()
@@ -345,11 +350,13 @@ export async function bootstrapRuntime(options = {}) {
   report('profile', `default.toml -> ${profile}${adbPath === '' ? ' (no adb detected, fill adb_path manually)' : ''}`)
 
   const after = await inspectRuntime(env)
+  const installedAt = new Date().toISOString()
   const manifest = {
     version: 1,
     maaCliVersion: asset.version || installed.stdout.match(/v?\d+\.\d+\.\d+/)?.[0] || '',
     asset: asset.name,
-    installedAt: new Date().toISOString(),
+    installedAt,
+    lastAutoUpdateCheckAt: installedAt,
     layout: { root: layout.root, executable: cliPath, data: layout.data, config: layout.config },
     adbPath,
   }
@@ -393,17 +400,155 @@ export async function pruneInstallCaches(layout = runtimeLayout()) {
 }
 
 export async function updateRuntime(options = {}) {
+  if (runtimeUpdatePromise !== null) return await runtimeUpdatePromise
+  runtimeUpdatePromise = performRuntimeUpdate(options).finally(() => { runtimeUpdatePromise = null })
+  return await runtimeUpdatePromise
+}
+
+async function performRuntimeUpdate(options = {}) {
   const env = options.env ?? process.env
   const layout = runtimeLayout(env)
+  await recoverRuntimeUpdate(layout)
   const status = await inspectRuntime(env)
   if (!status.installed) throw new Error('运行时尚未安装，请先执行 maa_runtime 的 install')
-  const result = await options.run(['update', '--batch'], {
-    cliPath: status.executablePath,
-    env: { ...env, ...runtimeEnvironment(layout) },
-    signal: options.signal,
-    timeoutMs: options.timeoutMs ?? 30 * 60_000,
-  })
-  return { layout, result }
+  const backups = await snapshotRuntimeForUpdate(layout)
+  let result
+  try {
+    result = await options.run(['update', '--batch'], {
+      cliPath: status.executablePath,
+      env: { ...env, ...runtimeEnvironment(layout) },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs ?? 30 * 60_000,
+    })
+  } catch (error) {
+    await rollbackRuntimeUpdate(layout, backups)
+    throw error
+  }
+  if (result.exitCode !== 0) {
+    await rollbackRuntimeUpdate(layout, backups)
+    return { layout, result, reclaimed: 0 }
+  }
+  await commitRuntimeUpdate(layout, backups)
+  const reclaimed = await pruneInstallCaches(layout)
+  return { layout, result, reclaimed }
+}
+
+async function snapshotRuntimeForUpdate(layout) {
+  const directories = [path.join(layout.data, 'lib'), path.join(layout.data, 'resource')]
+  const backups = []
+  try {
+    for (const directory of directories) {
+      if (!(await exists(directory))) continue
+      const backup = `${directory}${UPDATE_BACKUP_SUFFIX}`
+      await rm(backup, { recursive: true, force: true })
+      await rename(directory, backup)
+      backups.push({ directory, backup })
+      await mirrorDirectoryWithLinks(backup, directory)
+    }
+    return backups
+  } catch (error) {
+    await rollbackRuntimeUpdate(layout, backups)
+    throw error
+  }
+}
+
+async function mirrorDirectoryWithLinks(source, destination) {
+  await mkdir(destination, { recursive: true })
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name)
+    const to = path.join(destination, entry.name)
+    if (entry.isDirectory()) {
+      await mirrorDirectoryWithLinks(from, to)
+      continue
+    }
+    try {
+      await link(from, to)
+    } catch {
+      // A different filesystem or a special file may not support hard links.
+      // Copy only that file; the common case remains a zero-copy snapshot.
+      await copyFile(from, to)
+    }
+  }
+}
+
+async function rollbackRuntimeUpdate(layout, backups) {
+  for (const { directory, backup } of [...backups].reverse()) {
+    if (!(await exists(backup))) continue
+    await rm(directory, { recursive: true, force: true })
+    await rename(backup, directory)
+  }
+  await rm(path.join(layout.data, UPDATE_COMMIT_MARKER), { force: true }).catch(() => {})
+}
+
+async function commitRuntimeUpdate(layout, backups) {
+  const marker = path.join(layout.data, UPDATE_COMMIT_MARKER)
+  await writeFile(marker, new Date().toISOString(), 'utf8')
+  for (const { backup } of backups) await rm(backup, { recursive: true, force: true })
+  await rm(marker, { force: true })
+}
+
+async function recoverRuntimeUpdate(layout) {
+  const marker = path.join(layout.data, UPDATE_COMMIT_MARKER)
+  const committed = await exists(marker)
+  for (const directory of [path.join(layout.data, 'lib'), path.join(layout.data, 'resource')]) {
+    const backup = `${directory}${UPDATE_BACKUP_SUFFIX}`
+    if (!(await exists(backup))) continue
+    if (committed) await rm(backup, { recursive: true, force: true })
+    else {
+      await rm(directory, { recursive: true, force: true })
+      await rename(backup, directory)
+    }
+  }
+  if (committed) await rm(marker, { force: true }).catch(() => {})
+}
+
+/**
+ * Best-effort automatic MaaCore/resource maintenance.
+ *
+ * maa-cli owns version comparison and download/install semantics. The plugin
+ * only throttles checks, serializes them, and records the outcome. A failed
+ * check never prevents the already-installed runtime from running a task.
+ */
+export async function maybeAutoUpdateRuntime(options = {}) {
+  if (autoUpdatePromise !== null) return await autoUpdatePromise
+  if (options.allowed === false) return { checked: false, updated: false, skipped: 'task-active', warning: '' }
+
+  autoUpdatePromise = performAutoUpdateRuntime(options).finally(() => { autoUpdatePromise = null })
+  return await autoUpdatePromise
+}
+
+async function performAutoUpdateRuntime(options) {
+  const env = options.env ?? process.env
+  const now = options.now ?? Date.now()
+  const intervalMs = options.intervalMs ?? AUTO_UPDATE_INTERVAL_MS
+  await recoverRuntimeUpdate(runtimeLayout(env))
+  const status = await inspectRuntime(env)
+  if (!status.installed) return { checked: false, updated: false, skipped: 'not-installed', warning: '' }
+  const lastCheck = Date.parse(status.manifest?.lastAutoUpdateCheckAt ?? '')
+  if (Number.isFinite(lastCheck) && now - lastCheck < intervalMs) {
+    return { checked: false, updated: false, skipped: 'not-due', warning: '' }
+  }
+
+  const checkedAt = new Date(now).toISOString()
+  try {
+    const update = await updateRuntime({ ...options, env })
+    if (update.result.exitCode !== 0) {
+      const detail = (update.result.stderr || update.result.stdout || `exit ${update.result.exitCode}`).slice(-600)
+      await updateManifest(status.layout, { lastAutoUpdateCheckAt: checkedAt, lastAutoUpdateError: detail })
+      return { checked: true, updated: false, skipped: '', warning: `MAA 自动更新失败，已继续使用原版本：${detail}`, result: update.result }
+    }
+    await updateManifest(status.layout, {
+      lastAutoUpdateCheckAt: checkedAt,
+      lastAutoUpdateSuccessAt: checkedAt,
+      lastAutoUpdateError: '',
+    })
+    return { checked: true, updated: true, skipped: '', warning: '', result: update.result, reclaimed: update.reclaimed }
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error
+    const detail = error instanceof Error ? error.message : String(error)
+    await updateManifest(status.layout, { lastAutoUpdateCheckAt: checkedAt, lastAutoUpdateError: detail })
+    return { checked: true, updated: false, skipped: '', warning: `MAA 自动更新失败，已继续使用原版本：${detail}` }
+  }
 }
 
 export function formatRuntimeReport(status) {

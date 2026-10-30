@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -10,6 +10,7 @@ import {
   downloadFile,
   formatBytes,
   inspectRuntime,
+  maybeAutoUpdateRuntime,
   runtimeEnvironment,
   runtimeLayout,
   runtimeRoot,
@@ -201,6 +202,66 @@ test('update refuses to run without an installed runtime', async () => {
     updateRuntime({ env: { DSH_MAA_CLI_RUNTIME_DIR: await tempRoot() }, run: async () => ({ exitCode: 0 }) }),
     /尚未安装/,
   )
+})
+
+test('automatic update is throttled, serialized, and keeps the installed runtime on failure', async () => {
+  const root = await tempRoot()
+  const env = { DSH_MAA_CLI_RUNTIME_DIR: root }
+  const layout = runtimeLayout(env)
+  await mkdir(layout.bin, { recursive: true })
+  await mkdir(path.join(layout.data, 'lib'), { recursive: true })
+  await mkdir(path.join(layout.data, 'resource'), { recursive: true })
+  await writeFile(layout.executable, '')
+  const core = path.join(layout.data, 'lib', process.platform === 'win32' ? 'MaaCore.dll' : 'libMaaCore.so')
+  await writeFile(core, 'old-core')
+  await writeFile(layout.manifest, JSON.stringify({ version: 1, installedAt: '2026-10-01T00:00:00.000Z' }))
+  const lib = path.join(layout.data, 'lib')
+  await rename(lib, `${lib}.dsh-update-backup`)
+  await mkdir(lib, { recursive: true })
+  await writeFile(path.join(lib, 'partial-download'), 'partial')
+
+  let calls = 0
+  const failedRun = async args => {
+    calls += 1
+    assert.deepEqual(args, ['update', '--batch'])
+    return { exitCode: 7, stdout: '', stderr: 'network unavailable' }
+  }
+  const now = Date.parse('2026-10-29T12:00:00Z')
+  const [first, concurrent] = await Promise.all([
+    maybeAutoUpdateRuntime({ env, run: failedRun, now }),
+    maybeAutoUpdateRuntime({ env, run: failedRun, now }),
+  ])
+  assert.equal(calls, 1)
+  assert.match(first.warning, /继续使用原版本/)
+  assert.match(concurrent.warning, /继续使用原版本/)
+  assert.equal(await readFile(core, 'utf8'), 'old-core')
+
+  const throttled = await maybeAutoUpdateRuntime({ env, run: failedRun, now: now + 60_000 })
+  assert.equal(throttled.skipped, 'not-due')
+  assert.equal(calls, 1)
+  const manifest = JSON.parse(await readFile(layout.manifest, 'utf8'))
+  assert.equal(manifest.lastAutoUpdateCheckAt, '2026-10-29T12:00:00.000Z')
+
+  const success = await maybeAutoUpdateRuntime({
+    env,
+    run: async args => {
+      calls += 1
+      assert.deepEqual(args, ['update', '--batch'])
+      await rm(path.join(layout.data, 'lib'), { recursive: true, force: true })
+      await mkdir(path.join(layout.data, 'lib'), { recursive: true })
+      await writeFile(core, 'new-core')
+      return { exitCode: 0, stdout: 'Already up to date', stderr: '' }
+    },
+    now: now + 2 * 24 * 60 * 60_000,
+  })
+  assert.equal(success.checked, true)
+  assert.equal(success.warning, '')
+  assert.equal(calls, 2)
+  assert.equal(await readFile(core, 'utf8'), 'new-core')
+
+  const busy = await maybeAutoUpdateRuntime({ env, run: failedRun, now: now + 4 * 24 * 60 * 60_000, allowed: false })
+  assert.equal(busy.skipped, 'task-active')
+  assert.equal(calls, 2)
 })
 
 test('prunes the MaaCore archive maa-cli leaves in its cache', async () => {

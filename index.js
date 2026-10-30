@@ -1,11 +1,11 @@
-import { actionArguments, queryArguments, resolveMaaCliPath, runMaa } from './runner.js'
+import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa } from './runner.js'
 import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './planner.js'
 import { consumePlanFromHumanGesture, preparePendingPlan } from './confirmation.js'
 import { parseLocalMaaCommand } from './local-command.js'
 import { formatReport, runDoctor } from './doctor.js'
 import { prepareRuntimeDirectories } from './preflight.js'
 import { checkEmulator, emulatorErrorMessage } from './emulator.js'
-import { bootstrapRuntime, exists, formatRuntimeReport, inspectRuntime, updateRuntime } from './runtime.js'
+import { bootstrapRuntime, exists, formatRuntimeReport, inspectRuntime, maybeAutoUpdateRuntime, updateManifest, updateRuntime } from './runtime.js'
 import {
   formatOperatorBoxScanResult,
   parseCompletedOperatorBox,
@@ -101,7 +101,7 @@ const TRAINING_ADVICE_RESULT_SCHEMA = {
   required: ['status', 'scannedAt', 'summary'],
   properties: {
     status: { type: 'string', enum: ['needs_scan', 'needs_choice', 'ready', 'source_error'] },
-    scannedAt: { type: 'string' }, summary: { type: 'string' }, policy: { type: 'string' },
+    scannedAt: { type: 'string' }, summary: { type: 'string' }, policy: { type: 'string' }, strategyUpdate: { type: 'string' },
     recommendations: {
       type: 'array', items: {
         type: 'object', additionalProperties: false,
@@ -196,6 +196,7 @@ function formatCommandResult(result) {
   const lines = [`MAA 已结束（退出码 ${result.exitCode}）。`, `计划：${result.planSummary}`]
   if (result.operatorBox) lines.push('', formatOperatorBoxScanResult(result.operatorBox))
   if (result.operatorBoxError) lines.push('', `干员 Box 结果读取失败：${result.operatorBoxError}`)
+  if (result.maintenanceWarning) lines.push('', result.maintenanceWarning)
   if (result.stdout) lines.push('', result.stdout)
   if (result.stderr) lines.push('', result.stderr)
   return lines.join('\n')
@@ -224,7 +225,10 @@ async function executeDocument(agent, signal, document, planSummary, options = {
   const active = { controller, planSummary }
   activeExecutions.set(key, active)
   try {
-    await ensureMaaCli(executionSignal)
+    const cliPath = await ensureMaaCli(executionSignal)
+    const maintenance = isRuntimePath(cliPath)
+      ? await maybeAutoUpdateRuntime({ run: runMaa, signal: executionSignal, allowed: activeExecutions.size === 1 })
+      : { warning: '' }
     if (options.emulatorChecked !== true) {
       const emulator = await checkEmulator({ runMaa, signal: executionSignal })
       if (!emulator.ok) throw new Error(emulatorErrorMessage(emulator))
@@ -245,20 +249,20 @@ async function executeDocument(agent, signal, document, planSummary, options = {
       outputLimit: hasOperatorBox ? 16 * 1024 * 1024 : undefined,
       envPatch: hasOperatorBox ? { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } : undefined,
     })
-    if (!hasOperatorBox) return { ...result, planFile: written.path, planJson: written.json, planSummary }
+    if (!hasOperatorBox) return { ...result, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning }
 
     const cleanStderr = stripOperBoxCallbacks(result.stderr)
     if (result.exitCode !== 0) {
-      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary }
+      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning }
     }
     try {
       const operatorBox = parseCompletedOperatorBox(`${result.stdout}\n${result.stderr}`)
       await saveOperatorBox(operatorBox)
-      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, operatorBox }
+      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, operatorBox, maintenanceWarning: maintenance.warning }
     } catch (error) {
       return {
         ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary,
-        operatorBoxError: error instanceof Error ? error.message : String(error),
+        operatorBoxError: error instanceof Error ? error.message : String(error), maintenanceWarning: maintenance.warning,
       }
     }
   } finally {
@@ -441,7 +445,15 @@ export function apply(ctx) {
         return { action: 'status', installed: status.installed, summary: formatRuntimeReport(status), steps: [] }
       }
       if (args.action === 'update') {
+        if (activeExecutions.size > 0) throw new Error('当前有 MAA 任务正在执行，暂不更新；任务结束后再试。')
         const updated = await updateRuntime({ run: runMaa, signal: exec.signal })
+        const checkedAt = new Date().toISOString()
+        if (updated.result.exitCode !== 0) {
+          const detail = updated.result.stderr || updated.result.stdout || `exit ${updated.result.exitCode}`
+          await updateManifest(updated.layout, { lastAutoUpdateCheckAt: checkedAt, lastAutoUpdateError: detail })
+          throw new Error(`MAA 更新失败，原运行时继续保留：${detail}`)
+        }
+        await updateManifest(updated.layout, { lastAutoUpdateCheckAt: checkedAt, lastAutoUpdateSuccessAt: checkedAt, lastAutoUpdateError: '' })
         const status = await inspectRuntime()
         return {
           action: 'update', installed: status.installed, summary: formatRuntimeReport(status),

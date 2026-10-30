@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { stateDirectory } from './state.js'
 
 const VOTE_API = 'https://api.vote.ltsc.vip'
 const VOTE_SITE = 'https://vote.ltsc.vip'
@@ -10,7 +11,11 @@ const PROFESSION_NAMES = Object.freeze({
   CASTER: '术师', MEDIC: '医疗', SUPPORT: '辅助', SPECIAL: '特种',
 })
 
-let rankingCache = null
+const RANKING_CACHE_VERSION = 1
+
+export function trainingRankingFilePath(env = process.env) {
+  return path.join(stateDirectory(env), 'training-ranking.json')
+}
 
 export async function loadOperatorMetadata(resourceDirectory) {
   const file = path.join(resourceDirectory, 'battle_data.json')
@@ -35,42 +40,95 @@ export async function loadOperatorMetadata(resourceDirectory) {
 
 export async function fetchCommunityRanking(options = {}) {
   const now = options.now ?? Date.now()
-  if (rankingCache && rankingCache.expiresAt > now && options.fresh !== true) return rankingCache.value
+  const env = options.env ?? process.env
+  const cached = await readCommunityRankingCache({ env })
   const fetchImpl = options.fetchImpl ?? globalThis.fetch
-  if (typeof fetchImpl !== 'function') throw new Error('当前 Node.js 没有 fetch()，无法读取社区强度榜。')
+  if (typeof fetchImpl !== 'function') return cachedFallback(cached, '当前 Node.js 没有 fetch()，无法检查社区强度榜更新。', now)
   const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 15_000)
   const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal
-  const topics = await fetchJson(fetchImpl, `${VOTE_API}/topic/list_all`, {}, signal)
-  const candidates = Array.isArray(topics?.data?.topics) ? topics.data.topics : []
-  const topic = candidates
-    .filter(item => item?.topic_type === 'Pairwise' && Number.isFinite(Date.parse(item.close_time)) && Date.parse(item.close_time) <= now)
-    .sort((a, b) => Date.parse(b.close_time) - Date.parse(a.close_time))[0]
-  if (!topic) throw new Error('社区强度榜没有可用的已发布主题。')
-
-  const response = await fetchJson(fetchImpl, `${VOTE_API}/results/final_order`, { topic_id: topic.id }, signal)
-  const rawItems = Array.isArray(response?.data?.items) ? response.data.items : []
-  const rated = rawItems.filter(item => Number(item?.win) + Number(item?.lose) > 0)
-  if (rated.length === 0) throw new Error('社区强度榜当前没有有效投票结果。')
-  const items = rated.map((item, index) => ({
-    name: requiredText(item.name, 'ranking.name'),
-    overallRank: index + 1,
-    tier: CUP_LEVELS[Math.min(8, Math.floor(index / (rated.length / 9)))] ?? '其他',
-    rate: requiredText(item.rate, 'ranking.rate'),
-  }))
-  const value = {
-    items,
-    source: {
-      name: '明日方舟六星干员强度投票箱',
-      url: VOTE_SITE,
-      topicId: String(topic.id),
-      topicTitle: String(topic.title ?? topic.name ?? topic.id),
-      topicClosedAt: new Date(topic.close_time).toISOString(),
-      voteCount: Number(response?.data?.count ?? 0),
-      retrievedAt: new Date(now).toISOString(),
-    },
+  let topic
+  try {
+    const topics = await fetchJson(fetchImpl, `${VOTE_API}/topic/list_all`, {}, signal)
+    const candidates = Array.isArray(topics?.data?.topics) ? topics.data.topics : []
+    topic = candidates
+      .filter(item => item?.topic_type === 'Pairwise' && Number.isFinite(Date.parse(item.close_time)) && Date.parse(item.close_time) <= now)
+      .sort((a, b) => Date.parse(b.close_time) - Date.parse(a.close_time))[0]
+    if (!topic) throw new Error('社区强度榜没有可用的已发布主题。')
+  } catch (error) {
+    if (error?.name === 'AbortError' && options.signal?.aborted) throw error
+    return cachedFallback(cached, error instanceof Error ? error.message : String(error), now)
   }
-  rankingCache = { expiresAt: now + 10 * 60_000, value }
-  return value
+
+  if (cached?.source?.topicId === String(topic.id) && options.fresh !== true) {
+    return { ...cached, update: { checkedAt: new Date(now).toISOString(), updated: false, fallback: false, warning: '' } }
+  }
+
+  let response
+  try {
+    response = await fetchJson(fetchImpl, `${VOTE_API}/results/final_order`, { topic_id: topic.id }, signal)
+  } catch (error) {
+    if (error?.name === 'AbortError' && options.signal?.aborted) throw error
+    return cachedFallback(cached, error instanceof Error ? error.message : String(error), now)
+  }
+  let value
+  try {
+    const rawItems = Array.isArray(response?.data?.items) ? response.data.items : []
+    const rated = rawItems.filter(item => Number(item?.win) + Number(item?.lose) > 0)
+    if (rated.length === 0) throw new Error('社区强度榜当前没有有效投票结果。')
+    const items = rated.map((item, index) => ({
+      name: requiredText(item.name, 'ranking.name'),
+      overallRank: index + 1,
+      tier: CUP_LEVELS[Math.min(8, Math.floor(index / (rated.length / 9)))] ?? '其他',
+      rate: requiredText(item.rate, 'ranking.rate'),
+    }))
+    value = validateRankingCache({
+      version: RANKING_CACHE_VERSION,
+      items,
+      source: {
+        name: '明日方舟六星干员强度投票箱',
+        url: VOTE_SITE,
+        topicId: String(topic.id),
+        topicTitle: String(topic.title ?? topic.name ?? topic.id),
+        topicClosedAt: new Date(topic.close_time).toISOString(),
+        voteCount: Number(response?.data?.count ?? 0),
+        retrievedAt: new Date(now).toISOString(),
+      },
+    })
+  } catch (error) {
+    return cachedFallback(cached, error instanceof Error ? error.message : String(error), now)
+  }
+  let warning = ''
+  try {
+    await writeCommunityRankingCache(value, { env })
+  } catch (error) {
+    warning = `培养策略已获取，但缓存写入失败：${error instanceof Error ? error.message : String(error)}`
+  }
+  return { ...value, update: { checkedAt: new Date(now).toISOString(), updated: true, fallback: false, warning } }
+}
+
+export async function readCommunityRankingCache(options = {}) {
+  const env = options.env ?? process.env
+  try {
+    return validateRankingCache(JSON.parse(await readFile(trainingRankingFilePath(env), 'utf8')))
+  } catch {
+    return null
+  }
+}
+
+export async function writeCommunityRankingCache(ranking, options = {}) {
+  const env = options.env ?? process.env
+  const file = trainingRankingFilePath(env)
+  const value = validateRankingCache(ranking)
+  await mkdir(path.dirname(file), { recursive: true })
+  const temporary = `${file}.${process.pid}.tmp`
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    await rename(temporary, file)
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {})
+    throw error
+  }
+  return file
 }
 
 export function buildTrainingAdvice(snapshot, metadata, ranking, options = {}) {
@@ -135,15 +193,19 @@ export function buildTrainingAdvice(snapshot, metadata, ranking, options = {}) {
     })
     .slice(0, maxResults)
 
-  return {
+  const strategyUpdate = ranking.update?.warning
+    ? ranking.update.warning
+    : ranking.update?.updated ? `培养策略已更新到“${ranking.source.topicTitle}”。` : '培养策略已是最新版本。'
+  const result = {
     status: 'ready',
     scannedAt: snapshot.scannedAt,
     policy: '职业覆盖中的“可用”定义为至少精英化一；只推荐尚未精二或精二低于 60 级的已拥有六星干员。',
     recommendations,
     coverage,
     source: ranking.source,
-    summary: formatTrainingAdvice({ status: 'ready', scannedAt: snapshot.scannedAt, recommendations, coverage, source: ranking.source }),
+    strategyUpdate,
   }
+  return { ...result, summary: formatTrainingAdvice(result) }
 }
 
 export function formatTrainingAdvice(result) {
@@ -159,7 +221,44 @@ export function formatTrainingAdvice(result) {
   const gaps = result.coverage.filter(item => item.shortage).map(item => item.professionName)
   lines.push('', `职业覆盖缺口（无精一/精二）：${gaps.join('、') || '无'}。`)
   lines.push(`评级来源：${result.source.name}「${result.source.topicTitle}」（社区投票，仅作参考；${result.source.url}）。`)
+  if (result.strategyUpdate) lines.push(result.strategyUpdate)
   return lines.join('\n')
+}
+
+function cachedFallback(cached, detail, now) {
+  if (cached === null) throw new Error(detail)
+  return {
+    ...cached,
+    update: {
+      checkedAt: new Date(now).toISOString(), updated: false, fallback: true,
+      warning: `培养策略更新检查失败，已继续使用缓存“${cached.source.topicTitle}”：${detail}`,
+    },
+  }
+}
+
+function validateRankingCache(value) {
+  if (!value || value.version !== RANKING_CACHE_VERSION || !Array.isArray(value.items)) throw new Error('培养策略缓存格式无效。')
+  const source = value.source
+  if (!source || typeof source !== 'object') throw new Error('培养策略缓存来源无效。')
+  const items = value.items.map(item => ({
+    name: requiredText(item.name, 'ranking.name'),
+    overallRank: integer(item.overallRank, 1, 10_000, 'ranking.overallRank'),
+    tier: requiredText(item.tier, 'ranking.tier'),
+    rate: requiredText(item.rate, 'ranking.rate'),
+  }))
+  return {
+    version: RANKING_CACHE_VERSION,
+    items,
+    source: {
+      name: requiredText(source.name, 'ranking.source.name'),
+      url: requiredText(source.url, 'ranking.source.url'),
+      topicId: requiredText(source.topicId, 'ranking.source.topicId'),
+      topicTitle: requiredText(source.topicTitle, 'ranking.source.topicTitle'),
+      topicClosedAt: new Date(source.topicClosedAt).toISOString(),
+      voteCount: integer(source.voteCount, 0, Number.MAX_SAFE_INTEGER, 'ranking.source.voteCount'),
+      retrievedAt: new Date(source.retrievedAt).toISOString(),
+    },
+  }
 }
 
 async function fetchJson(fetchImpl, url, body, signal) {
