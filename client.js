@@ -15,7 +15,111 @@ window.__ModuleLoader__.load({
       { value: 'Mizuki', label: '水月与深蓝之树' },
       { value: 'Sami', label: '探索者的银凇止境' },
       { value: 'Sarkaz', label: '萨卡兹的无终奇语' },
-      { value: 'JieGarden', label: '界园' },
+      { value: 'JieGarden', label: '岁的界园志异' },
+      { value: 'BlackFlow', label: '黑流树海' },
+    ]
+
+    // MAA's 推荐开局 table (manual/introduction/integrated-strategy): each theme
+    // lists the recommended difficulty, squads, roles and starting operator. The
+    // panel starts from these values, tags them 【推荐】, and still lets the
+    // player type anything MAA accepts.
+    const ROGUELIKE_PRESETS = {
+      Phantom: {
+        difficulty: 2,
+        squad: '指挥分队',
+        squads: ['指挥分队', '突击战术分队'],
+        roles: ['取长补短'],
+        coreChar: '丰川祥子',
+        chars: [{ name: '丰川祥子', useSupport: false }, { name: '棘刺', useSupport: false }],
+      },
+      Mizuki: {
+        difficulty: 3,
+        squad: '以人为本分队',
+        squads: ['以人为本分队', '心胜于物分队'],
+        roles: ['稳扎稳打'],
+        coreChar: '维什戴尔',
+        chars: [{ name: '维什戴尔', useSupport: true }],
+      },
+      Sami: {
+        difficulty: 4,
+        squad: '特训分队',
+        squads: ['特训分队', '远程战术分队'],
+        roles: ['稳扎稳打'],
+        coreChar: '维什戴尔',
+        chars: [{ name: '维什戴尔', useSupport: true }],
+      },
+      Sarkaz: {
+        difficulty: 4,
+        squad: '蓝图测绘分队',
+        squads: ['蓝图测绘分队', '远程战术分队'],
+        roles: ['稳扎稳打'],
+        coreChar: '维什戴尔',
+        chars: [{ name: '维什戴尔', useSupport: true }],
+      },
+      JieGarden: {
+        difficulty: 3,
+        squad: '指挥分队',
+        squads: ['指挥分队', '远程战术分队'],
+        roles: ['稳扎稳打'],
+        coreChar: '维什戴尔',
+        chars: [{ name: '维什戴尔', useSupport: true }],
+      },
+      // 黑流树海 is the newest theme; MAA's 推荐开局 lists no difficulty yet but
+      // recommends 特勤分队 / 堡垒战术分队 with 稳扎稳打 / 坚不可摧 and 机械师.
+      BlackFlow: {
+        difficulty: 0,
+        squad: '特勤分队',
+        squads: ['特勤分队', '堡垒战术分队'],
+        roles: ['稳扎稳打', '坚不可摧'],
+        coreChar: '机械师',
+        chars: [{ name: '机械师', useSupport: false }],
+      },
+    }
+
+    // Every option the game offers as a 分队 name, copied from MAA's own squad
+    // list so the panel never has to fall back to free text.
+    const ROGUELIKE_SQUAD_NAMES = [
+      '指挥分队', '突击战术分队', '堡垒战术分队', '远程战术分队', '破坏战术分队',
+      '生活至上分队', '点刺成锭分队', '蓝图测绘分队', '以人为本分队', '心胜于物分队',
+      '特训分队', '特勤分队', '高规格分队', '天师府分队', '司岁台分队', '魂灵护送分队',
+      '本源研修分队', '博闻广记分队', '代理人分队', '地面突破分队', '高台突破分队',
+      '地质调查分队', '多边贸易分队', '后勤分队', '花团锦簇分队', '集群分队',
+      '开拓者分队', '科学主义分队', '矛头分队', '拟态学者分队', '棋行险着分队',
+      '商贾分队', '岁影回音分队', '踏足遍历分队', '团结阵线分队', '文明开化分队',
+      '物尽其用分队', '研究分队', '异想天开分队', '因地制宜分队', '永恒狩猎分队',
+      '游客分队', '知学分队', '专业人士分队',
+    ]
+    const ROGUELIKE_ROLE_GROUPS = ['取长补短', '稳扎稳打', '坚不可摧']
+    const ROGUELIKE_CHARS = ['维什戴尔', '丰川祥子', '棘刺', '机械师']
+    const STARTS_COUNT_OPTIONS = [1, 2, 3, 4, 5, 10, 15, 20]
+    const DIFFICULTY_OPTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    const INVESTMENT_OPTIONS = [50, 100, 200, 500, 999]
+
+    // Same numbers MaaCore accepts for RoguelikeTask.mode. `themes` limits a
+    // mode to the theme that implements it so the panel cannot send a mode MAA
+    // would ignore.
+    const ROGUELIKE_MODES = [
+      { value: 0, label: '刷分/奖励点数' },
+      { value: 1, label: '刷源石锭' },
+      { value: 4, label: '凹开局' },
+      { value: 5, label: '刷坍缩范式', themes: ['Sami'] },
+      { value: 6, label: '刷月度小队' },
+      { value: 7, label: '刷深入调查' },
+      { value: 10001, label: '快速过第一层', themes: ['Sarkaz'] },
+      { value: 20001, label: '刷常乐节点', themes: ['JieGarden'] },
+      { value: 30001, label: '刷襁褓动物', themes: ['BlackFlow'] },
+    ]
+
+    function modesForTheme(theme) {
+      return ROGUELIKE_MODES.filter(function (item) {
+        return !item.themes || item.themes.indexOf(theme) >= 0
+      })
+    }
+
+    const PLAY_TIME_TARGETS = [
+      { value: 1, label: '令（掷地有声）' },
+      { value: 2, label: '黍（种因得果）' },
+      { value: 3, label: '年（三缺一）' },
     ]
 
     const CSS = [
@@ -28,6 +132,8 @@ window.__ModuleLoader__.load({
       '.maa-stop-button{height:34px;padding:0 14px;border:1px solid var(--dsw-alias-state-error-primary);border-radius:8px;background:transparent;color:var(--dsw-alias-state-error-primary);font:inherit;font-size:13px;cursor:pointer}',
       '.maa-stop-button:disabled{opacity:.55;cursor:default}',
       '.maa-plan-state{font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      '.maa-note-input{flex:1 1 220px;min-width:0;height:30px;box-sizing:border-box;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}',
+      '.maa-note-input:disabled{opacity:.55;cursor:default}',
       '.maa-plan-error{font-size:12px;color:var(--dsw-alias-state-error-primary)}',
       '.maa-plan-result{width:100%;margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}',
       '.maa-confirm-dock{position:relative;box-sizing:border-box;width:100%;max-width:var(--dsh-composer-card-max-width,100%);margin:0 auto;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,var(--dsw-alias-border-l2));border-radius:var(--dsw-radius-panel,16px);padding:14px 16px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 8%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary)}',
@@ -48,6 +154,10 @@ window.__ModuleLoader__.load({
       '.maa-rogue-control:disabled{opacity:.55;cursor:default}',
       '.maa-rogue-toggle{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary);min-width:0}',
       '.maa-rogue-toggle input{accent-color:var(--dsw-alias-brand-primary)}',
+      '.maa-rogue-advanced{margin-top:10px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2)}',
+      '.maa-rogue-summary{display:block;margin-bottom:8px;font-size:12px;font-weight:600;cursor:pointer;color:var(--dsw-alias-label-secondary)}',
+      '.maa-rogue-summary::-webkit-details-marker{display:none}',
+      '.maa-rogue-note{margin-top:6px;font-size:11px;color:var(--dsw-alias-label-secondary)}',
     ].join('')
 
     function installStyles() {
@@ -79,35 +189,130 @@ window.__ModuleLoader__.load({
 
     // Roguelike steps carry their own settings; mirror the defaults the model
     // planned so the confirmation panel starts from MAA's actual parameters
-    // instead of an empty form.
+    // instead of an empty form. Anything the plan leaves out falls back to the
+    // 推荐开局 values MAA publishes for that theme.
     function roguelikeDefaults(block) {
       const args = planArgs(block)
       const steps = args && Array.isArray(args.steps) ? args.steps : []
       const step = steps.find(item => item && item.type === 'Roguelike')
       if (!step) return null
+      const theme = ROGUELIKE_PRESETS[step.theme] ? step.theme : 'Phantom'
+      const preset = ROGUELIKE_PRESETS[theme]
+      const char = typeof step.coreChar === 'string' && step.coreChar ? step.coreChar : preset.coreChar
+      const charPreset = preset.chars.find(function (item) { return item.name === char })
       return {
-        theme: typeof step.theme === 'string' ? step.theme : 'Phantom',
-        startsCount: Number.isInteger(step.startsCount) ? step.startsCount : 1,
-        difficulty: Number.isInteger(step.difficulty) ? step.difficulty : 0,
-        squad: typeof step.squad === 'string' ? step.squad : '',
-        coreChar: typeof step.coreChar === 'string' ? step.coreChar : '',
-        useSupport: step.useSupport === true,
+        theme: theme,
+        mode: Number.isInteger(step.mode) ? step.mode : 0,
+        // The panel always starts at 9999 (MAA's own default is effectively
+        // unlimited); the field is a digit input so any count can be typed.
+        startsCount: 9999,
+        difficulty: Number.isInteger(step.difficulty) ? step.difficulty : preset.difficulty,
+        squad: typeof step.squad === 'string' && step.squad ? step.squad : preset.squad,
+        roles: typeof step.roles === 'string' && step.roles ? step.roles : preset.roles[0],
+        coreChar: char,
+        useSupport: typeof step.useSupport === 'boolean' ? step.useSupport : Boolean(charPreset && charPreset.useSupport),
+        useNonFriendSupport: step.useNonFriendSupport === true,
         stopAtFinalBoss: step.stopAtFinalBoss === true,
+        stopAtMaxLevel: step.stopAtMaxLevel === true,
+        investmentEnabled: step.investmentEnabled !== false,
+        investmentsCount: Number.isInteger(step.investmentsCount) ? step.investmentsCount : 999,
+        stopWhenInvestmentFull: step.stopWhenInvestmentFull === true,
+        investmentWithMoreScore: step.investmentWithMoreScore === true,
+        startWithEliteTwo: step.startWithEliteTwo === true,
+        onlyStartWithEliteTwo: step.onlyStartWithEliteTwo === true,
+        monthlySquadAutoIterate: step.monthlySquadAutoIterate === true,
+        deepExplorationAutoIterate: step.deepExplorationAutoIterate === true,
+        findPlayTimeTarget: Number.isInteger(step.findPlayTimeTarget) ? step.findPlayTimeTarget : 1,
+        useFoldartal: step.useFoldartal === true,
+        checkCollapsalParadigms: step.checkCollapsalParadigms === true,
+        refreshTraderWithDice: step.refreshTraderWithDice === true,
+        // Free-form note for DSH itself; it never reaches MaaCore.
+        note: '',
       }
     }
 
     // Values travel as key=value tokens on the local command plane; the server
     // validates them against the pending plan before the one-shot code is used.
+    const CONFIRM_PARAM_KEYS = [
+      'theme', 'mode', 'startsCount', 'difficulty', 'squad', 'roles', 'coreChar',
+      'useSupport', 'useNonFriendSupport', 'stopAtFinalBoss', 'stopAtMaxLevel',
+      'investmentEnabled', 'investmentsCount', 'stopWhenInvestmentFull', 'investmentWithMoreScore',
+      'startWithEliteTwo', 'onlyStartWithEliteTwo', 'monthlySquadAutoIterate',
+      'deepExplorationAutoIterate', 'findPlayTimeTarget',
+      'useFoldartal', 'checkCollapsalParadigms', 'refreshTraderWithDice',
+    ]
+
+    // Which 高级功能 switches MAA actually honours for the current theme/mode;
+    // the panel only renders these and confirmLine only sends these, so no
+    // setting can be silently ignored on the MaaCore side.
+    const ADVANCED_KEYS = [
+      'useNonFriendSupport', 'stopAtFinalBoss', 'stopAtMaxLevel', 'investmentEnabled',
+      'investmentsCount', 'stopWhenInvestmentFull', 'investmentWithMoreScore',
+      'startWithEliteTwo', 'onlyStartWithEliteTwo', 'monthlySquadAutoIterate',
+      'deepExplorationAutoIterate', 'findPlayTimeTarget', 'useFoldartal',
+      'checkCollapsalParadigms', 'refreshTraderWithDice',
+    ]
+
+    const ADVANCED_LABELS = {
+      useNonFriendSupport: '使用非好友助战',
+      stopAtFinalBoss: '打到最终 Boss 停',
+      stopAtMaxLevel: '等级刷满停',
+      investmentEnabled: '投资源石锭',
+      stopWhenInvestmentFull: '投资满停',
+      investmentWithMoreScore: '投资后购物',
+      startWithEliteTwo: '凹精二直升',
+      onlyStartWithEliteTwo: '只凹精二直升',
+      monthlySquadAutoIterate: '月度小队自动切换',
+      deepExplorationAutoIterate: '深入调查自动切换',
+      useFoldartal: '使用密文板',
+      checkCollapsalParadigms: '检测坍缩范式',
+      refreshTraderWithDice: '骰子刷新商店',
+    }
+
+    function allowedAdvancedKeys(value) {
+      if (!value) return []
+      const keys = []
+      const take = function (key) { keys.push(key) }
+      if (value.useSupport === true) take('useNonFriendSupport')
+      // 仅除 Phantom 以外的主题才支持「打到最终 Boss 停」
+      if (value.theme !== 'Phantom') take('stopAtFinalBoss')
+      take('stopAtMaxLevel')
+      take('investmentEnabled')
+      if (value.investmentEnabled !== false) {
+        take('investmentsCount')
+        take('stopWhenInvestmentFull')
+      }
+      if (value.mode === 1) take('investmentWithMoreScore')
+      if (value.mode === 4) {
+        take('startWithEliteTwo')
+        if (value.startWithEliteTwo === true) take('onlyStartWithEliteTwo')
+      }
+      if (value.mode === 6) take('monthlySquadAutoIterate')
+      if (value.mode === 7) take('deepExplorationAutoIterate')
+      if (value.mode === 20001) take('findPlayTimeTarget')
+      if (value.theme === 'Sami') { take('useFoldartal'); take('checkCollapsalParadigms') }
+      if (value.theme === 'Mizuki') take('refreshTraderWithDice')
+      return keys
+    }
+
     function confirmLine(code, params) {
       const parts = ['/maa confirm', code]
       if (params) {
-        parts.push('theme=' + params.theme)
-        parts.push('startsCount=' + params.startsCount)
-        parts.push('difficulty=' + params.difficulty)
-        if (params.squad) parts.push('squad=' + String(params.squad).replace(/\s+/gu, ''))
-        if (params.coreChar) parts.push('coreChar=' + String(params.coreChar).replace(/\s+/gu, ''))
-        parts.push('useSupport=' + (params.useSupport === true))
-        parts.push('stopAtFinalBoss=' + (params.stopAtFinalBoss === true))
+        const allowed = params.theme ? allowedAdvancedKeys(params) : []
+        CONFIRM_PARAM_KEYS.forEach(function (key) {
+          const value = params[key]
+          if (value === undefined || value === null || value === '') return
+          if (ADVANCED_KEYS.indexOf(key) >= 0 && params.theme && allowed.indexOf(key) < 0) return
+          if (typeof value === 'number' || typeof value === 'boolean') {
+            parts.push(key + '=' + value)
+            return
+          }
+          parts.push(key + '=' + String(value).replace(/\s+/gu, ''))
+        })
+        // The note is for DSH, not MaaCore: it travels URL-encoded so spaces and
+        // punctuation survive the whitespace-separated key=value tokens.
+        const note = typeof params.note === 'string' ? params.note.trim() : ''
+        if (note) parts.push('note=' + encodeURIComponent(note))
       }
       return parts.join(' ')
     }
@@ -238,64 +443,186 @@ window.__ModuleLoader__.load({
         h('span', { className: 'maa-plan-state' },
           action.state === 'stopped' ? '不会自动继续剩余任务'
           : action.state === 'done' ? '本次确认没有调用模型' : '30 分钟内有效'),
+        // The 备注 sits right of the validity hint: DSH reads it after the run
+        // and decides what to do with it; there is no guarantee it is acted on.
+        h('input', {
+          className: 'maa-note-input', type: 'text', maxLength: 120,
+          placeholder: '备注：想让 DSH 额外做的事（不保证执行）',
+          title: '备注只交给 DSH 自行理解，不保证执行',
+          value: typeof props.note === 'string' ? props.note : '',
+          disabled: action.state !== 'ready',
+          onChange: function (event) {
+            if (props.onNoteChange) props.onNoteChange(event.target.value)
+          },
+        }),
         action.error ? h('div', { className: 'maa-plan-error' }, action.error) : null,
         action.result ? h('div', { className: 'maa-plan-result', role: 'status' }, action.result) : null)
     }
 
-    // Mirrors MAA's roguelike task settings: theme, mode/difficulty, squad,
-    // starting operator, support usage, and the stop-at-final-boss switch.
+    // Mirrors MAA's roguelike settings dialog. Theme, difficulty, squad, role
+    // group and starting operator default to MAA's 推荐开局 values (tagged
+    // 【推荐】, still editable) and the collapsed 高级功能 section exposes the
+    // advanced switches MAA offers for RoguelikeTask.
     function RoguelikePanel(props) {
       const value = props.value
       const disabled = props.disabled === true
+      const preset = ROGUELIKE_PRESETS[value.theme] || ROGUELIKE_PRESETS.Phantom
       const update = function (patch) { props.onChange(Object.assign({}, value, patch)) }
-      const numberField = function (label, key, min, max) {
+      // Every control is a picker: the panel never asks for a typed number or a
+      // free-form squad / role group / operator name.
+      const pick = function (label, key, options, coerce) {
+        const raw = value[key]
+        const text = raw === undefined || raw === null ? '' : String(raw)
+        return h('label', { className: 'maa-rogue-field', key: key },
+          h('span', { className: 'maa-rogue-label' }, label),
+          h('select', {
+            className: 'maa-rogue-control', value: text, disabled: disabled,
+            onChange: function (event) {
+              const next = event.target.value
+              update({ [key]: coerce ? coerce(next) : next })
+            },
+          }, options.map(function (item) {
+            return h('option', { key: String(item.value), value: String(item.value) }, item.label)
+          })))
+      }
+      const toOptions = function (names, recommended) {
+        return names.map(function (name) {
+          return {
+            value: name,
+            label: recommended && recommended.indexOf(name) >= 0 ? name + '【推荐】' : name,
+          }
+        })
+      }
+      const withCurrent = function (options, current) {
+        if (!current || options.some(function (item) { return item.value === current })) return options
+        return [{ value: current, label: current }].concat(options)
+      }
+      const squadOptions = withCurrent(toOptions(
+        preset.squads.concat(ROGUELIKE_SQUAD_NAMES.filter(function (name) { return preset.squads.indexOf(name) < 0 })),
+        preset.squads), value.squad)
+      const roleOptions = withCurrent(toOptions(
+        preset.roles.concat(ROGUELIKE_ROLE_GROUPS.filter(function (name) { return preset.roles.indexOf(name) < 0 })),
+        preset.roles), value.roles)
+      const charNames = preset.chars.map(function (item) { return item.name })
+      const charOptions = withCurrent(toOptions(
+        charNames.concat(ROGUELIKE_CHARS.filter(function (name) { return charNames.indexOf(name) < 0 })),
+        charNames), value.coreChar)
+      const numberOptions = function (list, current) {
+        const numbers = list.slice()
+        if (Number.isInteger(current) && numbers.indexOf(current) < 0) numbers.push(current)
+        return numbers.sort(function (a, b) { return a - b }).map(function (number) {
+          return { value: number, label: String(number) }
+        })
+      }
+      const boolOptions = [{ value: 'true', label: '是' }, { value: 'false', label: '否' }]
+      const boolPick = function (label, key) {
+        return pick(label, key, boolOptions, function (raw) { return raw === 'true' })
+      }
+      const numberPick = function (label, key, list) {
+        return pick(label, key, numberOptions(list, value[key]), Number)
+      }
+      // 刷取次数 accepts hand-typed digits (MAA's own default is huge, so a fixed
+      // picker cannot express it) while still rejecting every non-digit.
+      const digitField = function (label, key) {
+        const current = value[key]
         return h('label', { className: 'maa-rogue-field', key: key },
           h('span', { className: 'maa-rogue-label' }, label),
           h('input', {
-            className: 'maa-rogue-control', type: 'number', min: min, max: max, step: 1,
-            value: value[key], disabled: disabled,
+            className: 'maa-rogue-control', type: 'text', inputMode: 'numeric', maxLength: 5,
+            value: current === undefined || current === null ? '' : String(current),
+            placeholder: '9999', disabled: disabled,
             onChange: function (event) {
-              const next = Number(event.target.value)
-              if (Number.isFinite(next)) update({ [key]: Math.min(max, Math.max(min, Math.round(next))) })
+              const digits = event.target.value.replace(/\D+/gu, '').slice(0, 5)
+              update({ [key]: digits === '' ? '' : Number(digits) })
+            },
+            onBlur: function () {
+              const raw = value[key]
+              if (raw === '' || raw === undefined || raw === null || Number(raw) < 1) update({ [key]: 9999 })
             },
           }))
       }
-      const textField = function (label, key, placeholder) {
-        return h('label', { className: 'maa-rogue-field', key: key },
-          h('span', { className: 'maa-rogue-label' }, label),
-          h('input', {
-            className: 'maa-rogue-control', type: 'text', value: value[key], placeholder: placeholder,
-            maxLength: 32, disabled: disabled,
-            onChange: function (event) { update({ [key]: event.target.value }) },
-          }))
+      // Mode-scoped switches are reset when the mode changes so the 高级功能 list
+      // never carries a setting MAA would ignore under the new mode.
+      const modeScopedReset = {
+        investmentWithMoreScore: false,
+        startWithEliteTwo: false,
+        onlyStartWithEliteTwo: false,
+        monthlySquadAutoIterate: false,
+        deepExplorationAutoIterate: false,
+        findPlayTimeTarget: 1,
       }
-      const toggle = function (label, key) {
-        return h('label', { className: 'maa-rogue-toggle', key: key },
-          h('input', {
-            type: 'checkbox', checked: value[key] === true, disabled: disabled,
-            onChange: function (event) { update({ [key]: event.target.checked }) },
-          }),
-          label)
+      const changeMode = function (next) { update(Object.assign({ mode: next }, modeScopedReset)) }
+      // Switching theme re-seeds the MAA recommendations for that theme and
+      // clears the switches that only exist for the previous theme.
+      const changeTheme = function (next) {
+        const nextPreset = ROGUELIKE_PRESETS[next]
+        const themeScopedReset = {
+          useFoldartal: false,
+          checkCollapsalParadigms: false,
+          refreshTraderWithDice: false,
+          stopAtFinalBoss: false,
+        }
+        if (!nextPreset) { update(Object.assign({ theme: next }, themeScopedReset)); return }
+        const charPreset = nextPreset.chars.find(function (item) { return item.name === nextPreset.coreChar })
+        const modeAllowed = modesForTheme(next).some(function (item) { return item.value === value.mode })
+        update(Object.assign({
+          theme: next,
+          mode: modeAllowed ? value.mode : 0,
+          difficulty: nextPreset.difficulty,
+          squad: nextPreset.squad,
+          roles: nextPreset.roles[0],
+          coreChar: nextPreset.coreChar,
+          useSupport: Boolean(charPreset && charPreset.useSupport),
+        }, themeScopedReset))
       }
+      // Only the switches MAA honours for this theme/mode are rendered at all.
+      const allowed = allowedAdvancedKeys(value)
+      const advancedNodes = allowed.map(function (key) {
+        switch (key) {
+          case 'investmentsCount': return numberPick('投资次数', key, INVESTMENT_OPTIONS)
+          case 'findPlayTimeTarget': return h('label', { className: 'maa-rogue-field', key: key },
+            h('span', { className: 'maa-rogue-label' }, '常乐节点'),
+            h('select', {
+              className: 'maa-rogue-control', value: String(value.findPlayTimeTarget), disabled: disabled,
+              onChange: function (event) { update({ findPlayTimeTarget: Number(event.target.value) }) },
+            }, PLAY_TIME_TARGETS.map(function (item) {
+              return h('option', { key: item.value, value: String(item.value) }, item.label)
+            })))
+          default: return boolPick(ADVANCED_LABELS[key] || key, key)
+        }
+      })
       return h('div', { className: 'maa-rogue-panel' },
         h('div', { className: 'maa-rogue-head' },
           h('span', null, '自动肉鸽参数'),
-          h('span', { className: 'maa-rogue-hint' }, '在此调整后仍用同一个确认码执行')),
+          h('span', { className: 'maa-rogue-hint' }, '默认取 MAA 推荐开局，可改；仍用同一个确认码执行')),
         h('div', { className: 'maa-rogue-grid' },
           h('label', { className: 'maa-rogue-field' },
             h('span', { className: 'maa-rogue-label' }, '主题'),
             h('select', {
               className: 'maa-rogue-control', value: value.theme, disabled: disabled,
-              onChange: function (event) { update({ theme: event.target.value }) },
+              onChange: function (event) { changeTheme(event.target.value) },
             }, ROGUELIKE_THEMES.map(function (item) {
               return h('option', { key: item.value, value: item.value }, item.label)
             }))),
-          numberField('刷取次数', 'startsCount', 1, 20),
-          numberField('难度', 'difficulty', 0, 99),
-          textField('分队', 'squad', '默认分队'),
-          textField('起始干员', 'coreChar', '不指定'),
-          toggle('使用助战', 'useSupport'),
-          toggle('打到最终 Boss 停', 'stopAtFinalBoss')))
+          h('label', { className: 'maa-rogue-field' },
+            h('span', { className: 'maa-rogue-label' }, '模式'),
+            h('select', {
+              className: 'maa-rogue-control', value: String(value.mode), disabled: disabled,
+              onChange: function (event) { changeMode(Number(event.target.value)) },
+            }, modesForTheme(value.theme).map(function (item) {
+              return h('option', { key: item.value, value: String(item.value) }, item.label)
+            }))),
+          numberPick('难度', 'difficulty', DIFFICULTY_OPTIONS),
+          digitField('刷取次数', 'startsCount'),
+          pick('分队', 'squad', squadOptions),
+          pick('职业组', 'roles', roleOptions),
+          pick('开局干员', 'coreChar', charOptions),
+          boolPick('使用助战', 'useSupport')),
+        h('details', { className: 'maa-rogue-advanced' },
+          h('summary', { className: 'maa-rogue-summary' }, '高级功能（MAA 高级设置）'),
+          h('div', { className: 'maa-rogue-grid' }, advancedNodes),
+          h('div', { className: 'maa-rogue-note' },
+            '只显示当前主题/模式下 MAA 真正会用到的开关，改动后仍用同一个确认码执行；开局干员只用于第 1 顺位招募。')))
     }
 
     function MaaPlanCard(props) {
@@ -334,6 +661,10 @@ window.__ModuleLoader__.load({
               h(ConfirmButton, {
                 execute: props.execute,
                 line: confirmLine(code, effective),
+                note: effective && typeof effective.note === 'string' ? effective.note : '',
+                onNoteChange: function (next) {
+                  props.store.setParams(code, Object.assign({}, effective, { note: next }))
+                },
                 onSuccess: function () { props.store.clear(code) },
               }))
           : null,
@@ -401,6 +732,10 @@ window.__ModuleLoader__.load({
             code: plan.code,
             execute: plan.execute,
             line: confirmLine(plan.code, effective),
+            note: effective && typeof effective.note === 'string' ? effective.note : '',
+            onNoteChange: function (next) {
+              props.store.setParams(plan.code, Object.assign({}, effective, { note: next }))
+            },
             onSuccess: function (outcome) { props.store.complete(plan.code, outcome.text) },
           })))
     }

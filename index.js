@@ -169,7 +169,7 @@ const STEP_PROPERTIES = {
   refresh: { type: 'boolean' }, select: { type: 'array', items: { type: 'integer' } }, confirm: { type: 'array', items: { type: 'integer' } }, setTime: { type: 'boolean' }, expedite: { type: 'boolean' }, permitReserve: { type: 'integer' }, firstTags: { type: 'array', items: { type: 'string' } }, extraTagsMode: { type: 'integer' },
   shopping: { type: 'boolean' }, buyFirst: { type: 'array', items: { type: 'string' } }, blacklist: { type: 'array', items: { type: 'string' } }, forceShoppingIfCreditFull: { type: 'boolean' }, onlyBuyDiscount: { type: 'boolean' }, reserveMaxCredit: { type: 'boolean' }, visitFriends: { type: 'boolean' }, creditFight: { type: 'boolean' },
   dailyWeekly: { type: 'boolean' }, mail: { type: 'boolean' }, freePull: { type: 'boolean' }, orundum: { type: 'boolean' }, mining: { type: 'boolean' }, specialAccess: { type: 'boolean' }, signInEvent: { type: 'boolean' },
-  theme: { type: 'string', enum: ['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden'] }, squad: { type: 'string' }, coreChar: { type: 'string' }, roles: { type: 'string' }, startsCount: { type: 'integer' }, difficulty: { type: 'integer' }, useSupport: { type: 'boolean' }, useNonFriendSupport: { type: 'boolean' }, stopAtFinalBoss: { type: 'boolean' },
+  theme: { type: 'string', enum: ['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'] }, squad: { type: 'string' }, coreChar: { type: 'string' }, roles: { type: 'string' }, startsCount: { type: 'integer' }, difficulty: { type: 'integer' }, useSupport: { type: 'boolean' }, useNonFriendSupport: { type: 'boolean' }, stopAtFinalBoss: { type: 'boolean' },
   toolToCraft: { type: 'string' }, numCraftBatches: { type: 'integer' }, taskNames: { type: 'array', items: { type: 'string' } },
 }
 
@@ -190,6 +190,22 @@ function renderResult(_args, value) {
   lines.push(`Command: ${value.command}`, `Exit code: ${value.exitCode}`, value.stdout || '(no stdout)')
   if (value.stderr) lines.push(`[stderr]\n${value.stderr}`)
   return [{ type: 'text', text: lines.join('\n') }]
+}
+
+// The 备注 field on the confirmation panel is for DSH, never for MaaCore: it
+// arrives URL-encoded on the local command plane so spaces survive, and is only
+// echoed back as guidance for the model's next turn (acting on it is optional).
+export function decodeConfirmationNote(raw) {
+  let decoded
+  try {
+    decoded = decodeURIComponent(String(raw ?? ''))
+  } catch {
+    throw new Error('备注的 URL 编码不合法，请在面板里重新输入。')
+  }
+  const clean = decoded.replace(/[\r\n\t]+/gu, ' ').trim()
+  if (clean === '') return ''
+  if (clean.length > 120) throw new Error('备注最多 120 个字符。')
+  return clean
 }
 
 function formatCommandResult(result) {
@@ -275,7 +291,7 @@ export function apply(ctx) {
     name: 'maa',
     definitionId: 'dsh-maa-cli/maa',
     description: '直接运行常用 MAA 操作，不调用模型',
-    input: { hint: '<help | setup | fight 1-7 2 | startup | infrast | award | closedown | stop | confirm MAA-XXXXXX theme=... startsCount=...>' },
+    input: { hint: '<help | setup | fight 1-7 2 | startup | infrast | award | closedown | stop | confirm MAA-XXXXXX theme=Sarkaz mode=0 difficulty=4 squad=蓝图测绘分队 roles=稳扎稳打 coreChar=维什戴尔 note=%E5%A4%87%E6%B3%A8>' },
     async handler({ agent, rawInput, signal }) {
       try {
         const parsed = parseLocalMaaCommand(rawInput)
@@ -306,14 +322,21 @@ export function apply(ctx) {
           if (!emulator.ok) throw new Error(emulatorErrorMessage(emulator))
           // Validate confirmation-time parameter overrides against the pending
           // document before consuming it, so a bad value never burns the code.
-          const peeked = Object.keys(parsed.overrides ?? {}).length > 0 ? await peekPendingPlan(agent) : null
-          const patched = peeked ? applyRoguelikeOverrides(peeked.document, parsed.overrides) : null
-          const planSummary = patched
-            ? `${peeked.planSummary}｜确认时调整：${patched.applied.join('、')}`
-            : undefined
+          const overrides = { ...(parsed.overrides ?? {}) }
+          let note = ''
+          if (overrides.note !== undefined) {
+            note = decodeConfirmationNote(overrides.note)
+            delete overrides.note
+          }
+          const hasOverrides = Object.keys(overrides).length > 0
+          const peeked = hasOverrides ? await peekPendingPlan(agent) : null
+          const patched = peeked ? applyRoguelikeOverrides(peeked.document, overrides) : null
+          const adjustments = patched && patched.applied.length > 0 ? `｜确认时调整：${patched.applied.join('、')}` : ''
           const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
-          const result = await executeDocument(agent, signal, patched ? patched.document : pending.document, planSummary ?? pending.planSummary, { emulatorChecked: true })
-          return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text: formatCommandResult(result) }
+          const planSummary = `${pending.planSummary}${adjustments}${note ? `｜备注（DSH 自行理解，不保证执行）：${note}` : ''}`
+          const result = await executeDocument(agent, signal, patched ? patched.document : pending.document, planSummary, { emulatorChecked: true })
+          const text = formatCommandResult(result) + (note ? `\n\n备注（交给 DSH 自行理解，不保证执行）：${note}` : '')
+          return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text }
         }
         const document = buildTaskDocument(parsed.steps)
         const summary = summarizePlan(parsed.steps)
@@ -405,7 +428,7 @@ export function apply(ctx) {
 
   ctx.tools.register({
     name: 'maa_prepare_plan',
-    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100); do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-20). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings (theme, startsCount, difficulty, squad, coreChar, support, stopAtFinalBoss) that the user may adjust there without re-preparing the plan. Clicking confirm executes through the non-model command plane and does not create another model call.`,
+    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100); do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-99999; the confirmation panel starts at 9999). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings — theme, mode, difficulty, squad, role group, starting operator and MAA's advanced switches — pre-filled from MAA's recommended opening (marked 【推荐】 and freely editable), so the user may adjust there without re-preparing the plan; a 备注 field next to the validity hint is handed back to DSH as free-form guidance that DSH may act on but is not guaranteed to. Clicking confirm executes through the non-model command plane and does not create another model call.`,
     parameters: {
       type: 'object', additionalProperties: false, required: ['purpose', 'steps'],
       properties: {

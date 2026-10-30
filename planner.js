@@ -6,7 +6,7 @@ export const GENERATED_TASK_NAME = 'dsh-generated'
 const CLIENTS = new Set(['Official', 'Bilibili', 'Txwy', 'YoStarEN', 'YoStarJP', 'YoStarKR'])
 const FACILITIES = new Set(['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Dorm'])
 const DRONES = new Set(['_NotUse', 'Money', 'SyntheticJade', 'CombatRecord', 'PureGold', 'OriginStone', 'Chip'])
-const ROGUELIKE_THEMES = new Set(['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden'])
+const ROGUELIKE_THEMES = new Set(['Phantom', 'Mizuki', 'Sami', 'Sarkaz', 'JieGarden', 'BlackFlow'])
 const STEP_TYPES = new Set([
   'StartUp', 'Fight', 'Infrast', 'Recruit', 'Mall', 'Award', 'Roguelike',
   'ReclamationAlgorithm', 'Depot', 'OperBox', 'Custom', 'CloseDown',
@@ -34,10 +34,14 @@ export function summarizePlan(steps) {
 // applied to the already-validated task document right before execution, so the
 // confirmation code keeps authorizing exactly one plan while the player can
 // still match MAA's own roguelike settings without re-asking the model.
+// MAA's own roguelike modes (see protocol/integration.md): 2 was removed and 3
+// is not open, so only the modes MaaCore still accepts are offered.
+export const ROGUELIKE_MODE_VALUES = [0, 1, 4, 5, 6, 7, 10001, 20001, 30001]
+
 const ROGUELIKE_OVERRIDES = {
   theme: { param: 'theme', kind: 'theme' },
-  mode: { param: 'mode', kind: 'integer', min: 0, max: 5 },
-  startsCount: { param: 'starts_count', kind: 'integer', min: 1, max: 20 },
+  mode: { param: 'mode', kind: 'mode' },
+  startsCount: { param: 'starts_count', kind: 'integer', min: 1, max: 99999 },
   difficulty: { param: 'difficulty', kind: 'integer', min: 0, max: 99 },
   squad: { param: 'squad', kind: 'text', min: 1, max: 32 },
   coreChar: { param: 'core_char', kind: 'text', min: 1, max: 32 },
@@ -45,12 +49,31 @@ const ROGUELIKE_OVERRIDES = {
   useSupport: { param: 'use_support', kind: 'boolean' },
   useNonFriendSupport: { param: 'use_nonfriend_support', kind: 'boolean' },
   stopAtFinalBoss: { param: 'stop_at_final_boss', kind: 'boolean' },
+  stopAtMaxLevel: { param: 'stop_at_max_level', kind: 'boolean' },
+  investmentEnabled: { param: 'investment_enabled', kind: 'boolean' },
+  investmentsCount: { param: 'investments_count', kind: 'integer', min: 0, max: 99999 },
+  stopWhenInvestmentFull: { param: 'stop_when_investment_full', kind: 'boolean' },
+  investmentWithMoreScore: { param: 'investment_with_more_score', kind: 'boolean' },
+  startWithEliteTwo: { param: 'start_with_elite_two', kind: 'boolean' },
+  onlyStartWithEliteTwo: { param: 'only_start_with_elite_two', kind: 'boolean' },
+  monthlySquadAutoIterate: { param: 'monthly_squad_auto_iterate', kind: 'boolean' },
+  deepExplorationAutoIterate: { param: 'deep_exploration_auto_iterate', kind: 'boolean' },
+  findPlayTimeTarget: { param: 'find_playTime_target', kind: 'integer', min: 1, max: 3 },
+  useFoldartal: { param: 'use_foldartal', kind: 'boolean' },
+  checkCollapsalParadigms: { param: 'check_collapsal_paradigms', kind: 'boolean' },
+  refreshTraderWithDice: { param: 'refresh_trader_with_dice', kind: 'boolean' },
 }
 
 const ROGUELIKE_OVERRIDE_LABELS = {
   theme: '主题', mode: '模式', startsCount: '刷取次数', difficulty: '难度',
   squad: '分队', coreChar: '起始干员', roles: '职业组',
   useSupport: '使用助战', useNonFriendSupport: '使用非好友助战', stopAtFinalBoss: '打到最终 Boss 停',
+  stopAtMaxLevel: '等级刷满停', investmentEnabled: '投资源石锭', investmentsCount: '投资次数',
+  stopWhenInvestmentFull: '投资满停', investmentWithMoreScore: '投资后购物',
+  startWithEliteTwo: '凹精二直升', onlyStartWithEliteTwo: '只凹精二直升',
+  monthlySquadAutoIterate: '月度小队自动切换', deepExplorationAutoIterate: '深入调查自动切换',
+  findPlayTimeTarget: '常乐节点目标', useFoldartal: '使用密文板',
+  checkCollapsalParadigms: '检测坍缩范式', refreshTraderWithDice: '骰子刷新商店',
 }
 
 export const ROGUELIKE_THEME_VALUES = [...ROGUELIKE_THEMES]
@@ -87,6 +110,12 @@ function coerceOverride(spec, raw, key) {
   if (spec.kind === 'theme') {
     if (!ROGUELIKE_THEMES.has(value)) throw new Error(`肉鸽主题无效：${value || '(空)'}；可选 ${[...ROGUELIKE_THEMES].join(' / ')}`)
     return value
+  }
+  if (spec.kind === 'mode') {
+    if (!/^\d+$/.test(value) || !ROGUELIKE_MODE_VALUES.includes(Number(value))) {
+      throw new Error(`肉鸽模式无效：${value || '(空)'}；可选 ${ROGUELIKE_MODE_VALUES.join(' / ')}`)
+    }
+    return Number(value)
   }
   if (spec.kind === 'integer') {
     if (!/^\d+$/.test(value)) throw new Error(`${ROGUELIKE_OVERRIDE_LABELS[key]}必须是整数`)
@@ -202,11 +231,11 @@ function buildStep(step, index) {
       assertFields(step, new Set([...COMMON_FIELDS, 'theme', 'mode', 'squad', 'coreChar', 'roles', 'startsCount', 'difficulty', 'useSupport', 'useNonFriendSupport', 'stopAtFinalBoss']))
       params = compact({
         theme: enumValue(step.theme, ROGUELIKE_THEMES, 'Roguelike.theme'),
-        mode: optionalInteger(step.mode, 0, 5, 'Roguelike.mode', 0),
+        mode: optionalInteger(step.mode, 0, 30001, 'Roguelike.mode', 0, new Set(ROGUELIKE_MODE_VALUES)),
         squad: optionalString(step.squad, 1, 32, null, 'Roguelike.squad'),
         core_char: optionalString(step.coreChar, 1, 32, null, 'Roguelike.coreChar'),
         roles: optionalString(step.roles, 1, 32, null, 'Roguelike.roles'),
-        starts_count: integer(step.startsCount, 1, 20, 'Roguelike.startsCount'),
+        starts_count: integer(step.startsCount, 1, 99999, 'Roguelike.startsCount'),
         difficulty: optionalInteger(step.difficulty, 0, 99, 'Roguelike.difficulty'),
         use_support: optionalBoolean(step.useSupport, false),
         use_nonfriend_support: optionalBoolean(step.useNonFriendSupport, false),
