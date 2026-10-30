@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import vm from 'node:vm'
 
 import { parseLocalMaaCommand } from '../src/commands/local-command.js'
 import { applyRoguelikeOverrides, buildTaskDocument, resolveRoguelikeTheme, roguelikePanelFromDocument } from '../src/commands/planner.js'
@@ -10,10 +12,59 @@ function documentOf(steps) {
   return buildTaskDocument(steps)
 }
 
+function clientConfirmLine() {
+  const source = readFileSync(new URL('../src/client/index.js', import.meta.url), 'utf8')
+    .replace('return { inject, apply }', 'return { inject, apply, __confirmLine: confirmLine }')
+  let registration
+  vm.runInNewContext(source, {
+    window: { __ModuleLoader__: { load(value) { registration = value } } },
+    Date, Set, Map, String, Number, Boolean, Array, Object, Promise, JSON, encodeURIComponent,
+  })
+  const module = registration.factory(name => name === 'react' ? { createElement() {} } : {})
+  return module.__confirmLine
+}
+
 test('parses a plain confirmation without overrides', () => {
   assert.deepEqual(parseLocalMaaCommand('confirm MAA-1A2B3C'), {
     kind: 'confirm', confirmationCode: 'MAA-1A2B3C', overrides: {},
   })
+})
+
+test('client submission omits empty optional values and normalizes invalid selects', () => {
+  const confirmLine = clientConfirmLine()
+  const fightDocument = buildTaskDocument([{ type: 'Fight', stage: '1-7', times: 1 }])
+  const fight = taskPanelFromDocument(fightDocument)
+  const fightLine = confirmLine('MAA-1A2B3C', { ...fight.values, stage: '' }, fight.fields)
+  assert.equal(fightLine.includes('stage='), false)
+  assert.match(fightLine, /(?:^| )_unset=[^ ]*stage/u)
+  const fightSubmission = parseLocalMaaCommand(fightLine.replace(/^\/maa\s+/u, ''))
+  const fightParams = applyTaskPanelOverrides(fightDocument, fightSubmission.overrides).document.tasks[0].params
+  assert.equal('stage' in fightParams, false)
+
+  const startup = taskPanelFromDocument(buildTaskDocument([{ type: 'StartUp' }]))
+  assert.equal(confirmLine('MAA-1A2B3C', startup.values, startup.fields).includes('accountName='), false)
+  const recruit = taskPanelFromDocument(buildTaskDocument([{ type: 'Recruit' }]))
+  const recruitLine = confirmLine('MAA-1A2B3C', { ...recruit.values, confirm: [], firstTags: '' }, recruit.fields)
+  assert.equal(recruitLine.includes('confirm='), false)
+  assert.equal(recruitLine.includes('firstTags='), false)
+
+  const rogueDocument = buildTaskDocument([{
+    type: 'Roguelike', theme: 'Phantom', startsCount: 1,
+    squad: '指挥分队', roles: '取长补短', coreChar: '丰川祥子',
+  }])
+  const rogue = taskPanelFromDocument(rogueDocument)
+  const line = confirmLine('MAA-1A2B3C', {
+    ...rogue.values, mode: 99999, squad: '', roles: '', coreChar: '',
+  }, rogue.fields)
+  assert.equal(line.includes('squad='), false)
+  assert.equal(line.includes('roles='), false)
+  assert.equal(line.includes('coreChar='), false)
+  assert.match(line, /(?:^| )mode=0(?: |$)/u)
+  const submission = parseLocalMaaCommand(line.replace(/^\/maa\s+/u, ''))
+  const params = applyTaskPanelOverrides(rogueDocument, submission.overrides).document.tasks[0].params
+  assert.equal('squad' in params, false)
+  assert.equal('roles' in params, false)
+  assert.equal('core_char' in params, false)
 })
 
 test('parses note preview and strategy memory management commands', () => {
@@ -90,6 +141,21 @@ test('leaves the document alone when no overrides are supplied', () => {
   const outcome = applyRoguelikeOverrides(document, {})
   assert.equal(outcome.document, document)
   assert.deepEqual(outcome.applied, [])
+})
+
+test('empty optional roguelike selections are removed while required values fail clearly', () => {
+  const document = buildTaskDocument([{
+    type: 'Roguelike', theme: 'Phantom', startsCount: 2,
+    squad: '指挥分队', roles: '取长补短', coreChar: '丰川祥子',
+  }])
+  const params = applyRoguelikeOverrides(document, {
+    squad: '', roles: '', coreChar: '',
+  }).document.tasks[0].params
+  assert.equal('squad' in params, false)
+  assert.equal('roles' in params, false)
+  assert.equal('core_char' in params, false)
+  assert.throws(() => applyRoguelikeOverrides(document, { theme: '' }), /主题无效/u)
+  assert.throws(() => applyRoguelikeOverrides(document, { startsCount: '' }), /必须是整数/u)
 })
 
 test('maps the MAA advanced roguelike switches and modes', () => {
@@ -350,7 +416,7 @@ test('applies MAA panel values to each core task with typed validation', () => {
     visitFriends: 'true', shopping: 'true', buyFirst: '%E6%8B%9B%E8%81%98%E8%AE%B8%E5%8F%AF%3B%E9%BE%99%E9%97%A8%E5%B8%81', blacklist: '', creditFight: 'false',
   }).document.tasks[0].params
   assert.deepEqual(mall.buy_first, ['招聘许可', '龙门币'])
-  assert.deepEqual(mall.blacklist, [])
+  assert.equal('blacklist' in mall, false)
 
   const award = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('award').steps), {
     dailyWeekly: 'true', mail: 'true', freePull: 'false', orundum: 'false', mining: 'true', specialAccess: 'false', signInEvent: 'false',
@@ -404,10 +470,13 @@ test('carries MAA remarks and mode-specific reclamation instructions into panels
 
 test('rejects invalid cross-field MAA panel combinations', () => {
   const infrast = buildTaskDocument(parseLocalMaaCommand('infrast').steps)
+  assert.throws(() => applyTaskPanelOverrides(infrast, { facilities: '' }), /至少选择一个基建设施/)
   assert.throws(() => applyTaskPanelOverrides(infrast, { mode: '10000', filename: '' }), /必须选择排班文件/)
   const reclamation = buildTaskDocument(parseLocalMaaCommand('reclamation').steps)
   assert.throws(() => applyTaskPanelOverrides(reclamation, { theme: 'RelaunchAnchor', mode: '1' }), /不支持所选模式/)
   const fight = buildTaskDocument(parseLocalMaaCommand('fight').steps)
   assert.throws(() => applyTaskPanelOverrides(fight, { stone: '21' }), /必须在 0–20 范围内/)
   assert.throws(() => applyTaskPanelOverrides(fight, { shell: 'whoami' }), /不支持参数/)
+  assert.throws(() => applyTaskPanelOverrides(fight, { _unset: 'times' }), /作战次数是必填参数/u)
+  assert.throws(() => applyTaskPanelOverrides(fight, { _unset: 'shell' }), /不支持清除参数/u)
 })

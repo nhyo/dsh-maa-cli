@@ -115,17 +115,38 @@ window.__ModuleLoader__.load({
       return encodeURIComponent(String(value))
     }
 
+    function normalizedFieldValue(field, params) {
+      const current = params[field.key]
+      if (field.kind !== 'select' && field.kind !== 'multi') return current
+      const visible = (field.options || []).filter(function (entry) { return fieldVisible(entry, params) })
+      if (field.kind === 'multi') {
+        const selected = Array.isArray(current) ? current : []
+        return visible.filter(function (entry) {
+          return selected.some(function (choice) { return String(choice) === String(entry.value) })
+        }).map(function (entry) { return entry.value })
+      }
+      const match = visible.find(function (entry) { return String(entry.value) === String(current) })
+      if (match) return match.value
+      return field.required === true && visible[0] ? visible[0].value : ''
+    }
+
     function confirmLine(code, params, fields) {
       const parts = ['/maa confirm', code]
+      const unset = []
       if (params) {
         if (Array.isArray(fields)) {
           fields.forEach(function (field) {
             if (!fieldVisible(field, params)) return
-            const value = params[field.key]
+            const value = normalizedFieldValue(field, params)
             if (value === undefined || value === null) return
+            if (field.required !== true && (value === '' || (Array.isArray(value) && value.length === 0))) {
+              unset.push(field.key)
+              return
+            }
             parts.push(field.key + '=' + encodedPanelValue(value))
           })
         }
+        if (unset.length) parts.push('_unset=' + unset.map(encodeURIComponent).join(','))
         // The note is for DSH, not MaaCore: it travels URL-encoded so spaces and
         // punctuation survive the whitespace-separated key=value tokens.
         const note = typeof params.note === 'string' ? params.note.trim() : ''
@@ -378,7 +399,7 @@ window.__ModuleLoader__.load({
             h('span', null, item.label)))
         }
         if (item.kind === 'multi') {
-          const selected = Array.isArray(current) ? current : []
+          const selected = normalizedFieldValue(item, value)
           return wrapField(item, h('div', { className: 'maa-rogue-field', style: { alignItems: 'flex-start' } },
             h('span', { className: 'maa-rogue-label' }, item.label),
             h('div', { className: 'maa-task-options' }, (item.options || []).map(function (entry) {
@@ -396,17 +417,20 @@ window.__ModuleLoader__.load({
         }
         if (item.kind === 'select') {
           const visibleOptions = (item.options || []).filter(function (entry) { return fieldVisible(entry, value) })
+          const selected = normalizedFieldValue(item, value)
+          const renderedOptions = visibleOptions.map(function (entry) {
+            return h('option', { key: String(entry.value), value: String(entry.value) }, entry.label)
+          })
+          if (item.required !== true) renderedOptions.unshift(h('option', { key: '__empty', value: '' }, '未选择'))
           return wrapField(item, h('label', { className: 'maa-rogue-field' },
             h('span', { className: 'maa-rogue-label' }, item.label),
             h('select', {
-              className: 'maa-rogue-control', value: current === undefined ? '' : String(current), disabled: disabled,
+              className: 'maa-rogue-control', value: String(selected), disabled: disabled,
               onChange: function (event) {
                 const match = visibleOptions.find(function (entry) { return String(entry.value) === event.target.value })
                 update(Object.assign({ [item.key]: match ? match.value : event.target.value }, match && match.patch ? match.patch : {}))
               },
-            }, visibleOptions.map(function (entry) {
-              return h('option', { key: String(entry.value), value: String(entry.value) }, entry.label)
-            }))))
+            }, renderedOptions)))
         }
         const numeric = item.kind === 'integer' || item.kind === 'number'
         return wrapField(item, h('label', { className: 'maa-rogue-field' },

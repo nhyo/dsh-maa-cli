@@ -19,7 +19,10 @@ const STAR_OPTIONS = [1, 2, 3, 4, 5, 6].map(value => [value, `${value} 星`])
 
 function option(value, label, extra = {}) { return { value, label, ...extra } }
 function options(entries) { return entries.map(([value, label]) => option(value, label)) }
-function field(key, label, kind, param, extra = {}) { return { key, label, kind, param, ...extra } }
+function field(key, label, kind, param, extra = {}) {
+  const required = kind === 'select' || kind === 'integer' || kind === 'number' || kind === 'boolean'
+  return { key, label, kind, param, required, ...extra }
+}
 function note(text, when) { return when ? { text, when } : { text } }
 
 const PANELS = {
@@ -67,7 +70,7 @@ const PANELS = {
     fields: [
       field('mode', '换班模式', 'select', 'mode', { default: 0, options: options([[0, '常规模式'], [10000, '自定义排班'], [20000, '队列轮换']]) }),
       field('facilities', '处理设施', 'multi', 'facility', {
-        default: FACILITY_OPTIONS.map(item => item[0]), options: options(FACILITY_OPTIONS),
+        default: FACILITY_OPTIONS.map(item => item[0]), options: options(FACILITY_OPTIONS), required: true,
         description: '常规模式的换班顺序由算法统一安排，此处只选择设施类别，勾选顺序不生效；需要自定义顺序时使用自定义排班。',
       }),
       field('drones', '无人机用途', 'select', 'drones', { default: '_NotUse', options: options(DRONE_OPTIONS), when: { key: 'mode', notEquals: 10000 } }),
@@ -88,7 +91,7 @@ const PANELS = {
       }),
       field('receptionSendClue', '赠送线索', 'boolean', 'reception_send_clue', { default: true, advanced: true }),
       field('continueTraining', '继续未完成专精训练', 'boolean', 'continue_training', { default: false, advanced: true }),
-      field('filename', '自定义排班文件', 'text', 'filename', { default: '', maxLength: 260, when: { key: 'mode', equals: 10000 } }),
+      field('filename', '自定义排班文件', 'text', 'filename', { default: '', maxLength: 260, required: true, when: { key: 'mode', equals: 10000 } }),
       field('planIndex', '排班方案序号', 'integer', 'plan_index', { default: 0, min: 0, max: 999, when: { key: 'mode', equals: 10000 } }),
     ],
     notes: [
@@ -301,15 +304,16 @@ function validateCombination(type, params) {
 export function applyTaskPanelOverrides(document, overrides, capabilities = fallbackCapabilities()) {
   const panel = taskPanelFromDocument(document, capabilities)
   if (!panel) throw new Error('当前计划没有可编辑的 MAA 参数面板。')
-  if (panel.type === 'Roguelike') return applyRoguelikeOverrides(document, overrides, capabilities)
+  const normalizedOverrides = applyUnset(panel, overrides)
+  if (panel.type === 'Roguelike') return applyRoguelikeOverrides(document, normalizedOverrides, capabilities)
   const definition = PANELS[panel.type]
   const fields = new Map(definition.fields.map(item => [item.key, item]))
-  for (const key of Object.keys(overrides)) if (!fields.has(key)) throw new Error(`当前 ${definition.title} 面板不支持参数：${key}`)
+  for (const key of Object.keys(normalizedOverrides)) if (!fields.has(key)) throw new Error(`当前 ${definition.title} 面板不支持参数：${key}`)
 
   if (panel.type === 'UserDataUpdate') {
     const values = { ...panel.values }
     const applied = []
-    for (const [key, raw] of Object.entries(overrides)) {
+    for (const [key, raw] of Object.entries(normalizedOverrides)) {
       const item = fields.get(key)
       values[key] = coerce(item, raw)
       applied.push(`${item.label}=${values[key] ? '是' : '否'}`)
@@ -325,10 +329,13 @@ export function applyTaskPanelOverrides(document, overrides, capabilities = fall
   const task = result.tasks[0]
   task.params = isObject(task.params) ? task.params : {}
   const applied = []
-  for (const [key, raw] of Object.entries(overrides)) {
+  for (const [key, raw] of Object.entries(normalizedOverrides)) {
     const item = fields.get(key)
     const value = coerce(item, raw)
-    if (item.param) task.params[item.param] = value
+    if (item.param) {
+      if (!item.required && emptyValue(value)) delete task.params[item.param]
+      else task.params[item.param] = value
+    }
     applied.push(`${item.label}=${Array.isArray(value) ? value.join('、') : value}`)
   }
   validateCombination(panel.type, task.params)
@@ -336,6 +343,22 @@ export function applyTaskPanelOverrides(document, overrides, capabilities = fall
 }
 
 export const TASK_PANEL_TYPES = Object.freeze(Object.keys(PANELS))
+
+function applyUnset(panel, overrides) {
+  const result = { ...(isObject(overrides) ? overrides : {}) }
+  const raw = result._unset
+  delete result._unset
+  if (raw === undefined || raw === '') return result
+  const fields = new Map((panel.fields ?? []).map(item => [item.key, item]))
+  const keys = String(raw).split(',').filter(Boolean).map(key => decoded(key, '清除参数'))
+  for (const key of keys) {
+    const item = fields.get(key)
+    if (!item) throw new Error(`当前 ${panel.title} 面板不支持清除参数：${key}`)
+    if (item.required === true) throw new Error(`${item.label}是必填参数，不能清除。`)
+    result[key] = ''
+  }
+  return result
+}
 
 function roguelikePanel(document, capabilities) {
   const current = roguelikePanelFromDocument(document) ?? {}
@@ -355,6 +378,12 @@ function roguelikePanel(document, capabilities) {
     for (const value of theme.roles ?? []) pushScoped(roleOptions, value, recommended(value, theme.defaults?.roles), theme.id)
     for (const value of theme.operators ?? []) pushScoped(operatorOptions, value, recommended(value, theme.defaults?.coreChar), theme.id)
   }
+  const currentMatchesTheme = current.theme === selected.id
+  const selectedMode = scopedValue(modeOptions, selected.id, currentMatchesTheme ? current.mode : undefined, defaults.mode, true)
+  const selectedDifficulty = scopedValue(difficultyOptions, selected.id, currentMatchesTheme ? current.difficulty : undefined, defaults.difficulty, true)
+  const selectedSquad = scopedValue(squadOptions, selected.id, currentMatchesTheme ? current.squad : undefined, defaults.squad, false)
+  const selectedRoles = scopedValue(roleOptions, selected.id, currentMatchesTheme ? current.roles : undefined, defaults.roles, false)
+  const selectedOperator = scopedValue(operatorOptions, selected.id, currentMatchesTheme ? current.coreChar : undefined, defaults.coreChar, false)
   const advanced = [
     field('useNonFriendSupport', '使用非好友助战', 'boolean', 'use_nonfriend_support', { default: false, advanced: true, when: { key: 'useSupport', equals: true } }),
     field('stopAtFinalBoss', '打到最终 Boss 停', 'boolean', 'stop_at_final_boss', { default: false, advanced: true, when: { key: 'supportsFinalBossStop', equals: true } }),
@@ -380,22 +409,22 @@ function roguelikePanel(document, capabilities) {
   return {
     type: 'Roguelike', title: '自动肉鸽', capabilitySignature: capabilities.signature ?? '', capabilitySource: capabilities.source ?? 'adapter',
     fields: [
-      field('theme', '主题', 'select', 'theme', { default: selected.id, options: themes.map(theme => option(theme.id, theme.label, { patch: { ...reset, theme: theme.id, ...theme.defaults, ...featureValues(theme) } })) }),
-      field('mode', '模式', 'select', 'mode', { default: 0, options: modeOptions }),
-      field('difficulty', '难度', 'select', 'difficulty', { default: defaults.difficulty ?? 0, options: difficultyOptions }),
+      field('theme', '主题', 'select', 'theme', { default: selected.id, options: themes.map(theme => option(theme.id, theme.label, { patch: { ...reset, theme: theme.id, ...validThemeDefaults(theme), ...featureValues(theme) } })) }),
+      field('mode', '模式', 'select', 'mode', { default: selectedMode, options: modeOptions }),
+      field('difficulty', '难度', 'select', 'difficulty', { default: selectedDifficulty, options: difficultyOptions }),
       field('startsCount', '刷取次数', 'integer', 'starts_count', { default: 9999, min: 1, max: 99999 }),
-      field('squad', '分队', 'select', 'squad', { default: defaults.squad ?? '', options: squadOptions }),
-      field('roles', '职业组', 'select', 'roles', { default: defaults.roles ?? '', options: roleOptions }),
-      field('coreChar', '开局干员', 'select', 'core_char', { default: defaults.coreChar ?? '', options: operatorOptions }),
+      field('squad', '分队', 'select', 'squad', { default: selectedSquad, required: false, options: squadOptions }),
+      field('roles', '职业组', 'select', 'roles', { default: selectedRoles, required: false, options: roleOptions }),
+      field('coreChar', '开局干员', 'select', 'core_char', { default: selectedOperator, required: false, options: operatorOptions }),
       field('useSupport', '使用助战', 'boolean', 'use_support', { default: defaults.useSupport === true }),
       ...advanced,
     ],
     notes: capabilities.warning ? [note(capabilities.warning)] : [],
     values: {
-      theme: selected.id, mode: current.mode ?? 0, startsCount: 9999, ...featureValues(selected),
-      difficulty: current.difficulty ?? defaults.difficulty ?? 0,
-      squad: current.squad ?? defaults.squad ?? '', roles: current.roles ?? defaults.roles ?? '',
-      coreChar: current.coreChar ?? defaults.coreChar ?? '', useSupport: current.useSupport ?? defaults.useSupport === true,
+      theme: selected.id, mode: selectedMode, startsCount: 9999, ...featureValues(selected),
+      difficulty: selectedDifficulty,
+      squad: selectedSquad, roles: selectedRoles,
+      coreChar: selectedOperator, useSupport: currentMatchesTheme ? current.useSupport ?? defaults.useSupport === true : defaults.useSupport === true,
       useNonFriendSupport: current.useNonFriendSupport === true, stopAtFinalBoss: current.stopAtFinalBoss === true,
       stopAtMaxLevel: current.stopAtMaxLevel === true, investmentEnabled: current.investmentEnabled !== false,
       investmentsCount: current.investmentsCount ?? 999, stopWhenInvestmentFull: current.stopWhenInvestmentFull === true,
@@ -413,6 +442,23 @@ function pushScoped(target, value, label, theme) {
   if (!entry) { entry = option(value, label, { when: { key: 'theme', in: [] } }); target.push(entry) }
   if (!entry.when.in.includes(theme)) entry.when.in.push(theme)
 }
+function scopedValue(options, theme, current, fallback, required) {
+  const available = options.filter(item => item.when?.in?.includes(theme)).map(item => item.value)
+  if (available.some(value => value === current)) return current
+  if (available.some(value => value === fallback)) return fallback
+  return required ? available[0] : ''
+}
+function validThemeDefaults(theme) {
+  const defaults = theme?.defaults ?? {}
+  const choose = (values, value) => Array.isArray(values) && values.includes(value) ? value : ''
+  const modes = (theme?.modes ?? []).map(item => item.value)
+  return {
+    mode: modes.includes(defaults.mode) ? defaults.mode : modes[0],
+    difficulty: (theme?.difficulties ?? []).includes(defaults.difficulty) ? defaults.difficulty : theme?.difficulties?.[0],
+    squad: choose(theme?.squads, defaults.squad), roles: choose(theme?.roles, defaults.roles),
+    coreChar: choose(theme?.operators, defaults.coreChar), useSupport: defaults.useSupport === true,
+  }
+}
 function recommended(value, expected) { return value === expected ? `${value}【推荐】` : value }
 function featureValues(theme) {
   return {
@@ -421,3 +467,4 @@ function featureValues(theme) {
     supportsDiceRefresh: theme?.features?.refreshTraderWithDice === true,
   }
 }
+function emptyValue(value) { return value === '' || (Array.isArray(value) && value.length === 0) }

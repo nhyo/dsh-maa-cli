@@ -80,10 +80,29 @@ test('new resource-only themes and modes appear and disappear without an adapter
 
   const added = await discoverMaaCapabilities({ resourceDir: env.resource, compatibility: COMPATIBILITY, env: env.env })
   assert.deepEqual(findRoguelikeTheme(added, 'FutureTheme').modes, [{ value: 4242, label: 'mode 4242' }])
-  assert.ok(taskPanelFromDocument(
-    buildTaskDocument([{ type: 'Roguelike', theme: 'FutureTheme', startsCount: 1, mode: 4242 }], added),
-    added,
-  ).fields.find(field => field.key === 'theme').options.some(option => option.value === 'FutureTheme'))
+  const futureDocument = buildTaskDocument([{ type: 'Roguelike', theme: 'FutureTheme', startsCount: 1, mode: 4242 }], added)
+  const futurePanel = taskPanelFromDocument(futureDocument, added)
+  assert.ok(futurePanel.fields.find(field => field.key === 'theme').options.some(option => option.value === 'FutureTheme'))
+  assert.equal(futurePanel.values.squad, '')
+  assert.equal(futurePanel.values.roles, '')
+  assert.equal(futurePanel.values.coreChar, '')
+  assert.equal(futurePanel.fields.find(field => field.key === 'squad').required, false)
+  const confirmed = applyRoguelikeOverrides(futureDocument, {
+    theme: 'FutureTheme', mode: '4242', difficulty: '0', startsCount: '1',
+  }, added).document.tasks[0].params
+  assert.equal('squad' in confirmed, false)
+  assert.equal('roles' in confirmed, false)
+  assert.equal('core_char' in confirmed, false)
+
+  const noModes = structuredClone(added)
+  findRoguelikeTheme(noModes, 'FutureTheme').modes = []
+  const incompletePanel = taskPanelFromDocument({ tasks: [{ type: 'Roguelike', params: { theme: 'FutureTheme', starts_count: 1 } }] }, noModes)
+  assert.equal(incompletePanel.fields.find(field => field.key === 'mode').required, true)
+  assert.equal(incompletePanel.values.mode, undefined)
+  assert.throws(
+    () => applyRoguelikeOverrides(futureDocument, { mode: '' }, noModes),
+    /肉鸽模式无效/u,
+  )
 
   await rm(theme, { recursive: true })
   await rm(task)

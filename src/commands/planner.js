@@ -48,9 +48,9 @@ const ROGUELIKE_OVERRIDES = {
   mode: { param: 'mode', kind: 'mode' },
   startsCount: { param: 'starts_count', kind: 'integer', min: 1, max: 99999 },
   difficulty: { param: 'difficulty', kind: 'integer', min: 0, max: 99 },
-  squad: { param: 'squad', kind: 'text', min: 1, max: 32 },
-  coreChar: { param: 'core_char', kind: 'text', min: 1, max: 32 },
-  roles: { param: 'roles', kind: 'text', min: 1, max: 32 },
+  squad: { param: 'squad', kind: 'text', min: 1, max: 32, optional: true },
+  coreChar: { param: 'core_char', kind: 'text', min: 1, max: 32, optional: true },
+  roles: { param: 'roles', kind: 'text', min: 1, max: 32, optional: true },
   useSupport: { param: 'use_support', kind: 'boolean' },
   useNonFriendSupport: { param: 'use_nonfriend_support', kind: 'boolean' },
   stopAtFinalBoss: { param: 'stop_at_final_boss', kind: 'boolean' },
@@ -93,20 +93,24 @@ export function applyRoguelikeOverrides(document, overrides, capabilities = fall
   const existingTask = document.tasks.find(task => isPlainObject(task) && task.type === 'Roguelike' && isPlainObject(task.params))
   let effectiveTheme = existingTask?.params?.theme
   const applied = {}
+  const cleared = new Set()
   const described = []
   for (const [key, raw] of entries) {
     const spec = ROGUELIKE_OVERRIDES[key]
     if (!spec) throw new Error(`无法识别肉鸽参数 ${key}；可调整：${ROGUELIKE_OVERRIDE_KEYS.join(' / ')}`)
-    applied[spec.param] = coerceOverride(spec, raw, key, capabilities, effectiveTheme)
-    if (key === 'theme') effectiveTheme = applied.theme
-    described.push(`${ROGUELIKE_OVERRIDE_LABELS[key]}=${applied[spec.param]}`)
+    const value = coerceOverride(spec, raw, key, capabilities, effectiveTheme)
+    if (value === undefined) cleared.add(spec.param)
+    else applied[spec.param] = value
+    if (key === 'theme') effectiveTheme = value
+    described.push(`${ROGUELIKE_OVERRIDE_LABELS[key]}=${value ?? '未设置'}`)
   }
   let touched = 0
   const tasks = document.tasks.map(task => {
     if (!isPlainObject(task) || task.type !== 'Roguelike' || !isPlainObject(task.params)) return task
     touched += 1
     const params = { ...task.params, ...applied }
-    validateRoguelikeCapability(params, capabilities)
+    for (const param of cleared) delete params[param]
+    validateRoguelikeCapability(params, capabilities, new Set(Object.keys(applied)))
     return { ...task, params }
   })
   if (touched === 0) throw new Error('该 MAA 计划里没有肉鸽任务，参数调整已取消。')
@@ -115,14 +119,21 @@ export function applyRoguelikeOverrides(document, overrides, capabilities = fall
   return { document: { ...document, tasks }, applied: described }
 }
 
-function validateRoguelikeCapability(params, capabilities) {
+function validateRoguelikeCapability(params, capabilities, explicit = new Set()) {
+  if (typeof params.theme !== 'string' || params.theme.trim() === '') throw new Error('肉鸽主题不能为空。')
+  if (!Number.isInteger(params.starts_count) || params.starts_count < 1 || params.starts_count > 99999) throw new Error('刷取次数必须在 1–99999 之间。')
   const theme = findRoguelikeTheme(capabilities, params.theme)
   if (!theme) throw new Error(`当前 MAA 资源不支持肉鸽主题 ${params.theme}`)
   if (params.mode !== undefined && !(theme.modes ?? []).some(item => item.value === params.mode)) throw new Error(`主题 ${theme.id} 不支持 mode=${params.mode}`)
   if (params.difficulty !== undefined && !theme.difficulties.includes(params.difficulty)) throw new Error(`主题 ${theme.id} 不支持难度 ${params.difficulty}`)
+  for (const param of ['squad', 'roles', 'core_char']) {
+    if (typeof params[param] === 'string' && params[param].trim() === '') delete params[param]
+  }
   if (capabilities.source !== 'resource') return
   for (const [param, values, label] of [['squad', theme.squads, '分队'], ['roles', theme.roles, '职业组'], ['core_char', theme.operators, '开局干员']]) {
-    if (params[param] && values.length > 0 && !values.includes(params[param])) throw new Error(`${label}不在当前 MAA 已发现选项中：${params[param]}`)
+    if (!params[param] || values.length === 0 || values.includes(params[param])) continue
+    if (explicit.has(param)) throw new Error(`${label}不在当前 MAA 已发现选项中：${params[param]}`)
+    delete params[param]
   }
 }
 
@@ -178,6 +189,7 @@ function coerceOverride(spec, raw, key, capabilities, pendingTheme) {
     if (!/^(?:true|false|1|0)$/i.test(value)) throw new Error(`${ROGUELIKE_OVERRIDE_LABELS[key]}只能是 true 或 false`)
     return value === 'true' || value === '1'
   }
+  if (spec.optional && value === '') return undefined
   if (value.length < spec.min || value.length > spec.max) throw new Error(`${ROGUELIKE_OVERRIDE_LABELS[key]}长度必须在 ${spec.min}–${spec.max} 之间`)
   return value
 }
