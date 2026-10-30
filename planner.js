@@ -30,6 +30,78 @@ export function summarizePlan(steps) {
   return steps.map((step, index) => `${index + 1}. ${summarizeStep(step)}`).join(' → ')
 }
 
+// Roguelike parameters a human may adjust on the confirmation panel. They are
+// applied to the already-validated task document right before execution, so the
+// confirmation code keeps authorizing exactly one plan while the player can
+// still match MAA's own roguelike settings without re-asking the model.
+const ROGUELIKE_OVERRIDES = {
+  theme: { param: 'theme', kind: 'theme' },
+  mode: { param: 'mode', kind: 'integer', min: 0, max: 5 },
+  startsCount: { param: 'starts_count', kind: 'integer', min: 1, max: 20 },
+  difficulty: { param: 'difficulty', kind: 'integer', min: 0, max: 99 },
+  squad: { param: 'squad', kind: 'text', min: 1, max: 32 },
+  coreChar: { param: 'core_char', kind: 'text', min: 1, max: 32 },
+  roles: { param: 'roles', kind: 'text', min: 1, max: 32 },
+  useSupport: { param: 'use_support', kind: 'boolean' },
+  useNonFriendSupport: { param: 'use_nonfriend_support', kind: 'boolean' },
+  stopAtFinalBoss: { param: 'stop_at_final_boss', kind: 'boolean' },
+}
+
+const ROGUELIKE_OVERRIDE_LABELS = {
+  theme: '主题', mode: '模式', startsCount: '刷取次数', difficulty: '难度',
+  squad: '分队', coreChar: '起始干员', roles: '职业组',
+  useSupport: '使用助战', useNonFriendSupport: '使用非好友助战', stopAtFinalBoss: '打到最终 Boss 停',
+}
+
+export const ROGUELIKE_THEME_VALUES = [...ROGUELIKE_THEMES]
+export const ROGUELIKE_OVERRIDE_KEYS = Object.keys(ROGUELIKE_OVERRIDES)
+
+export function applyRoguelikeOverrides(document, overrides) {
+  if (!isPlainObject(document) || !Array.isArray(document.tasks)) {
+    throw new TypeError('MAA task document must contain a tasks array')
+  }
+  const entries = isPlainObject(overrides) ? Object.entries(overrides) : []
+  if (entries.length === 0) return { document, applied: [] }
+  const applied = {}
+  const described = []
+  for (const [key, raw] of entries) {
+    const spec = ROGUELIKE_OVERRIDES[key]
+    if (!spec) throw new Error(`无法识别肉鸽参数 ${key}；可调整：${ROGUELIKE_OVERRIDE_KEYS.join(' / ')}`)
+    applied[spec.param] = coerceOverride(spec, raw, key)
+    described.push(`${ROGUELIKE_OVERRIDE_LABELS[key]}=${applied[spec.param]}`)
+  }
+  let touched = 0
+  const tasks = document.tasks.map(task => {
+    if (!isPlainObject(task) || task.type !== 'Roguelike' || !isPlainObject(task.params)) return task
+    touched += 1
+    return { ...task, params: { ...task.params, ...applied } }
+  })
+  if (touched === 0) throw new Error('该 MAA 计划里没有肉鸽任务，参数调整已取消。')
+  // `applied` carries the human-readable summary back to the command handler;
+  // it is never written into the task JSON MaaCore reads.
+  return { document: { ...document, tasks }, applied: described }
+}
+
+function coerceOverride(spec, raw, key) {
+  const value = raw === undefined || raw === null ? '' : String(raw).trim()
+  if (spec.kind === 'theme') {
+    if (!ROGUELIKE_THEMES.has(value)) throw new Error(`肉鸽主题无效：${value || '(空)'}；可选 ${[...ROGUELIKE_THEMES].join(' / ')}`)
+    return value
+  }
+  if (spec.kind === 'integer') {
+    if (!/^\d+$/.test(value)) throw new Error(`${ROGUELIKE_OVERRIDE_LABELS[key]}必须是整数`)
+    const number = Number(value)
+    if (number < spec.min || number > spec.max) throw new Error(`${ROGUELIKE_OVERRIDE_LABELS[key]}必须在 ${spec.min}–${spec.max} 之间`)
+    return number
+  }
+  if (spec.kind === 'boolean') {
+    if (!/^(?:true|false|1|0)$/i.test(value)) throw new Error(`${ROGUELIKE_OVERRIDE_LABELS[key]}只能是 true 或 false`)
+    return value === 'true' || value === '1'
+  }
+  if (value.length < spec.min || value.length > spec.max) throw new Error(`${ROGUELIKE_OVERRIDE_LABELS[key]}长度必须在 ${spec.min}–${spec.max} 之间`)
+  return value
+}
+
 export function generatedTaskPath(configDir) {
   if (typeof configDir !== 'string' || configDir.trim() === '' || !path.isAbsolute(configDir.trim())) {
     throw new TypeError('maa-cli config directory must be an absolute path')

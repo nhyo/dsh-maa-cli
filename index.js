@@ -1,6 +1,6 @@
 import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa } from './runner.js'
-import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './planner.js'
-import { consumePlanFromHumanGesture, preparePendingPlan } from './confirmation.js'
+import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask, applyRoguelikeOverrides } from './planner.js'
+import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan } from './confirmation.js'
 import { parseLocalMaaCommand } from './local-command.js'
 import { formatReport, runDoctor } from './doctor.js'
 import { prepareRuntimeDirectories } from './preflight.js'
@@ -275,7 +275,7 @@ export function apply(ctx) {
     name: 'maa',
     definitionId: 'dsh-maa-cli/maa',
     description: '直接运行常用 MAA 操作，不调用模型',
-    input: { hint: '<help | setup | fight 1-7 2 | startup | infrast | award | closedown | stop>' },
+    input: { hint: '<help | setup | fight 1-7 2 | startup | infrast | award | closedown | stop | confirm MAA-XXXXXX theme=... startsCount=...>' },
     async handler({ agent, rawInput, signal }) {
       try {
         const parsed = parseLocalMaaCommand(rawInput)
@@ -304,8 +304,15 @@ export function apply(ctx) {
           await ensureMaaCli(signal)
           const emulator = await checkEmulator({ runMaa, signal })
           if (!emulator.ok) throw new Error(emulatorErrorMessage(emulator))
+          // Validate confirmation-time parameter overrides against the pending
+          // document before consuming it, so a bad value never burns the code.
+          const peeked = Object.keys(parsed.overrides ?? {}).length > 0 ? await peekPendingPlan(agent) : null
+          const patched = peeked ? applyRoguelikeOverrides(peeked.document, parsed.overrides) : null
+          const planSummary = patched
+            ? `${peeked.planSummary}｜确认时调整：${patched.applied.join('、')}`
+            : undefined
           const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
-          const result = await executeDocument(agent, signal, pending.document, pending.planSummary, { emulatorChecked: true })
+          const result = await executeDocument(agent, signal, patched ? patched.document : pending.document, planSummary ?? pending.planSummary, { emulatorChecked: true })
           return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text: formatCommandResult(result) }
         }
         const document = buildTaskDocument(parsed.steps)
@@ -398,7 +405,7 @@ export function apply(ctx) {
 
   ctx.tools.register({
     name: 'maa_prepare_plan',
-    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100); do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-20). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button. Clicking it executes through the non-model command plane and does not create another model call.`,
+    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100); do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-20). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings (theme, startsCount, difficulty, squad, coreChar, support, stopAtFinalBoss) that the user may adjust there without re-preparing the plan. Clicking confirm executes through the non-model command plane and does not create another model call.`,
     parameters: {
       type: 'object', additionalProperties: false, required: ['purpose', 'steps'],
       properties: {

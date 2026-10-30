@@ -50,6 +50,18 @@ export async function consumeConfirmedPlan(exec, confirmationCode, options = {})
   return pending
 }
 
+// Read-only view of the pending plan, used to validate confirmation-time
+// parameter overrides BEFORE the one-shot plan is consumed. A rejected override
+// must not burn the code.
+export async function peekPendingPlan(agent, options = {}) {
+  const env = options.env ?? process.env
+  const sessionKey = requireSessionKey(agent)
+  const state = await readState(env)
+  const pending = state.plans[sessionKey]
+  if (!pending) throw new Error('当前 DSH 会话没有待确认的 MAA 计划，请重新生成计划。')
+  return pending
+}
+
 // Used only by an explicit human gesture in the non-model command plane
 // (the /maa confirm command or the confirmation button that invokes it).
 // It deliberately does not inspect model-turn text: possession of the code is

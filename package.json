@@ -30,7 +30,7 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "test": "node --test runner.test.mjs doctor.test.mjs paths.test.mjs preflight.test.mjs state.test.mjs emulator.test.mjs runtime.test.mjs operator-box.test.mjs training-advice.test.mjs"
+    "test": "node --test runner.test.mjs doctor.test.mjs paths.test.mjs preflight.test.mjs state.test.mjs emulator.test.mjs runtime.test.mjs operator-box.test.mjs training-advice.test.mjs confirmation-panel.test.mjs"
   },
   "dsh": {
     "manifestVersion": 1,

@@ -7,6 +7,7 @@ const HELP = [
   '/maa box          或  /maa 扫描干员Box',
   '/maa closedown    或  /maa 关闭游戏',
   '/maa stop         或  /maa 停止任务',
+  '/maa confirm MAA-XXXXXX  确认并执行待确认计划（可附加肉鸽参数）',
   '/maa setup        安装本机 MAA 运行时（首次使用）',
   '',
   '作战默认不使用理智药、临期理智药或源石；基建默认不使用无人机。',
@@ -19,12 +20,30 @@ function countOf(value) {
   return CHINESE_COUNT.get(value)
 }
 
+// The confirmation panel appends its roguelike choices as `key=value` tokens,
+// e.g. `/maa confirm MAA-1A2B3C theme=Sarkaz startsCount=3`. Values stay strings
+// here; planner.js validates and coerces them against the allowed task fields.
+function parseOverrides(raw) {
+  if (!raw || raw.trim() === '') return {}
+  const overrides = {}
+  for (const token of raw.trim().split(/\s+/u)) {
+    const index = token.indexOf('=')
+    if (index <= 0 || index === token.length - 1) {
+      throw new Error(`无法识别的确认参数：${token}（应为 key=value，例如 theme=Sarkaz）\n\n${HELP}`)
+    }
+    const key = token.slice(0, index)
+    const value = token.slice(index + 1).replace(/^["']|["']$/g, '')
+    overrides[key] = value
+  }
+  return overrides
+}
+
 export function parseLocalMaaCommand(rawInput) {
   const input = String(rawInput ?? '').trim()
   if (input === '' || /^(?:help|帮助|\?)$/iu.test(input)) return { kind: 'help', text: HELP }
 
-  const confirm = input.match(/^confirm\s+(MAA-[A-F0-9]{6})$/iu)
-  if (confirm) return { kind: 'confirm', confirmationCode: confirm[1].toUpperCase() }
+  const confirm = input.match(/^confirm\s+(MAA-[A-F0-9]{6})(?:\s+(.+))?$/iu)
+  if (confirm) return { kind: 'confirm', confirmationCode: confirm[1].toUpperCase(), overrides: parseOverrides(confirm[2]) }
   if (/^(?:stop|停止|停止任务|终止任务)$/iu.test(input)) return { kind: 'stop' }
   if (/^(?:setup|安装运行时|初始化)$/iu.test(input)) return { kind: 'setup' }
 
