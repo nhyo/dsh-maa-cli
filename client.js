@@ -16,6 +16,7 @@ window.__ModuleLoader__.load({
       '.maa-stop-button:disabled{opacity:.55;cursor:default}',
       '.maa-plan-state{font-size:12px;color:var(--dsw-alias-label-secondary)}',
       '.maa-plan-error{font-size:12px;color:var(--dsw-alias-state-error-primary)}',
+      '.maa-plan-result{width:100%;margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}',
       '.maa-confirm-dock{width:100%;box-sizing:border-box;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,var(--dsw-alias-border-l2));border-radius:12px;padding:12px 14px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 8%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary)}',
       '.maa-confirm-dock-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}',
       '.maa-confirm-dock-copy{min-width:0;flex:1 1 260px}',
@@ -63,6 +64,11 @@ window.__ModuleLoader__.load({
           value = null
           publish()
         },
+        complete: function (code, result) {
+          if (!value || value.code !== code) return
+          value = { code: value.code, summary: value.summary, execute: value.execute, result: String(result || '执行完成。') }
+          publish()
+        },
       }
     }
 
@@ -81,11 +87,15 @@ window.__ModuleLoader__.load({
       const errorPair = React.useState('')
       const error = errorPair[0]
       const setError = errorPair[1]
+      const resultPair = React.useState('')
+      const result = resultPair[0]
+      const setResult = resultPair[1]
       const stopRequested = React.useRef(false)
       const run = React.useCallback(function () {
         if (!code || state !== 'ready') return
         setState('running')
         setError('')
+        setResult('')
         stopRequested.current = false
         Promise.resolve(execute('/maa confirm ' + code)).then(function (outcome) {
           if (stopRequested.current) {
@@ -98,7 +108,8 @@ window.__ModuleLoader__.load({
             return
           }
           setState('done')
-          if (onSuccess) onSuccess()
+          setResult(outcome.text || '执行完成。')
+          if (onSuccess) onSuccess(outcome)
         }, function (reason) {
           if (stopRequested.current) {
             setState('stopped')
@@ -121,14 +132,15 @@ window.__ModuleLoader__.load({
             return
           }
           setState('stopped')
-          if (onSuccess) onSuccess()
+          setResult(outcome.text || '任务已停止。')
+          if (onSuccess) onSuccess(outcome)
         }, function (reason) {
           stopRequested.current = false
           setState('running')
           setError(reason instanceof Error ? reason.message : String(reason))
         })
       }, [execute, state, onSuccess])
-      return { state, error, run, stop }
+      return { state, error, result, run, stop }
     }
 
     function ConfirmButton(props) {
@@ -150,7 +162,8 @@ window.__ModuleLoader__.load({
         h('span', { className: 'maa-plan-state' },
           action.state === 'stopped' ? '不会自动继续剩余任务'
           : action.state === 'done' ? '本次确认没有调用模型' : '30 分钟内有效'),
-        action.error ? h('div', { className: 'maa-plan-error' }, action.error) : null)
+        action.error ? h('div', { className: 'maa-plan-error' }, action.error) : null,
+        action.result ? h('div', { className: 'maa-plan-result', role: 'status' }, action.result) : null)
     }
 
     function MaaPlanCard(props) {
@@ -182,13 +195,20 @@ window.__ModuleLoader__.load({
     function MaaConfirmDock(props) {
       const plan = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot)
       if (!plan) return null
+      if (plan.result) {
+        return h('div', { className: 'maa-confirm-dock', role: 'status' },
+          h('div', { className: 'maa-confirm-dock-title' }, 'MAA 执行结果'),
+          h('div', { className: 'maa-plan-result' }, plan.result),
+          h('div', { className: 'maa-plan-actions' },
+            h('button', { className: 'maa-plan-button', type: 'button', onClick: function () { props.store.clear(plan.code) } }, '关闭结果')))
+      }
       return h('div', { className: 'maa-confirm-dock', role: 'status' },
         h('div', { className: 'maa-confirm-dock-head' },
           h('div', { className: 'maa-confirm-dock-copy' },
             h('div', { className: 'maa-confirm-dock-title' }, 'MAA 计划等待你的确认'),
             h('div', { className: 'maa-confirm-dock-summary' }, plan.summary)),
           h('div', { className: 'maa-plan-actions', style: { marginTop: 0 } },
-            h(ConfirmButton, { code: plan.code, execute: plan.execute, onSuccess: function () { props.store.clear(plan.code) } }))))
+            h(ConfirmButton, { code: plan.code, execute: plan.execute, onSuccess: function (outcome) { props.store.complete(plan.code, outcome.text) } }))))
     }
 
     const inject = ['slots', 'remote', 'remote.commands']

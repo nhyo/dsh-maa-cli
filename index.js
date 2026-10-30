@@ -6,6 +6,14 @@ import { formatReport, runDoctor } from './doctor.js'
 import { prepareRuntimeDirectories } from './preflight.js'
 import { checkEmulator, emulatorErrorMessage } from './emulator.js'
 import { bootstrapRuntime, exists, formatRuntimeReport, inspectRuntime, updateRuntime } from './runtime.js'
+import {
+  formatOperatorBoxScanResult,
+  parseCompletedOperatorBox,
+  queryOperatorBox,
+  readOperatorBox,
+  saveOperatorBox,
+  stripOperBoxCallbacks,
+} from './operator-box.js'
 
 export const name = 'maa-cli-tools'
 export const inject = ['tools', 'commands']
@@ -69,6 +77,24 @@ const RUNTIME_RESULT_SCHEMA = {
   },
 }
 
+const OPERATOR_PROPERTIES = {
+  id: { type: 'string' }, name: { type: 'string' }, rarity: { type: 'integer' },
+  elite: { type: 'integer' }, level: { type: 'integer' }, potential: { type: 'integer' },
+}
+const OPERATOR_BOX_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['available', 'scannedAt', 'ageSeconds', 'totalOwned', 'matched', 'truncated', 'operators', 'summary'],
+  properties: {
+    available: { type: 'boolean' }, scannedAt: { type: 'string' }, ageSeconds: { type: 'integer' },
+    totalOwned: { type: 'integer' }, matched: { type: 'integer' }, truncated: { type: 'boolean' },
+    operators: {
+      type: 'array',
+      items: { type: 'object', additionalProperties: false, required: Object.keys(OPERATOR_PROPERTIES), properties: OPERATOR_PROPERTIES },
+    },
+    summary: { type: 'string' },
+  },
+}
+
 const MISSING_CLI_HINT = '找不到 maa-cli。可以执行 maa_runtime 的 install 动作：插件会自动下载一套私有运行时（maa-cli + MaaCore + 资源，约 520–630 MB），之后无需在系统里安装 MAA。'
 let runtimeBootstrapPromise = null
 
@@ -129,6 +155,8 @@ function renderResult(_args, value) {
 
 function formatCommandResult(result) {
   const lines = [`MAA 已结束（退出码 ${result.exitCode}）。`, `计划：${result.planSummary}`]
+  if (result.operatorBox) lines.push('', formatOperatorBoxScanResult(result.operatorBox))
+  if (result.operatorBoxError) lines.push('', `干员 Box 结果读取失败：${result.operatorBoxError}`)
   if (result.stdout) lines.push('', result.stdout)
   if (result.stderr) lines.push('', result.stderr)
   return lines.join('\n')
@@ -171,8 +199,29 @@ async function executeDocument(agent, signal, document, planSummary, options = {
       throw new Error(`无法确定 maa-cli 配置目录：${configResult.stderr || configResult.stdout || `exit ${configResult.exitCode}`}`)
     }
     const written = await writeGeneratedTask(document, { configDir })
-    const result = await runMaa(actionArguments('run_task', GENERATED_TASK_NAME, true), { signal: executionSignal, timeoutMs: 30 * 60_000 })
-    return { ...result, planFile: written.path, planJson: written.json, planSummary }
+    const hasOperatorBox = document.tasks.some(task => task.type === 'OperBox')
+    const result = await runMaa(actionArguments('run_task', GENERATED_TASK_NAME, true), {
+      signal: executionSignal,
+      timeoutMs: 30 * 60_000,
+      outputLimit: hasOperatorBox ? 16 * 1024 * 1024 : undefined,
+      envPatch: hasOperatorBox ? { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } : undefined,
+    })
+    if (!hasOperatorBox) return { ...result, planFile: written.path, planJson: written.json, planSummary }
+
+    const cleanStderr = stripOperBoxCallbacks(result.stderr)
+    if (result.exitCode !== 0) {
+      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary }
+    }
+    try {
+      const operatorBox = parseCompletedOperatorBox(`${result.stdout}\n${result.stderr}`)
+      await saveOperatorBox(operatorBox)
+      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, operatorBox }
+    } catch (error) {
+      return {
+        ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary,
+        operatorBoxError: error instanceof Error ? error.message : String(error),
+      }
+    }
   } finally {
     if (activeExecutions.get(key) === active) activeExecutions.delete(key)
   }
@@ -214,12 +263,12 @@ export function apply(ctx) {
           if (!emulator.ok) throw new Error(emulatorErrorMessage(emulator))
           const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
           const result = await executeDocument(agent, signal, pending.document, pending.planSummary, { emulatorChecked: true })
-          return { kind: result.exitCode === 0 ? 'success' : 'error', text: formatCommandResult(result) }
+          return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text: formatCommandResult(result) }
         }
         const document = buildTaskDocument(parsed.steps)
         const summary = summarizePlan(parsed.steps)
         const result = await executeDocument(agent, signal, document, summary)
-        return { kind: result.exitCode === 0 ? 'success' : 'error', text: formatCommandResult(result) }
+        return { kind: result.exitCode === 0 && !result.operatorBoxError ? 'success' : 'error', text: formatCommandResult(result) }
       } catch (error) {
         return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
       }
@@ -233,6 +282,27 @@ export function apply(ctx) {
     output: { schema: RESULT_SCHEMA, render: renderResult },
     async execute(args, exec) { await requireMaaCli(); return await runMaa(queryArguments(args.operation), { signal: exec.signal, timeoutMs: 30_000 }) },
     presentCall: args => ({ card: 'terminal', title: `maa_query ${args.operation}` }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_operator_box',
+    description: 'Read the locally cached Arknights operator roster without operating the emulator or game. Always call this before answering questions about which operators the user owns, rarity, elite level, level, or potential. Use rarity=6 for six-star questions. If available is false, or the user explicitly asks to refresh the data, prepare a confirmed StartUp + OperBox scan with maa_prepare_plan; never claim the roster from general knowledge.',
+    parameters: {
+      type: 'object', additionalProperties: false, properties: {
+        rarity: { type: 'integer', minimum: 1, maximum: 6, description: 'Optional star-rarity filter.' },
+        name: { type: 'string', description: 'Optional case-insensitive operator-name substring.' },
+        eliteBelow: { type: 'integer', minimum: 1, maximum: 3, description: 'Optional filter: only operators whose elite level is lower than this value.' },
+        maxResults: { type: 'integer', minimum: 1, maximum: 500, description: 'Maximum returned operators; defaults to 200.' },
+      },
+    },
+    output: {
+      schema: OPERATOR_BOX_RESULT_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: value.available
+        ? `${value.summary}\n${value.operators.map(operator => `${operator.name}（${operator.rarity}星，精${operator.elite}，${operator.level}级，潜能${operator.potential}）`).join('、') || '没有匹配的干员。'}`
+        : value.summary }],
+    },
+    async execute(args) { return queryOperatorBox(await readOperatorBox(), args) },
+    presentCall: () => ({ card: 'terminal', title: '读取干员 Box 缓存' }),
   })
 
   ctx.tools.register({

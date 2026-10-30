@@ -4,6 +4,7 @@ const HELP = [
   '/maa startup      或  /maa 启动游戏',
   '/maa infrast      或  /maa 基建换班',
   '/maa award        或  /maa 领取奖励',
+  '/maa box          或  /maa 扫描干员Box',
   '/maa closedown    或  /maa 关闭游戏',
   '/maa stop         或  /maa 停止任务',
   '/maa setup        安装本机 MAA 运行时（首次使用）',
@@ -38,6 +39,12 @@ export function parseLocalMaaCommand(rawInput) {
   }
   if (/^(?:award|领取奖励|领奖)$/iu.test(input)) {
     return { kind: 'execute', purpose: '领取日常和周常奖励', steps: [{ type: 'Award', dailyWeekly: true }] }
+  }
+  if (/^(?:box|operbox|扫描干员(?:box|列表)?|识别干员(?:box|列表)?)$/iu.test(input)) {
+    return {
+      kind: 'execute', purpose: '扫描干员 Box',
+      steps: [{ type: 'StartUp', clientType: 'Official' }, { type: 'OperBox' }],
+    }
   }
 
   const fight = input.match(/^(?:fight|刷|作战)\s*([A-Za-z0-9._-]+)(?:\s*(\d+|[一二两三四五六七八九十])\s*(?:次)?)?$/iu)

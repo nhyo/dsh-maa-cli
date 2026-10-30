@@ -40,6 +40,7 @@ dsh plugin --profile desktop add dsh-maa-cli
 
 ```text
 /maa fight 1-7 2        # 刷两次 1-7，全程不经过模型
+/maa box                # 扫描干员 Box 并保存查询缓存
 /maa setup              # 想提前下载运行时的话
 ```
 
@@ -56,6 +57,7 @@ dsh plugin --profile desktop add dsh-maa-cli
 | `/maa startup` | `启动`、`启动游戏`、`打开游戏`、`打开明日方舟` | 启动游戏并进入主界面 |
 | `/maa infrast` | `基建`、`基建换班` | 基建换班，默认不使用无人机 |
 | `/maa award` | `领取奖励`、`领奖` | 领取日常与周常奖励 |
+| `/maa box` | `operbox`、`扫描干员Box`、`识别干员列表` | 扫描已拥有干员并更新本地缓存 |
 | `/maa closedown` | `关闭`、`关闭游戏`、`关闭明日方舟` | 关闭游戏客户端 |
 | `/maa stop` | `停止`、`停止任务`、`终止任务` | 停止本会话正在执行的任务 |
 | `/maa setup` | `安装运行时`、`初始化` | 下载并配置私有运行时 |
@@ -67,6 +69,7 @@ dsh plugin --profile desktop add dsh-maa-cli
 /maa fight 1-7 10       # 刷十次
 /maa 刷 1-7 两次        # 中文数字也认：一 ~ 十
 /maa 基建换班
+/maa box                # 不调用模型；会操作模拟器扫描干员页
 ```
 
 约定：
@@ -74,6 +77,20 @@ dsh plugin --profile desktop add dsh-maa-cli
 - 作战默认**不使用**理智药、临期理智药或源石；基建默认**不使用**无人机。
 - **连续作战**：请求 1–10 次时，`times` 与 `series` 同时设为该次数（10 次即 `times: 10, series: 10`，走游戏内连战）；超过 10 次时 `series: 0`，由 MaaCore 自动分组，避免逐局重复点击。
 - 执行期间确认条上会出现「停止任务」按钮，等价于 `/maa stop`。MaaCore 没有可靠的暂停/继续接口，因此停止后不会自动补完剩余局数。
+
+### 干员 Box 查询
+
+`/maa box` 会执行 `StartUp + OperBox`，并把识别出的已拥有干员精简保存到 `~/.dsh/maa-cli/operator-box.json`。缓存只包含干员 ID、名称、星级、精英化、等级、潜能和扫描时间，不包含账号凭据。
+
+扫描一次后，可以直接用自然语言询问：
+
+```text
+我有哪些六星干员？
+哪些六星还没精二？
+维什戴尔多少级、几潜？
+```
+
+DSH 会先调用只读的 `maa_operator_box` 查询缓存，不连接模拟器。没有缓存，或用户明确要求刷新时，才会准备一份需要确认的 `StartUp + OperBox` 扫描计划。
 
 ## 自然语言用法
 
@@ -97,6 +114,7 @@ dsh plugin --profile desktop add dsh-maa-cli
 | 工具 | 作用 |
 | --- | --- |
 | `maa_query` | 只读查询：`version`、`help`、`list`，以及各目录位置（`cache_dir`、`hot_update_dir`、`config_dir`、`library_dir`、`resource_dir`、`data_dir`、`log_dir`） |
+| `maa_operator_box` | 只读查询上次 `OperBox` 缓存，可按星级、名称和精英化筛选；不会连接模拟器 |
 | `maa_doctor` | 环境体检，只读：maa-cli 版本、AppData 视图、缓存目录可原子写、热更新仓库、连接配置、ADB 文件、ADB 端口、MuMu 管理器，共 9 项 |
 | `maa_prepare_plan` | 把自然语言步骤整理成计划并落盘，显示本地确认按钮 |
 | `maa_runtime` | `status` / `install` / `update`：查看、安装、更新私有运行时；`force` 强制重装，`keepCaches` 保留安装包 |

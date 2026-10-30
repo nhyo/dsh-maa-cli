@@ -23,11 +23,12 @@ test('registers a zero-token command plus prepare-only model tools', () => {
     commands: { register: command => commands.push(command) },
   })
   assert.deepEqual(commands.map(command => command.name), ['maa'])
-  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_prepare_plan', 'maa_doctor', 'maa_runtime'])
+  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_operator_box', 'maa_prepare_plan', 'maa_doctor', 'maa_runtime'])
   assert.deepEqual(tools[0].parameters.required, ['operation'])
-  assert.deepEqual(tools[1].parameters.required, ['purpose', 'steps'])
-  assert.deepEqual(tools[2].parameters.properties, {})
-  assert.match(tools[1].description, /does not create another model call/)
+  assert.deepEqual(tools[2].parameters.required, ['purpose', 'steps'])
+  assert.deepEqual(tools[3].parameters.properties, {})
+  assert.match(tools[2].description, /does not create another model call/)
+  assert.match(tools[1].description, /Always call this/)
 })
 
 test('parses common slash commands without a model', () => {
@@ -40,6 +41,7 @@ test('parses common slash commands without a model', () => {
   assert.equal(parseLocalMaaCommand('confirm maa-a1b2c3').confirmationCode, 'MAA-A1B2C3')
   assert.equal(parseLocalMaaCommand('停止任务').kind, 'stop')
   assert.equal(parseLocalMaaCommand('setup').kind, 'setup')
+  assert.deepEqual(parseLocalMaaCommand('扫描干员Box').steps.map(step => step.type), ['StartUp', 'OperBox'])
   assert.throws(() => parseLocalMaaCommand('任意 shell 命令'), /无法识别/)
 })
 
@@ -191,6 +193,15 @@ test('aborting runMaa terminates its exact Windows process tree', { skip: proces
   setTimeout(() => controller.abort(), 100)
   await assert.rejects(running, error => error?.name === 'AbortError')
   assert.ok(Date.now() - started < 5_000)
+})
+
+test('passes a narrow environment patch to maa-cli without shell interpolation', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-env-'))
+  const wrapper = path.join(root, 'env.cmd')
+  await writeFile(wrapper, '@echo off\r\necho %MAA_LOG%/%MAA_LOG_PREFIX%\r\n', 'utf8')
+  const result = await runMaa(['version'], { cliPath: wrapper, envPatch: { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } })
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.stdout.trim(), 'info/Never')
 })
 
 test('lists saved custom tasks without failing on an empty set', async () => {

@@ -97,6 +97,7 @@ export async function runMaa(args, options = {}) {
   if (options.env === undefined && isRuntimePath(cliPath)) {
     Object.assign(childEnv, runtimeEnvironment(runtimeLayout()))
   }
+  Object.assign(childEnv, options.envPatch ?? {})
 
   return await new Promise((resolve, reject) => {
     // Passing /c as a separate spawn argument makes Node escape the quotes around
