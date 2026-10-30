@@ -36,7 +36,10 @@
 ```text
 dsh plugin --profile desktop add dsh-maa-cli
 ```
-
+或
+```text
+dsh plugin --profile web add dsh-maa-cli
+```
 安装完成后**重启 DSH Desktop**，然后任选一种方式：
 
 ```text
