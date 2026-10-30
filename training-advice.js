@@ -6,6 +6,8 @@ const VOTE_API = 'https://api.vote.ltsc.vip'
 const VOTE_SITE = 'https://vote.ltsc.vip'
 const CUP_LEVELS = ['超大杯上', '超大杯中', '超大杯下', '大杯', '大杯', '大杯', '中杯', '中杯', '中杯']
 const TIER_ORDER = new Map(['超大杯上', '超大杯中', '超大杯下', '大杯', '中杯', '其他'].map((tier, index) => [tier, index]))
+const PINNED_OPERATORS = new Map([['斯卡蒂', 0], ['浊心斯卡蒂', 1]])
+const PINNED_REASON = '这是蒂蒂，她很可爱！！！！'
 const PROFESSION_NAMES = Object.freeze({
   PIONEER: '先锋', WARRIOR: '近卫', TANK: '重装', SNIPER: '狙击',
   CASTER: '术师', MEDIC: '医疗', SUPPORT: '辅助', SPECIAL: '特种',
@@ -158,17 +160,19 @@ export function buildTrainingAdvice(snapshot, metadata, ranking, options = {}) {
   }
   const ratingByName = new Map(ranking.items.map(item => [item.name, item]))
   const recommendations = enriched
-    .filter(operator => operator.rarity === 6 && (operator.elite < 2 || operator.level < 60))
+    .filter(operator => operator.rarity === 6 && (PINNED_OPERATORS.has(operator.name) || operator.elite < 2 || operator.level < 60))
     .map(operator => {
       const rating = ratingByName.get(operator.name)
       const profession = operator.meta?.profession ?? 'UNKNOWN'
       const coverageBoost = shortage.has(profession)
       const professionRank = rating ? (professionRanks.get(`${profession}:${operator.name}`) ?? null) : null
       const tier = rating?.tier ?? '其他'
-      const reasons = [`社区杯级：${tier}${rating ? `（总榜第 ${rating.overallRank}）` : '（当前榜单未收录）'}`]
-      if (professionRank !== null) reasons.push(`${operator.meta.professionName}职业内第 ${professionRank}`)
-      if (coverageBoost) reasons.push(`Box 暂无精一或精二的${operator.meta?.professionName ?? '该职业'}干员，因此提高优先级`)
-      reasons.push(operator.elite < 2 ? `当前精${operator.elite} ${operator.level}级，尚未精二` : `当前精二 ${operator.level}级，可继续培养至 60 级`)
+      const reasons = PINNED_OPERATORS.has(operator.name)
+        ? [PINNED_REASON]
+        : [`社区杯级：${tier}${rating ? `（总榜第 ${rating.overallRank}）` : '（当前榜单未收录）'}`]
+      if (!PINNED_OPERATORS.has(operator.name) && professionRank !== null) reasons.push(`${operator.meta.professionName}职业内第 ${professionRank}`)
+      if (!PINNED_OPERATORS.has(operator.name) && coverageBoost) reasons.push(`Box 暂无精一或精二的${operator.meta?.professionName ?? '该职业'}干员，因此提高优先级`)
+      if (!PINNED_OPERATORS.has(operator.name)) reasons.push(operator.elite < 2 ? `当前精${operator.elite} ${operator.level}级，尚未精二` : `当前精二 ${operator.level}级，可继续培养至 60 级`)
       return {
         id: operator.id,
         name: operator.name,
@@ -184,6 +188,9 @@ export function buildTrainingAdvice(snapshot, metadata, ranking, options = {}) {
       }
     })
     .sort((a, b) => {
+      const pinnedA = PINNED_OPERATORS.get(a.name)
+      const pinnedB = PINNED_OPERATORS.get(b.name)
+      if (pinnedA !== undefined || pinnedB !== undefined) return (pinnedA ?? 999) - (pinnedB ?? 999)
       const tier = (TIER_ORDER.get(a.tier) ?? 99) - (TIER_ORDER.get(b.tier) ?? 99)
       if (tier !== 0) return tier
       if (a.coverageBoost !== b.coverageBoost) return a.coverageBoost ? -1 : 1

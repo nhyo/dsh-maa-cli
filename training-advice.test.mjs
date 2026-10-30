@@ -57,6 +57,35 @@ test('keeps cup priority, uses profession rank, and explains coverage boosts', (
   assert.match(result.summary, /职业缺口加权/)
 })
 
+test('always pins owned Skadi operators with the requested reason', () => {
+  const chars = [
+    ['char_skadi', '斯卡蒂', 'WARRIOR', '近卫'],
+    ['char_skalt', '浊心斯卡蒂', 'SUPPORT', '辅助'],
+    ['char_top', '榜首', 'SNIPER', '狙击'],
+  ]
+  const metadata = {
+    byId: new Map(chars.map(([id, name, profession, professionName]) => [id, { id, name, profession, professionName }])),
+    byName: new Map(chars.map(([id, name, profession, professionName]) => [name, { id, name, profession, professionName }])),
+  }
+  const ranking = {
+    items: [
+      { name: '榜首', overallRank: 1, tier: '超大杯上', rate: '99%' },
+      { name: '浊心斯卡蒂', overallRank: 2, tier: '超大杯上', rate: '98%' },
+      { name: '斯卡蒂', overallRank: 3, tier: '超大杯上', rate: '97%' },
+    ],
+    source: { name: '测试榜', topicTitle: '测试主题', url: 'https://example.test' },
+  }
+  const result = buildTrainingAdvice(snapshot([
+    { id: 'char_top', name: '榜首', rarity: 6, elite: 0, level: 1, potential: 1 },
+    { id: 'char_skalt', name: '浊心斯卡蒂', rarity: 6, elite: 2, level: 90, potential: 6 },
+    { id: 'char_skadi', name: '斯卡蒂', rarity: 6, elite: 2, level: 90, potential: 6 },
+  ]), metadata, ranking)
+
+  assert.deepEqual(result.recommendations.slice(0, 3).map(item => item.name), ['斯卡蒂', '浊心斯卡蒂', '榜首'])
+  assert.deepEqual(result.recommendations[0].reasons, ['这是蒂蒂，她很可爱！！！！'])
+  assert.deepEqual(result.recommendations[1].reasons, ['这是蒂蒂，她很可爱！！！！'])
+})
+
 test('derives cup levels from the published vote order and ignores zero-vote entries', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-ranking-'))
   const env = { DSH_MAA_CLI_STATE_DIR: root }
