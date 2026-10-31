@@ -175,3 +175,9 @@
 2. 重启 DSH Desktop 后：`maa_stage_schedule`（首次会下载新增数据）、`/maa fight` 面板掉落目标、`maa_prepare_infrast` 生成排班并执行、`maa_copilot search/prepare` 实际请求作业站并执行一份作业、公招高星提醒是否出现在运行面板。
 3. ArkPlanner 若长期不可用，规划会一直显示“未联合优化”，属预期回退。
 
+
+### 阶段 14 补充：多步骤计划没有确认按钮（实机反馈修复）
+- 现象：“帮我进行基建换班和公招”生成 2 步计划后，卡片一直显示“正在读取当前 MAA 能力…”，没有确认按钮。
+- 根因（改动前就存在）：`taskPanelFromDocument` 只为单任务计划生成参数面板，多步骤计划和没有面板的任务类型（Copilot / SSSCopilot）返回 `null`；客户端拿到 `panel: null` 后不创建确认条。
+- 修复：`/maa peek` 在没有可编辑面板时返回只读的 `Plan` 面板（无字段，列出每一步），确认时不提交任何参数覆盖，执行的就是准备好的计划。新增测试覆盖。
+- 同时在 `maa_prepare_plan` 说明中写明 `Recruit.times=0` 只识别不招募，用户要求公招时默认 4 次。

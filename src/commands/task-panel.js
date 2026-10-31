@@ -252,6 +252,32 @@ export function resolveItemId(raw, itemIndex) {
   throw new Error(`MAA 物品索引中找不到“${value}”，请使用游戏内的物品全名。`)
 }
 
+const STEP_LABELS = {
+  Roguelike: '自动肉鸽', Copilot: '自动战斗作业', SSSCopilot: '保全派驻作业', Depot: '识别仓库', OperBox: '识别干员',
+  Custom: '自定义 MaaCore 任务', CloseDown: '关闭游戏',
+}
+
+// Plans without an editable panel (several steps, or a task type such as
+// Copilot that has no parameter panel) still need a confirmation surface: a
+// read-only step list with no fields, so the confirm button submits no
+// overrides and executes exactly the prepared plan.
+export function readOnlyPlanPanel(document) {
+  const tasks = isObject(document) && Array.isArray(document.tasks) ? document.tasks : []
+  return {
+    type: 'Plan', title: tasks.length > 1 ? `MAA 计划（${tasks.length} 步）` : 'MAA 计划', fields: [], values: {},
+    notes: tasks.map((task, index) => note(`${index + 1}. ${PANELS[task?.type]?.title ?? STEP_LABELS[task?.type] ?? String(task?.type ?? '未知任务')}${stepDetail(task)}`)),
+  }
+}
+
+function stepDetail(task) {
+  const params = isObject(task?.params) ? task.params : {}
+  if (task?.type === 'Fight') return `：${params.stage || '当前关卡'} ×${params.times ?? '?'}${params.drops ? '，有掉落目标' : ''}${params.medicine ? `，理智药 ${params.medicine}` : ''}${params.stone ? `，源石 ${params.stone}` : ''}`
+  if (task?.type === 'Recruit') return `：${params.times ? `${params.times} 次` : '只识别不招募'}${Array.isArray(params.confirm) && params.confirm.length ? `，自动确认 ${params.confirm.join('/')}★` : ''}${params.expedite ? '，使用加急许可' : ''}`
+  if (task?.type === 'Infrast') return params.mode === 10000 ? '：自定义排班' : params.mode === 20000 ? '：队列轮换' : ''
+  if (task?.type === 'Copilot') return params.copilot_list?.[0]?.stage_name ? `：${params.copilot_list[0].stage_name}` : '：当前关卡'
+  return ''
+}
+
 export function taskPanelFromDocument(document, capabilities = fallbackCapabilities(), context = {}) {
   const tasks = isObject(document) && Array.isArray(document.tasks) ? document.tasks : []
   const onlyDataTasks = tasks.length > 0 && tasks.every(task => task && (task.type === 'OperBox' || task.type === 'Depot'))

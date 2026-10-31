@@ -77,7 +77,8 @@ await writeFile(path.join(stateDir, 'operator-box.json'), JSON.stringify({ versi
 await writeFile(path.join(stateDir, 'depot.json'), JSON.stringify({ version: 1, scannedAt: new Date().toISOString(), items: { 30012: 2, 30062: 1, 3303: 3, 4001: 100000 } }))
 
 const tools = []
-apply({ tools: { register: tool => tools.push(tool) }, commands: { register: () => {} } })
+const commands = []
+apply({ tools: { register: tool => tools.push(tool) }, commands: { register: command => commands.push(command) } })
 const tool = name => tools.find(item => item.name === name)
 let turn = 0
 function exec(id) {
@@ -193,4 +194,21 @@ test('recruit high-star results are reported, never auto-confirmed', async () =>
   assert.match(summarizePlan([{ type: 'Recruit', times: 4, confirm: [3, 6] }]), /⚠ 将自动确认 6★/u)
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
   assert.match(source, /公招提醒：/u)
+})
+
+test('multi-step and Copilot plans get a read-only confirmation panel instead of hanging', async () => {
+  await clearPendingPlansForTest()
+  const context = exec('multi-step')
+  const prepared = await tool('maa_prepare_plan').execute({ purpose: '基建换班并公招', steps: [{ type: 'Infrast' }, { type: 'Recruit', times: 4 }] }, context)
+  const maa = commands.find(command => command.name === 'maa')
+  const peeked = await maa.handler({ agent: context.agent, rawInput: `peek ${prepared.confirmationCode}`, signal: AbortSignal.timeout(10_000) })
+  assert.equal(peeked.kind, 'success')
+  const payload = JSON.parse(peeked.text)
+  assert.equal(payload.panel.type, 'Plan')
+  assert.deepEqual(payload.panel.fields, [])
+  assert.deepEqual(payload.panel.values, {})
+  assert.deepEqual(payload.panel.notes.map(item => item.text), ['1. 基建换班', '2. 自动公招：4 次'])
+  const single = await tool('maa_prepare_plan').execute({ purpose: '只刷 1-7', steps: [{ type: 'Fight', stage: '1-7', times: 2 }] }, exec('single-step'))
+  const singlePeek = JSON.parse((await maa.handler({ agent: { id: 'single-step', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn } }] } }, rawInput: `peek ${single.confirmationCode}`, signal: AbortSignal.timeout(10_000) })).text)
+  assert.equal(singlePeek.panel.type, 'Fight')
 })
