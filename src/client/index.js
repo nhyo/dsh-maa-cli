@@ -165,6 +165,18 @@ window.__ModuleLoader__.load({
       return line.indexOf(' note=') >= 0 ? line.replace('/maa confirm', '/maa note-preview') : ''
     }
 
+    function switchPanelVariant(panel, previous, params, drafts) {
+      let nextParams = params
+      let nextDrafts = drafts || {}
+      if (panel && panel.type === 'Roguelike' && previous && params && previous.theme !== params.theme) {
+        nextDrafts = Object.assign({}, nextDrafts, { [previous.theme]: previous })
+        const restored = nextDrafts[params.theme]
+          || (panel.preferenceVariants && panel.preferenceVariants[params.theme])
+        if (restored) nextParams = Object.assign({}, params, restored, { theme: params.theme })
+      }
+      return { params: nextParams, drafts: nextDrafts }
+    }
+
     function createPlanStore() {
       let value = null
       const listeners = new Set()
@@ -182,7 +194,10 @@ window.__ModuleLoader__.load({
           if (!value || value.code !== next.code) { value = next; publish(); return }
           const changed = value.capabilitySignature && next.capabilitySignature
             && value.capabilitySignature !== next.capabilitySignature
-          value = Object.assign({}, value, next, { params: changed ? null : value.params })
+          value = Object.assign({}, value, next, {
+            params: changed ? null : value.params,
+            variantDrafts: changed ? {} : value.variantDrafts,
+          })
           publish()
         },
         clear: function (code) {
@@ -195,7 +210,10 @@ window.__ModuleLoader__.load({
         // disagree about what will be executed.
         setParams: function (code, params) {
           if (!value || !code || value.code !== code) return
-          value = Object.assign({}, value, { params: params })
+          const panel = value.taskPanel
+          const previous = value.params || (panel ? panel.values : null)
+          const switched = switchPanelVariant(panel, previous, params, value.variantDrafts)
+          value = Object.assign({}, value, { params: switched.params, variantDrafts: switched.drafts })
           publish()
         },
         complete: function (code, result) {

@@ -150,6 +150,25 @@ test('the composer dock reads runs on demand instead of polling the command plan
   assert.match(clientSource, /placeholder: '输入运行时要求/u)
   assert.match(clientSource, /runtimeCommand\(command\)/u)
   assert.doesNotMatch(clientSource, /'本局结束后停'|'取消停止条件'|'查看实时进度'/u)
+  const variantStart = clientSource.indexOf('function switchPanelVariant(')
+  const variantEnd = clientSource.indexOf('    function createPlanStore', variantStart)
+  assert.ok(variantStart >= 0 && variantEnd > variantStart)
+  const switchPanelVariant = Function(`return (${clientSource.slice(variantStart, variantEnd)})`)()
+  const panel = {
+    type: 'Roguelike',
+    preferenceVariants: {
+      JieGarden: { theme: 'JieGarden', startsCount: 1, coreChar: '结城理', stopAtMaxLevel: true },
+      Sami: { theme: 'Sami', startsCount: 8, coreChar: '提丰', stopAtMaxLevel: false },
+    },
+  }
+  const jieDraft = { ...panel.preferenceVariants.JieGarden, investmentsCount: 31 }
+  const toSami = switchPanelVariant(panel, jieDraft, { theme: 'Sami', startsCount: 9999 }, {})
+  assert.equal(toSami.params.coreChar, '提丰')
+  assert.equal(toSami.drafts.JieGarden.investmentsCount, 31)
+  const samiDraft = { ...toSami.params, investmentsCount: 17 }
+  const backToJie = switchPanelVariant(panel, samiDraft, { theme: 'JieGarden', startsCount: 9999 }, toSami.drafts)
+  assert.equal(backToJie.params.coreChar, '结城理')
+  assert.equal(backToJie.params.investmentsCount, 31)
   assert.match(clientSource, /onStart: function \(\) \{\s*rememberRun\(plan\.summary, plan\.code\)/u)
   assert.doesNotMatch(clientSource, /useRunSnapshot/u)
 })

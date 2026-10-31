@@ -124,12 +124,16 @@ export function parseLocalMaaCommand(rawInput) {
         theme = rogue[1]
       }
     }
-    const count = rogue[2] === undefined ? 1 : Number(rogue[2])
+    const count = rogue[2] === undefined ? 9999 : Number(rogue[2])
     if (!Number.isInteger(count) || count < 1 || count > 99999) throw new Error('肉鸽次数必须是 1–99999。')
+    const roguelikeOverrides = parseOverrides(rogue[3])
     return {
       kind: 'plan', purpose: `肉鸽 ${theme ?? '当前默认主题'} ×${count}`,
       steps: [{ type: 'Roguelike', theme, startsCount: count }],
-      roguelikeOverrides: parseOverrides(rogue[3]),
+      roguelikeOverrides,
+      panelExplicitKeys: [...new Set([
+        ...(rogue[1] ? ['theme'] : []), ...(rogue[2] ? ['startsCount'] : []), ...Object.keys(roguelikeOverrides),
+      ])],
     }
   }
 
@@ -140,6 +144,7 @@ export function parseLocalMaaCommand(rawInput) {
     return {
       kind: 'plan', purpose: `理智作战 ${fight[1] || '当前/上次关卡'} ×${times}`,
       steps: [{ type: 'Fight', stage: fight[1], times, medicine: 0, expiringMedicine: 0, stone: 0 }],
+      panelExplicitKeys: [...(fight[1] ? ['stage'] : []), ...(fight[2] ? ['times'] : [])],
     }
   }
 

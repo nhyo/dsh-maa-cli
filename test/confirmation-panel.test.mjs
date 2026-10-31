@@ -316,22 +316,25 @@ test('parses the zero-model rogue command', () => {
     purpose: '肉鸽 Sami ×3',
     steps: [{ type: 'Roguelike', theme: 'Sami', startsCount: 3 }],
     roguelikeOverrides: {},
+    panelExplicitKeys: ['theme', 'startsCount'],
   })
 
-  // No count means one run; the theme may also be the full chinese name.
+  // No count uses the panel default; the theme may also be the full chinese name.
   const one = parseLocalMaaCommand('肉鸽 黑流树海')
   assert.equal(one.steps[0].theme, 'BlackFlow')
-  assert.equal(one.steps[0].startsCount, 1)
+  assert.equal(one.steps[0].startsCount, 9999)
 
   // key=value tokens are pulled out for applyRoguelikeOverrides.
   const tuned = parseLocalMaaCommand('roguelike Sarkaz 2 mode=0 difficulty=4 useSupport=true')
   assert.equal(tuned.steps[0].theme, 'Sarkaz')
   assert.equal(tuned.steps[0].startsCount, 2)
   assert.deepEqual(tuned.roguelikeOverrides, { mode: '0', difficulty: '4', useSupport: 'true' })
+  assert.deepEqual(tuned.panelExplicitKeys, ['theme', 'startsCount', 'mode', 'difficulty', 'useSupport'])
+  assert.equal(taskPanelFromDocument(buildTaskDocument(tuned.steps)).values.startsCount, 2)
 
   // A mode-only invocation keeps the default count.
   const modeOnly = parseLocalMaaCommand('rogue JieGarden mode=20001')
-  assert.equal(modeOnly.steps[0].startsCount, 1)
+  assert.equal(modeOnly.steps[0].startsCount, 9999)
   assert.deepEqual(modeOnly.roguelikeOverrides, { mode: '20001' })
 })
 
@@ -368,11 +371,11 @@ test('accepts the /maa rouge spelling and parses peek', () => {
   assert.equal(rouge.steps[0].startsCount, 2)
 
   // No theme is resolved from the active capability descriptor later; no
-  // count still means one run.
+  // count uses the same 9999 default shown by the panel.
   const def = parseLocalMaaCommand('rouge')
   assert.equal(def.kind, 'plan')
   assert.equal(def.steps[0].theme, undefined)
-  assert.equal(def.steps[0].startsCount, 1)
+  assert.equal(def.steps[0].startsCount, 9999)
 
   assert.deepEqual(parseLocalMaaCommand('peek MAA-1A2B3C'), { kind: 'peek', confirmationCode: 'MAA-1A2B3C' })
   assert.deepEqual(parseLocalMaaCommand('查看计划'), { kind: 'peek', confirmationCode: '' })

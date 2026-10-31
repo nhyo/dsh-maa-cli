@@ -283,8 +283,11 @@ function roguelikeThemeOf(document) {
 
 async function rememberConfirmedPanel(document, environment) {
   const tasks = Array.isArray(document?.tasks) ? document.tasks : []
-  if (!tasks.some(task => task?.type === 'Roguelike')) return
-  const capabilities = environment?.capabilities ?? (await strategyEnvironment()).capabilities
+  if (tasks.length === 0) return
+  const hasRoguelike = tasks.some(task => task?.type === 'Roguelike')
+  const capabilities = hasRoguelike
+    ? environment?.capabilities ?? (await strategyEnvironment()).capabilities
+    : undefined
   await rememberPanelValues(taskPanelFromDocument(document, capabilities))
 }
 
@@ -966,7 +969,7 @@ export function apply(ctx) {
                 type: 'Workflow', title: '目标工作流', fields: [], values: {},
                 notes: workflow.steps.map((step, index) => ({ text: `${index + 1}. ${step.title}${step.kind === 'decision' ? '（到此暂停并请求人工决策）' : ''}` })),
               }
-            : await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities))
+            : await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities), { explicitKeys: pending.panelExplicitKeys })
           return {
             kind: 'success',
             text: JSON.stringify({
@@ -1082,7 +1085,10 @@ export function apply(ctx) {
           // Every zero-model task only prepares: the client turns this notice
           // into its MAA-style parameter panel, and the button executes
           // `/maa confirm` on the local command plane. No model turn, no tokens.
-          const pending = await preparePendingPlan(agent, { planSummary: summary, document })
+          const pending = await preparePendingPlan(agent, {
+            planSummary: summary, document,
+            panelExplicitKeys: Array.isArray(parsed.panelExplicitKeys) ? parsed.panelExplicitKeys : [],
+          })
           return {
             kind: 'success',
             text: `MAA 计划待确认：${summary}\n确认码 ${pending.confirmationCode}（30 分钟内有效）。参数面板已在输入框上方打开，确认后执行；也可以输入 /maa confirm ${pending.confirmationCode}。`,

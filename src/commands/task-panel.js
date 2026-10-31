@@ -433,7 +433,9 @@ function roguelikePanel(document, capabilities) {
     ],
     notes: capabilities.warning ? [note(capabilities.warning)] : [],
     values: {
-      theme: selected.id, mode: selectedMode, startsCount: 9999, ...featureValues(selected),
+      theme: selected.id, mode: selectedMode,
+      startsCount: currentMatchesTheme ? current.startsCount ?? 9999 : 9999,
+      ...featureValues(selected),
       difficulty: selectedDifficulty,
       squad: selectedSquad, roles: selectedRoles,
       coreChar: selectedOperator, useSupport: currentMatchesTheme ? current.useSupport ?? defaults.useSupport === true : defaults.useSupport === true,
