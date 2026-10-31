@@ -50,6 +50,21 @@ export async function writeState(state, env = process.env) {
   }
 }
 
+// Shared atomic JSON writer for small plugin state files: temporary file +
+// rename, with the same in-place fallback as the pending-plan store.
+export async function writeJsonAtomically(file, value, options = {}) {
+  await mkdir(path.dirname(file), { recursive: true })
+  const payload = `${JSON.stringify(value, null, options.pretty === false ? undefined : 2)}\n`
+  const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+  try {
+    await writeFile(temporary, payload, 'utf8')
+    await rename(temporary, file)
+  } catch {
+    await writeFile(file, payload, 'utf8')
+    await rm(temporary, { force: true }).catch(() => {})
+  }
+}
+
 // Pending-plan writes share one queue so confirmation, cancellation, preview
 // updates and plan creation cannot overwrite one another after reading the
 // same older snapshot.

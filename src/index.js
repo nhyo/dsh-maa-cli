@@ -5,15 +5,15 @@ import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTa
 import { assertPlanCodeOpen, cancelPendingPlan, consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, recordPlanRun, updatePendingPlan } from './commands/confirmation.js'
 import { parseLocalMaaCommand } from './commands/local-command.js'
 import { activeRun, addRunCheckpoint, beginRun, clearRunStopping, describeRunState, finishRun, getRun, isProcessAlive, markRunStopping, readRunState, reapGeneratedTaskProcesses, setRunProcess, stopRun, updateRunRecovery } from './commands/run-state.js'
-import { applyRuntimeInstruction, completeTriggeredInstructions, parseMaaCallbackLine, processMaaCallback, startLogTail } from './commands/runtime-instructions.js'
+import { applyRuntimeInstruction, completeTriggeredInstructions, parseMaaCallbackLine, processMaaCallback, recruitNotices, startLogTail } from './commands/runtime-instructions.js'
 import { callbackCheckpoint, decideRecovery, diagnoseExecutionFailure, isExecutionFailure, MAX_RECOVERY_RETRIES } from './agent/recovery-manager.js'
-import { createGoal, getGoal, listGoals, planGoal, updateGoal } from './agent/goal-manager.js'
-import { loadPlanningData, readPlanningData } from './agent/planning-data.js'
+import { createGoal, getGoal, listGoals, planGoal, trainingRequirements, updateGoal } from './agent/goal-manager.js'
+import { applyDropRates, applyJointPlan, loadPlanningData, planWithArkPlanner, readPlanningData, weeklyStageOpen, weeklyStageSchedule } from './agent/planning-data.js'
 import {
   auditInterruptedWorkflows, createWorkflowExecution, deleteWorkflowPreset, getWorkflowExecution,
   getWorkflowPreset, listWorkflowPresets, saveWorkflowPreset, updateWorkflowExecution, workflowDocument,
 } from './agent/workflow-manager.js'
-import { applyTaskPanelOverrides, taskPanelFromDocument } from './commands/task-panel.js'
+import { applyTaskPanelOverrides, resolveItemId, taskPanelFromDocument } from './commands/task-panel.js'
 import { applyRememberedConfig, rememberPanelValues } from './commands/panel-memory.js'
 import { discoverMaaCapabilities } from './capabilities/discovery.js'
 import { formatReport, runDoctor } from './runtime/doctor.js'
@@ -33,6 +33,9 @@ import { buildTrainingAdvice, fetchCommunityRanking, formatTrainingAdvice, loadO
 import {
   compileStrategyRequest,
   GENERATED_COPILOT_MARKER,
+  generatedFileMarker,
+  loadOperatorNames,
+  materializeGeneratedFiles,
   materializeStrategy,
   previewStrategy,
   previewStrategyDetails,
@@ -43,6 +46,8 @@ import {
   rememberPlanStrategies, setStrategyMemoryEnabled,
 } from './strategy/memory.js'
 import { noteModelPrompt, parseStrategyNote } from './strategy/note.js'
+import { compileInfrastPlan, deleteInfrastPlan, describeInfrastPlan, listSavedInfrastPlans, saveInfrastPlan } from './strategy/infrast-plan.js'
+import { formatCopilotCandidate, getCopilot, rankCopilots, searchCopilots } from './strategy/copilot-site.js'
 
 export const name = 'maa-cli-tools'
 export const inject = ['tools', 'commands']
@@ -259,8 +264,51 @@ async function strategyEnvironment(signal) {
   ])
   const resourceDir = directory.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1)
   if (directory.exitCode !== 0 || !resourceDir) throw new Error(`无法读取 MAA 资源目录：${directory.stderr || directory.stdout || `exit ${directory.exitCode}`}`)
-  const capabilities = await discoverMaaCapabilities({ resourceDir, compatibility })
-  return { resourceDir, compatibility, capabilities }
+  const [capabilities, itemIndex] = await Promise.all([
+    discoverMaaCapabilities({ resourceDir, compatibility }),
+    loadItemIndex(resourceDir).catch(() => null),
+  ])
+  return { resourceDir, compatibility, capabilities, itemIndex }
+}
+
+// Panel fields that need MAA resource data (item names for drop targets).
+function panelContext(environment) { return { itemIndex: environment?.itemIndex ?? null } }
+
+// Fight drop targets arrive from the model as item names or ids; MaaCore needs
+// ids from item_index.json. Unknown names are rejected, never guessed.
+function resolveStepDrops(steps, itemIndex) {
+  return steps.map(step => {
+    if (step?.type !== 'Fight' || step.drops === undefined) return step
+    if (step.drops === null || typeof step.drops !== 'object' || Array.isArray(step.drops)) throw new Error('Fight.drops 必须是“物品名或 ID → 数量”的对象。')
+    const drops = {}
+    for (const [key, count] of Object.entries(step.drops)) {
+      const id = resolveItemId(key, itemIndex)
+      drops[id] = (drops[id] ?? 0) + count
+    }
+    return { ...step, drops }
+  })
+}
+
+// Warn (do not block) when a weekly resource/chip stage is closed today
+// according to the cached game data. Without a cache nothing is claimed.
+async function weeklyStageWarnings(steps, resourceDir) {
+  const codes = [...new Set(steps.filter(step => step?.type === 'Fight' && typeof step.stage === 'string').map(step => step.stage.trim()))]
+  if (codes.length === 0) return []
+  const data = await readPlanningData()
+  if (!data?.weekly) return []
+  const stages = await readMaaStages(resourceDir)
+  const warnings = []
+  for (const code of codes) {
+    const zone = weeklyStageOpen(data, stages, code, { server: data.server })
+    if (zone && zone.openToday === false) warnings.push(`${code}（${zone.name}）今天（${WEEKDAY_LABELS[zone.weekday]}）未开放，开放日：${zone.daysOfWeek.map(day => WEEKDAY_LABELS[day]).join('、')}`)
+  }
+  return warnings
+}
+
+const WEEKDAY_LABELS = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日']
+
+async function readMaaStages(resourceDir) {
+  return await readFile(path.join(resourceDir, 'stages.json'), 'utf8').then(JSON.parse).catch(() => [])
 }
 
 function documentWithNoteStrategy(document, strategy) {
@@ -288,7 +336,7 @@ async function rememberConfirmedPanel(document, environment) {
   const capabilities = hasRoguelike
     ? environment?.capabilities ?? (await strategyEnvironment()).capabilities
     : undefined
-  await rememberPanelValues(taskPanelFromDocument(document, capabilities))
+  await rememberPanelValues(taskPanelFromDocument(document, capabilities, panelContext(environment)))
 }
 
 async function prepareNotePreview(agent, confirmationCode, rawNote, overrides, signal) {
@@ -296,7 +344,7 @@ async function prepareNotePreview(agent, confirmationCode, rawNote, overrides, s
   const pending = await peekPendingPlan(agent)
   if (pending.confirmationCode !== confirmationCode) throw new Error('MAA 确认码与待确认计划不一致。')
   const environment = await strategyEnvironment(signal)
-  const patch = Object.keys(overrides ?? {}).length ? applyTaskPanelOverrides(pending.document, overrides, environment.capabilities) : null
+  const patch = Object.keys(overrides ?? {}).length ? applyTaskPanelOverrides(pending.document, overrides, environment.capabilities, panelContext(environment)) : null
   const previewPending = patch ? { ...pending, document: patch.document } : pending
   const parsed = await parseStrategyNote(note, previewPending)
   if (parsed.needsModel) {
@@ -343,8 +391,9 @@ function publicNotePreview(preview) {
 const STEP_PROPERTIES = {
   type: { type: 'string', enum: ['StartUp', 'Fight', 'Infrast', 'Recruit', 'Mall', 'Award', 'Roguelike', 'ReclamationAlgorithm', 'Depot', 'OperBox', 'Custom', 'CloseDown'] },
   clientType: { type: 'string', enum: ['Official', 'Bilibili', 'Txwy', 'YoStarEN', 'YoStarJP', 'YoStarKR'], description: 'Optional game client for the whole plan. It may appear on any step; all provided values must match.' },
-  stage: { type: 'string' }, times: { type: 'integer' }, medicine: { type: 'integer' }, expiringMedicine: { type: 'integer' }, stone: { type: 'integer' },
-  mode: { type: 'integer' }, facilities: { type: 'array', items: { type: 'string', enum: ['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Dorm'] } },
+  stage: { type: 'string', description: 'Stage code such as 1-7, CE-6, H8-4; use "Annihilation" (or 剿灭) for the current annihilation stage.' }, times: { type: 'integer' }, medicine: { type: 'integer' }, expiringMedicine: { type: 'integer' }, stone: { type: 'integer' },
+  drops: { type: 'object', additionalProperties: { type: 'integer' }, description: 'Fight only: stop as soon as ANY listed item reaches its quantity. Keys are MAA item names (e.g. 固源岩组) or item ids; the server resolves them via item_index.json. When drops is given, times may be omitted (defaults to 100 as an upper bound).' },
+  mode: { type: 'integer', description: 'Infrast: 0 default or 20000 rotation. Custom schedules (10000) are prepared with maa_prepare_infrast.' }, facilities: { type: 'array', items: { type: 'string', enum: ['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Dorm'] } },
   drones: { type: 'string', enum: ['_NotUse', 'Money', 'SyntheticJade', 'CombatRecord', 'PureGold', 'OriginStone', 'Chip'] }, threshold: { type: 'number' }, replenish: { type: 'boolean' }, dormNotStationed: { type: 'boolean' }, dormTrust: { type: 'boolean' },
   refresh: { type: 'boolean' }, select: { type: 'array', items: { type: 'integer' } }, confirm: { type: 'array', items: { type: 'integer' } }, setTime: { type: 'boolean' }, expedite: { type: 'boolean' }, permitReserve: { type: 'integer' }, firstTags: { type: 'array', items: { type: 'string' } }, extraTagsMode: { type: 'integer' },
   shopping: { type: 'boolean' }, buyFirst: { type: 'array', items: { type: 'string' } }, blacklist: { type: 'array', items: { type: 'string' } }, forceShoppingIfCreditFull: { type: 'boolean' }, onlyBuyDiscount: { type: 'boolean' }, reserveMaxCredit: { type: 'boolean' }, visitFriends: { type: 'boolean' }, creditFight: { type: 'boolean' },
@@ -781,6 +830,7 @@ async function executeDocument(agent, signal, document, planSummary, options = {
     else options.abortSignal.addEventListener('abort', linkedAbort, { once: true })
   }
   let strategyExecution = null
+  let generatedExecution = null
   let strategyReserved = false
   let recorded = { status: 'failed', exitCode: null, summary: 'MAA 执行没有返回结果。' }
   let detached = false
@@ -791,9 +841,12 @@ async function executeDocument(agent, signal, document, planSummary, options = {
       await active.monitor.flush().catch(() => {})
       active.monitor.stop()
     }
+    const notices = recruitNotices(await getRun(run.id).catch(() => null))
+    if (notices.length) recorded = { ...recorded, summary: `${recorded.summary}｜公招提醒：${notices.join('；')}（未自动确认，请在游戏内处理）` }
     await finishRun(run.id, recorded).catch(() => {})
     await completeTriggeredInstructions(run.id).catch(() => {})
     try {
+      if (generatedExecution) await generatedExecution.restore().catch(() => {})
       if (strategyExecution) await strategyExecution.restore()
     } finally {
       options.abortSignal?.removeEventListener('abort', linkedAbort)
@@ -835,6 +888,10 @@ async function executeDocument(agent, signal, document, planSummary, options = {
       executionDocument = strategyExecution.document
       const runtimeFallbacks = strategyExecution.unsupported.filter(item => !planSummary.includes(item.request))
       if (runtimeFallbacks.length) planSummary = `${planSummary}｜执行时安全回退：${runtimeFallbacks.map(item => item.request).join('、')}`
+    }
+    if (Array.isArray(options.generatedFiles) && options.generatedFiles.length > 0) {
+      generatedExecution = await materializeGeneratedFiles(executionDocument, options.generatedFiles, { configDir })
+      executionDocument = generatedExecution.document
     }
     const written = await writeGeneratedTask(executionDocument, { configDir })
     const hasOperatorBox = executionDocument.tasks.some(task => task.type === 'OperBox')
@@ -949,13 +1006,49 @@ async function goalPlanningContext(signal, server = 'CN', includePlanningData = 
   const [operatorBox, depot, itemIndex, stages, planningResult] = await Promise.all([
     readOperatorBox(),
     readDepot(),
-    loadItemIndex(environment.resourceDir),
-    readFile(path.join(environment.resourceDir, 'stages.json'), 'utf8').then(JSON.parse).catch(() => []),
+    environment.itemIndex ?? loadItemIndex(environment.resourceDir),
+    readMaaStages(environment.resourceDir),
     includePlanningData
       ? loadPlanningData({ server, signal }).then(value => ({ value, error: '' }), error => ({ value: null, error: error instanceof Error ? error.message : String(error) }))
       : Promise.resolve({ value: null, error: '' }),
   ])
-  return { ...environment, operatorBox, depot, itemIndex, stages, planningData: planningResult.value, planningDataError: planningResult.error }
+  const jointPlanner = requirements => planWithArkPlanner({ requirements, depot, itemIndex, server }, { signal })
+  return { ...environment, operatorBox, depot, itemIndex, stages, planningData: planningResult.value, planningDataError: planningResult.error, jointPlanner }
+}
+
+const TRAINING_TARGET_PROPERTIES = {
+  operator: { type: 'string' },
+  targetElite: { type: 'integer', minimum: 0, maximum: 2, description: 'Target elite phase. Omit together with targetLevel when only skills/modules are wanted.' },
+  targetLevel: { type: 'integer', minimum: 1, maximum: 90 },
+  skillLevel: { type: 'object', additionalProperties: false, properties: { current: { type: 'integer', minimum: 1, maximum: 7 }, target: { type: 'integer', minimum: 1, maximum: 7 } }, description: 'Common skill level 1-7. current must come from the user: the Box scan has no skill levels.' },
+  masteries: { type: 'array', maxItems: 3, items: { type: 'object', additionalProperties: false, required: ['skill', 'target'], properties: { skill: { type: 'integer', minimum: 1, maximum: 3 }, current: { type: 'integer', minimum: 0, maximum: 3 }, target: { type: 'integer', minimum: 1, maximum: 3 } } }, description: 'Specialization goals, e.g. skill 2 to M3. current (0 = none) must come from the user.' },
+  modules: { type: 'array', maxItems: 3, items: { type: 'object', additionalProperties: false, required: ['target'], properties: { type: { type: 'string', description: 'Module type letter such as X / Y / D, or its name.' }, current: { type: 'integer', minimum: 0, maximum: 3 }, target: { type: 'integer', minimum: 1, maximum: 3 } } }, description: 'Module goals. current (0 = locked) must come from the user.' },
+}
+
+// Read-only "do I have enough for …" answer built from the same calculation
+// the goal planner uses.
+async function estimateTraining(args, signal) {
+  const context = await goalPlanningContext(signal, args.server, true)
+  if (!context.operatorBox) return agentResult({ status: 'needs_input', summary: '还没有干员 Box 缓存，无法得知干员当前练度。可以先确认一次 Box 扫描（/maa box）。' })
+  if (!context.planningData) return agentResult({ status: 'needs_input', summary: `无法取得培养数据：${context.planningDataError || '未知原因'}` })
+  const calculated = trainingRequirements(args, context)
+  if (calculated.needsUser) return agentResult({ status: 'needs_input', summary: [...calculated.facts, calculated.needsUser].join('\n') })
+  const nameOf = id => context.itemIndex?.byId?.get(id)?.name ?? id
+  const lines = [...calculated.facts]
+  if (!context.depot) {
+    lines.push('没有仓库缓存，以下为总需求（未扣除库存）：', ...calculated.requirements.map(item => `- ${nameOf(item.itemId)} ×${item.quantity}`))
+    return agentResult({ status: 'partial', summary: lines.join('\n'), data: calculated })
+  }
+  const joint = await context.jointPlanner(calculated.requirements).catch(() => null)
+  const rows = joint?.source === 'arkplanner' && joint.stages.length
+    ? applyJointPlan(calculated.requirements, joint, context.depot)
+    : applyDropRates(calculated.requirements, context.planningData, context.depot, context.stages)
+  const short = rows.filter(row => row.gap > 0)
+  lines.push(short.length === 0 ? '按当前仓库缓存，材料已经足够。' : `仍缺 ${short.length} 种材料：`)
+  for (const row of short) lines.push(`- ${nameOf(row.itemId)}：需要 ${row.quantity}，库存 ${row.quantity - row.gap}，缺 ${row.gap}${row.stage ? `；建议 ${row.stage}×${row.runs}${row.drop?.source === 'arkplanner' ? '（ArkPlanner）' : ''}` : ''}`)
+  if (joint && joint.source !== 'arkplanner') lines.push(`ArkPlanner 暂不可用（${joint.error}），关卡建议按单材料期望理智计算，未联合优化。`)
+  lines.push(`仓库缓存时间：${context.depot.scannedAt}；掉率为统计期望，不是保证。`)
+  return agentResult({ status: 'ready', summary: lines.join('\n'), data: { requirements: calculated.requirements, gaps: short, syntheses: calculated.syntheses, joint: joint?.source ?? 'none' } })
 }
 
 function agentResult(input = {}) {
@@ -995,7 +1088,7 @@ async function prepareGoalConfirmation(args, exec) {
 
 function goalTitle(input) {
   if (input.kind === 'daily') return '完成今天的日常任务'
-  if (input.kind === 'operator_training') return `培养${input.operator || '指定干员'}`
+  if (input.kind === 'operator_training') return `培养${Array.isArray(input.operators) && input.operators.length ? input.operators.map(item => item.operator).join('、') : input.operator || '指定干员'}`
   if (input.kind === 'materials') return '规划并获取缺少的材料'
   return '自定义游戏目标'
 }
@@ -1195,7 +1288,7 @@ async function confirmPlanSteps(agent, parsed, signal, launch, markConsumed) {
     }
   }
   const confirmationEnvironment = hasOverrides && !note ? await strategyEnvironment(signal) : null
-  const patched = hasOverrides && !note ? applyTaskPanelOverrides(confirmationDocument, overrides, confirmationEnvironment.capabilities) : null
+  const patched = hasOverrides && !note ? applyTaskPanelOverrides(confirmationDocument, overrides, confirmationEnvironment.capabilities, panelContext(confirmationEnvironment)) : null
   const adjustments = patched && patched.applied.length > 0 ? `｜确认时调整：${patched.applied.join('、')}` : ''
   checkpoint()
   const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
@@ -1213,7 +1306,7 @@ async function confirmPlanSteps(agent, parsed, signal, launch, markConsumed) {
     ? `肉鸽 ${finalTheme}（确认时从 ${baseTheme} 切换）`
     : pending.purpose
   const result = await executeDocument(agent, signal, finalDocument, planSummary, {
-    background: true, emulatorChecked: true, strategy: confirmationStrategy ?? pending.strategy, purpose, confirmationCode: pending.confirmationCode,
+    background: true, emulatorChecked: true, strategy: confirmationStrategy ?? pending.strategy, generatedFiles: pending.generatedFiles, purpose, confirmationCode: pending.confirmationCode,
     abortSignal: launchSignal,
     onRunStarted: run => {
       launch.runId = run.id
@@ -1320,7 +1413,7 @@ export function apply(ctx) {
                 type: 'Workflow', title: '目标工作流', fields: [], values: {},
                 notes: workflow.steps.map((step, index) => ({ text: `${index + 1}. ${step.title}${step.kind === 'decision' ? '（到此暂停并请求人工决策）' : ''}` })),
               }
-            : await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities), { explicitKeys: pending.panelExplicitKeys })
+            : await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities, panelContext(environment)), { explicitKeys: pending.panelExplicitKeys })
           return {
             kind: 'success',
             text: JSON.stringify({
@@ -1380,13 +1473,13 @@ export function apply(ctx) {
         }
         const environment = await strategyEnvironment(signal)
         let document = buildTaskDocument(parsed.steps, environment.capabilities)
-        let summary = summarizePlan(parsed.steps, environment.capabilities)
+        let summary = summarizePlan(parsed.steps, environment.capabilities, panelContext(environment))
         // Parameter adjustments are validated against the same whitelist the
         // confirmation panel uses, and a bad value aborts before anything is
         // written or executed.
         const overrides = parsed.roguelikeOverrides ?? {}
         if (Object.keys(overrides).length > 0) {
-          const patched = applyTaskPanelOverrides(document, overrides, environment.capabilities)
+          const patched = applyTaskPanelOverrides(document, overrides, environment.capabilities, panelContext(environment))
           document = patched.document
           if (patched.applied.length > 0) summary = `${summary}｜参数：${patched.applied.join('、')}`
         }
@@ -1479,16 +1572,19 @@ export function apply(ctx) {
 
   ctx.tools.register({
     name: 'maa_goal_manager',
-    description: 'Create and manage goal-driven Arknights plans. Use prepare for daily tasks, operator training, material gaps, or a custom multi-step target. Operator training automatically refreshes cached game-data costs and Penguin Statistics drop rates at most once per 24 hours, then cross-checks them with the verified Box/Depot and current MAA stages. It applies explicit resource budgets and prepares a one-time confirmation; it never equates statistical expected drops, plan creation, or process exit with the game goal being achieved. Use replan after a scan or human decision, list/status to inspect, and cancel to stop a goal.',
+    description: 'Create and manage goal-driven Arknights plans. Use prepare for daily tasks, operator training, material gaps, or a custom multi-step target. Operator training covers elite/level, skill level 1-7, specializations and modules for one or several operators (operators[]); skill/mastery/module current levels are not in the Box scan and must be asked from the user, never assumed. Material gaps are planned jointly with Penguin Statistics ArkPlanner when reachable, otherwise per item. Use estimate for read-only “is my depot enough” questions. Operator training automatically refreshes cached game-data costs and Penguin Statistics drop rates at most once per 24 hours, then cross-checks them with the verified Box/Depot and current MAA stages. It applies explicit resource budgets and prepares a one-time confirmation; it never equates statistical expected drops, plan creation, or process exit with the game goal being achieved. Use replan after a scan or human decision, list/status to inspect, and cancel to stop a goal.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['action'],
       properties: {
-        action: { type: 'string', enum: ['prepare', 'replan', 'list', 'status', 'cancel', 'data_status', 'refresh_data'] },
+        action: { type: 'string', enum: ['prepare', 'replan', 'estimate', 'list', 'status', 'cancel', 'data_status', 'refresh_data'], description: 'estimate is read-only: compute training requirements and the remaining gap against the Depot cache without creating a goal (for “够不够/还缺什么” questions).' },
         goalId: { type: 'string' }, kind: { type: 'string', enum: ['daily', 'operator_training', 'materials', 'custom'] },
         title: { type: 'string' }, purpose: { type: 'string' }, operator: { type: 'string' }, completion: { type: 'string' },
         server: { type: 'string', enum: ['CN', 'US', 'JP', 'KR'], description: 'Game server used for drop-rate data; defaults to CN.' },
         targetElite: { type: 'integer', minimum: 0, maximum: 2, description: 'Operator target elite phase; defaults to 2.' },
         targetLevel: { type: 'integer', minimum: 1, maximum: 90, description: 'Level in the target elite phase; defaults to 1.' },
+        skillLevel: TRAINING_TARGET_PROPERTIES.skillLevel, masteries: TRAINING_TARGET_PROPERTIES.masteries, modules: TRAINING_TARGET_PROPERTIES.modules,
+        operators: { type: 'array', maxItems: 12, items: { type: 'object', additionalProperties: false, required: ['operator'], properties: TRAINING_TARGET_PROPERTIES }, description: 'Several operator goals planned together; their material gaps are summed before planning.' },
+        expandSynthesis: { type: 'boolean', description: 'Expand higher-tier materials into workshop ingredients after deducting stock (default false).' },
         budget: { type: 'object', additionalProperties: false, properties: { allowStone: { type: 'boolean' }, maxMedicine: { type: 'integer' }, maxExpiringMedicine: { type: 'integer' }, maxSanity: { type: 'integer' } } },
         requirements: { type: 'array', maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['quantity'], properties: { itemId: { type: 'string' }, name: { type: 'string' }, quantity: { type: 'integer' }, stage: { type: 'string' }, runs: { type: 'integer' } } } },
         steps: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', required: ['type'], properties: STEP_PROPERTIES } },
@@ -1504,6 +1600,7 @@ export function apply(ctx) {
         const metadata = { server: data.server, updatedAt: data.updatedAt, stale: data.stale, warning: data.warning, operatorCount: data.operators.length, matrixCount: data.matrix.length, sources: data.sources }
         return agentResult({ status: data.stale ? 'stale' : 'ready', summary: `培养/掉率数据：${data.server}，${data.updatedAt}，${data.operators.length} 条角色、${data.matrix.length} 条掉率记录${data.stale ? '（沿用缓存）' : ''}。`, data: metadata })
       }
+      if (args.action === 'estimate') return await estimateTraining(args, exec.signal)
       if (args.action === 'prepare') {
         if (!args.kind) throw new Error('prepare 必须提供 kind。')
         return await prepareGoalConfirmation(args, exec)
@@ -1662,7 +1759,7 @@ export function apply(ctx) {
 
   ctx.tools.register({
     name: 'maa_prepare_plan',
-    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100); do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-99999; the confirmation panel starts at 9999). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings — theme, mode, difficulty, squad, role group, starting operator and MAA's advanced switches — pre-filled from MAA's recommended opening (marked 【推荐】 and freely editable), so the user may adjust there without re-preparing the plan; a 备注 field next to the validity hint is handed back to DSH as free-form guidance that DSH may act on but is not guaranteed to. Clicking confirm executes through the non-model command plane and does not create another model call.`,
+    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100) unless drops is given; use drops for "刷到 N 个 X" requests and stage "Annihilation" for 剿灭 (the plugin cannot know whether this week's annihilation is already maxed, never claim it). For "today's resource/chip stage" call maa_stage_schedule first to learn which weekly stages are open. Recruit confirm defaults to none; never add 5 or 6 to confirm unless the user explicitly asks, the run reports detected 5★/6★ tags afterwards. Custom base schedules use maa_prepare_infrast and copilot-site jobs use maa_copilot, not this tool; do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-99999; the confirmation panel starts at 9999). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings — theme, mode, difficulty, squad, role group, starting operator and MAA's advanced switches — pre-filled from MAA's recommended opening (marked 【推荐】 and freely editable), so the user may adjust there without re-preparing the plan; a 备注 field next to the validity hint is handed back to DSH as free-form guidance that DSH may act on but is not guaranteed to. Clicking confirm executes through the non-model command plane and does not create another model call.`,
     parameters: {
       type: 'object', additionalProperties: false, required: ['purpose', 'steps'],
       properties: {
@@ -1674,14 +1771,16 @@ export function apply(ctx) {
     async execute(args, exec) {
       await assertNoActiveRun()
       const environment = await strategyEnvironment(exec.signal)
-      const document = buildTaskDocument(args.steps, environment.capabilities)
+      const steps = resolveStepDrops(args.steps, environment.itemIndex)
+      const document = buildTaskDocument(steps, environment.capabilities)
       let memory
       try {
-        memory = await rememberPlanStrategies(args.steps, environment.compatibility, { capabilities: environment.capabilities })
+        memory = await rememberPlanStrategies(steps, environment.compatibility, { capabilities: environment.capabilities })
       } catch (error) {
-        memory = memoryFallback(error, args.steps.length)
+        memory = memoryFallback(error, steps.length)
       }
-      const planSummary = `${summarizePlan(args.steps, environment.capabilities)}${memorySummary(memory)}`
+      const warnings = await weeklyStageWarnings(steps, environment.resourceDir).catch(() => [])
+      const planSummary = `${summarizePlan(steps, environment.capabilities, panelContext(environment))}${warnings.length ? `｜⚠ ${warnings.join('；')}` : ''}${memorySummary(memory)}`
       const planJson = `${JSON.stringify(document, null, 2)}\n`
       const confirmation = await preparePendingPlan(exec.agent, { purpose: args.purpose, document, planJson, planSummary })
       exec.concludeTurn()
@@ -1855,6 +1954,190 @@ export function apply(ctx) {
       }
     },
     presentCall: args => ({ card: 'terminal', title: `识别备注：${args.note}` }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_stage_schedule',
+    description: 'Read-only: report which weekly resource and chip stages (e.g. CE/LS/CA/AP/SK, PR-*) are open today in game-server time (the day starts at 04:00). The weekly schedule comes from the cached ArknightsGamedata zone table and the stage list from the installed MAA stages.json. Use it before preparing a Fight for requests like “今天开了哪个芯片本就刷哪个”. It does not cover limited-time event stages and never operates the game.',
+    parameters: {
+      type: 'object', additionalProperties: false, properties: {
+        server: { type: 'string', enum: ['CN', 'US', 'JP', 'KR'], description: 'Game server; defaults to CN.' },
+        kind: { type: 'string', enum: ['all', 'chip', 'resource'], description: 'Filter: chip stages, resource stages, or all (default).' },
+        refresh: { type: 'boolean', description: 'Force a data refresh instead of the 24-hour cache.' },
+      },
+    },
+    output: { schema: AGENT_RESULT_SCHEMA, render: renderAgentResult },
+    async execute(args, exec) {
+      const environment = await strategyEnvironment(exec.signal)
+      const [data, stages] = await Promise.all([
+        loadPlanningData({ server: args.server, signal: exec.signal, force: args.refresh === true }),
+        readMaaStages(environment.resourceDir),
+      ])
+      const schedule = weeklyStageSchedule(data, stages, { server: args.server ?? data.server })
+      const zones = schedule.zones.filter(zone => !args.kind || args.kind === 'all' || zone.kind === args.kind)
+      const open = zones.filter(zone => zone.openToday === true)
+      const closed = zones.filter(zone => zone.openToday === false)
+      const unknown = zones.filter(zone => zone.openToday === null)
+      const line = zone => `${zone.name}（${zone.kind === 'chip' ? '芯片' : '资源'}）：${zone.stages.join('、')}`
+      const summary = [
+        `${schedule.server} 服今天是${WEEKDAY_LABELS[schedule.weekday]}（以服务器时间 04:00 为日界）。`,
+        open.length ? `今天开放：\n${open.map(line).join('\n')}` : '没有找到今天开放的周常关卡。',
+        closed.length ? `今天未开放：${closed.map(zone => `${zone.name}（${zone.daysOfWeek.map(day => WEEKDAY_LABELS[day]).join('/')}）`).join('、')}` : '',
+        unknown.length ? `开放日未知：${unknown.map(zone => zone.name).join('、')}` : '',
+        data.stale ? data.warning : '',
+        '限时活动关卡与“资源全开放”活动不在此统计内；开放情况以游戏内为准。',
+      ].filter(Boolean).join('\n')
+      return agentResult({ status: data.stale ? 'stale' : 'ready', summary, data: { ...schedule, zones } })
+    },
+    presentCall: () => ({ card: 'terminal', title: '查询今日开放关卡' }),
+  })
+
+  const INFRAST_ROOM_SCHEMA = {
+    type: 'array', maxItems: 5, items: {
+      type: 'object', additionalProperties: false, properties: {
+        operators: { type: 'array', maxItems: 5, items: { type: 'string' }, description: 'Operator names in the client language (Chinese for CN). Unknown names are dropped with a reason.' },
+        candidates: { type: 'array', maxItems: 10, items: { type: 'string' }, description: 'Fallback operators picked in order until the room is full; not combined with autofill.' },
+        product: { type: 'string', description: 'Manufacturing: 赤金/作战记录/芯片/源石碎片; trading: 龙门币/合成玉. Tells MAA what the room currently produces so it picks matching operators; MAA does NOT switch the production line.' },
+        autofill: { type: 'boolean', description: 'Fill remaining slots with MAA\'s default algorithm. Empty operators implies autofill.' },
+        skip: { type: 'boolean', description: 'Do not change operators in this room.' },
+        sort: { type: 'boolean', description: 'Keep the given operator order.' },
+        count: { type: 'integer', minimum: 1, maximum: 5, description: 'Repeat this room definition for N rooms of this kind, e.g. all manufacturing stations.' },
+      },
+    },
+  }
+
+  ctx.tools.register({
+    name: 'maa_prepare_infrast',
+    description: 'Prepare a custom base schedule (MAA Infrast mode 10000) from the user\'s natural-language base arrangement, e.g. “制造站全部放赤金，红云放贸易站”. Translate the request into plans[].rooms; the plugin validates operator names against MAA\'s battle_data.json, generates MAA\'s base-scheduling JSON, shows a preview and returns a one-time confirmation. Rooms not mentioned keep MAA\'s default algorithm. MAA cannot change what a factory produces: product only describes the current product. Use action list/delete to manage schedules saved with saveAs, and useSaved to run one again. This tool never operates the game before confirmation.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['prepare', 'list', 'delete'] },
+        purpose: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' },
+        plans: {
+          type: 'array', minItems: 1, maxItems: 6, items: {
+            type: 'object', additionalProperties: false, required: ['rooms'], properties: {
+              name: { type: 'string' }, description: { type: 'string' },
+              period: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'Optional [["hh:mm","hh:mm"]] ranges in which this plan is chosen.' },
+              rooms: {
+                type: 'object', additionalProperties: false, properties: {
+                  control: INFRAST_ROOM_SCHEMA, manufacture: INFRAST_ROOM_SCHEMA, trading: INFRAST_ROOM_SCHEMA, power: INFRAST_ROOM_SCHEMA,
+                  meeting: INFRAST_ROOM_SCHEMA, hire: INFRAST_ROOM_SCHEMA, dormitory: INFRAST_ROOM_SCHEMA, processing: INFRAST_ROOM_SCHEMA,
+                },
+              },
+              drones: { type: 'object', additionalProperties: false, properties: { room: { type: 'string', enum: ['trading', 'manufacture'] }, index: { type: 'integer', minimum: 1, maximum: 5 }, order: { type: 'string', enum: ['pre', 'post'] } } },
+              fiammetta: { type: 'object', additionalProperties: false, properties: { target: { type: 'string' }, order: { type: 'string', enum: ['pre', 'post'] } } },
+            },
+          },
+        },
+        facilities: { type: 'array', items: { type: 'string', enum: ['Mfg', 'Trade', 'Power', 'Control', 'Reception', 'Office', 'Dorm', 'Processing'] }, description: 'Facilities MAA processes; defaults to all standard facilities.' },
+        planIndex: { type: 'integer', minimum: 0, maximum: 5, description: 'Which plan to run now (0-based); defaults to 0.' },
+        saveAs: { type: 'string', description: 'Also save the compiled schedule under this name.' },
+        useSaved: { type: 'string', description: 'Prepare a previously saved schedule instead of plans.' },
+        name: { type: 'string', description: 'For delete: saved schedule name.' },
+      },
+    },
+    output: { schema: AGENT_RESULT_SCHEMA, render: renderAgentResult },
+    async execute(args, exec) {
+      if (args.action === 'list') {
+        const saved = await listSavedInfrastPlans()
+        return agentResult({ status: 'ready', summary: saved.length ? `已保存 ${saved.length} 个排班：${saved.map(item => item.name).join('、')}` : '还没有保存的排班。', data: saved.map(item => ({ name: item.name, savedAt: item.savedAt, plans: describeInfrastPlan(item.document) })) })
+      }
+      if (args.action === 'delete') {
+        const removed = await deleteInfrastPlan(String(args.name ?? ''))
+        return agentResult({ status: removed ? 'deleted' : 'missing', summary: removed ? `已删除排班“${args.name}”。` : `没有名为“${args.name}”的排班。` })
+      }
+      await assertNoActiveRun()
+      const environment = await strategyEnvironment(exec.signal)
+      let compiled
+      if (args.useSaved) {
+        const saved = (await listSavedInfrastPlans()).find(item => item.name === args.useSaved)
+        if (!saved) throw new Error(`没有名为“${args.useSaved}”的已保存排班。`)
+        compiled = { document: saved.document, facilities: saved.facilities, supported: describeInfrastPlan(saved.document), unsupported: [], notes: [] }
+      } else {
+        compiled = compileInfrastPlan(args, await loadOperatorNames(environment.resourceDir))
+      }
+      const planIndex = args.planIndex ?? 0
+      if (planIndex >= compiled.document.plans.length) throw new Error(`排班只有 ${compiled.document.plans.length} 个方案，planIndex 超出范围。`)
+      const saved = args.saveAs && !args.useSaved ? await saveInfrastPlan(args.saveAs, compiled) : null
+      const marker = generatedFileMarker('infrast')
+      const steps = [{ type: 'Infrast', mode: 10000, filename: marker, planIndex, facilities: compiled.facilities }]
+      const document = buildTaskDocument(steps, environment.capabilities)
+      const purpose = args.purpose || args.title || '基建自定义排班'
+      const parts = [`${purpose}｜执行方案 ${planIndex}：${describeInfrastPlan(compiled.document)[planIndex]}`]
+      if (compiled.unsupported.length) parts.push(`未执行：${compiled.unsupported.map(item => `${item.request}（${item.reason}）`).join('、')}`)
+      if (compiled.notes.length) parts.push(`注意：${compiled.notes.join('；')}`)
+      if (saved) parts.push(`已保存为“${saved.name}”`)
+      const planSummary = parts.join('｜')
+      const planJson = `${JSON.stringify(document, null, 2)}\n`
+      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, generatedFiles: [{ marker, content: compiled.document }] })
+      exec.concludeTurn()
+      return agentResult({ status: 'pending_confirmation', summary: planSummary, ...confirmation, data: { schedule: compiled.document, supported: compiled.supported, unsupported: compiled.unsupported } })
+    },
+    presentCall: args => ({ card: 'terminal', title: args.action === 'prepare' ? `准备基建排班：${args.purpose || args.title || args.useSaved || ''}` : `基建排班：${args.action}` }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_copilot',
+    description: 'Find and run community copilot jobs from the MAA copilot site (prts.plus). action=search is read-only: it queries the site by stage (e.g. H8-4, 1-7) and ranks jobs by whether the verified OperBox cache owns the required operators, listing missing ones; without a Box cache it says ownership is unknown. action=prepare downloads one job (copilotId, maa://ID accepted), shows title/author/operators/missing operators and returns a one-time confirmation that runs it through MaaCore Copilot (or SSSCopilot for 保全派驻 jobs). Never claim a job will succeed; low-level jobs may still fail. Sanity potions are not used unless explicitly requested.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['search', 'prepare'] },
+        stage: { type: 'string', description: 'Stage code to search for, or to navigate to when preparing.' },
+        operator: { type: 'string', description: 'search: only jobs that use this operator.' },
+        limit: { type: 'integer', minimum: 1, maximum: 30 },
+        copilotId: { type: 'string', description: 'prepare: job id from search, e.g. 12345 or maa://12345.' },
+        navigate: { type: 'boolean', description: 'prepare: let MAA navigate to the stage (default true when the stage code is known); false runs on the stage currently open in the game.' },
+        formation: { type: 'boolean', description: 'Auto formation (default true).' },
+        addTrust: { type: 'boolean' }, supportUnitUsage: { type: 'integer', minimum: 0, maximum: 3 },
+        loopTimes: { type: 'integer', minimum: 1, maximum: 99 }, useSanityPotion: { type: 'boolean' },
+        purpose: { type: 'string' },
+      },
+    },
+    output: { schema: AGENT_RESULT_SCHEMA, render: renderAgentResult },
+    async execute(args, exec) {
+      const box = await readOperatorBox()
+      if (args.action === 'search') {
+        const ranked = rankCopilots(await searchCopilots({ stage: args.stage, operator: args.operator, limit: args.limit }, { signal: exec.signal }), box)
+        const summary = ranked.length
+          ? [`作业站 ${args.stage} 共返回 ${ranked.length} 份作业${box ? `（已按 ${box.scannedAt} 的 Box 缓存标注缺少的干员）` : '（没有 Box 缓存，无法判断是否缺干员）'}：`, ...ranked.map(formatCopilotCandidate)].join('\n')
+          : `作业站没有找到 ${args.stage} 的作业。`
+        return agentResult({ status: 'ready', summary, data: ranked.map(({ content: _content, ...item }) => item) })
+      }
+      await assertNoActiveRun()
+      const environment = await strategyEnvironment(exec.signal)
+      const [item] = rankCopilots([await getCopilot(args.copilotId, { signal: exec.signal })], box)
+      const job = item.job
+      const stageCode = [args.stage, job.stageName].map(value => String(value ?? '').trim()).find(value => /^[A-Za-z0-9][A-Za-z0-9-]{0,31}$/u.test(value)) ?? ''
+      const marker = generatedFileMarker(`copilot-site-${item.id}`)
+      const step = job.kind === 'SSSCopilot'
+        ? { type: 'SSSCopilot', filename: marker, loopTimes: args.loopTimes ?? 1 }
+        : {
+            type: 'Copilot', filename: marker,
+            ...(args.navigate !== false && stageCode ? { stageName: stageCode } : { loopTimes: args.loopTimes ?? 1 }),
+            formation: args.formation !== false, addTrust: args.addTrust === true,
+            supportUnitUsage: args.supportUnitUsage ?? 0, useSanityPotion: args.useSanityPotion === true,
+          }
+      const document = buildTaskDocument([step], environment.capabilities)
+      const operators = [...job.opers.map(oper => `${oper.name}(${oper.skill}技能)`), ...job.groups.map(group => `${group.name}[${group.opers.map(oper => oper.name).join('/')}]`)]
+      const ownership = item.ownership.status === 'ok' ? 'Box 显示干员齐全'
+        : item.ownership.status === 'missing' ? `⚠ 缺少：${[...item.ownership.missing, ...item.ownership.weak].join('、')}；自动编队可能失败`
+          : item.ownership.reason
+      const purpose = args.purpose || `抄作业 ${stageCode || job.stageName}`
+      const planSummary = [
+        `${purpose}｜maa://${item.id}「${job.title || job.stageName}」作者 ${item.uploader || '未知'}`,
+        `所需干员：${operators.join('、') || '未列出'}`,
+        ownership,
+        step.type === 'Copilot' && !step.stageName ? '将在游戏当前显示的关卡上执行，请先进入该关卡的开始行动界面' : '',
+        step.useSanityPotion ? '允许使用理智药' : '',
+      ].filter(Boolean).join('｜')
+      const planJson = `${JSON.stringify(document, null, 2)}\n`
+      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, generatedFiles: [{ marker, content: item.content }] })
+      exec.concludeTurn()
+      return agentResult({ status: 'pending_confirmation', summary: planSummary, ...confirmation, data: { id: item.id, job, ownership: item.ownership } })
+    },
+    presentCall: args => ({ card: 'terminal', title: args.action === 'search' ? `搜索作业：${args.stage ?? ''}` : `准备作业：${args.copilotId ?? ''}` }),
   })
 
   ctx.tools.register({

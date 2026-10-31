@@ -2,6 +2,19 @@
 
 ## 未发布（v1.0.4 / v1.1.0 开发目标）
 
+### MAA 功能补全与养成规划扩展
+
+- Fight 新增掉落目标 `drops`（物品名经 `item_index.json` 换算为 ID，未知名称拒绝），只给掉落目标时次数以 100 为上限；`/maa fight` 面板新增「掉落目标」输入。`剿灭` 写成 MaaCore 的 `Annihilation`，关卡名允许 `@`。
+- 新增 `maa_stage_schedule`：按服务器日（04:00）列出今天开放的资源本 / 芯片本；准备计划时对今天未开放的周常关卡给出提示。开放日取自 `zone_table.json`，关卡分区取自企鹅物流关卡列表（MAA `stages.json` 不含 `zoneId`）。
+- 公招：计划摘要标明高星是否会自动确认；运行时解析 `RecruitTagsDetected` / `RecruitSpecialTag` / `RecruitResult` 回调，高星组合与稀有 Tag 写入 `runs.json` 并在运行面板、执行结果中提示，不会自动确认。
+- 新增 `maa_prepare_infrast`：自然语言 → MAA 自定义排班（mode 10000），用 `battle_data.json` 校验干员，未知或冲突项列入未执行；支持保存 / 列出 / 删除 / 复用排班（`infrast-plans.json`）。明确说明 MAA 不切换生产线。
+- 新增 `maa_copilot`：作业站搜索（按 Box 标注缺少的干员并排序）与作业准备，Copilot / SSSCopilot 进入任务白名单，参数按 MaaCore 协议校验，默认不使用理智药。
+- 计划生成的文件（排班、作业）统一通过 `materializeGeneratedFiles` 在执行时写入配置目录并在结束后删除；计划只保存占位标记，不能指向任意磁盘文件。
+- 培养数据缓存升级到 v2：新增技能 1–7、专精、模组消耗、加工站材料配方、周常开放日与关卡分区；新增来源单独失败时只禁用对应功能并沿用旧缓存。
+- `maa_goal_manager` 支持多干员（`operators[]`）、技能 / 专精 / 模组目标、可选合成展开、ArkPlanner 联合刷图（不可用时回退并标注），以及只读的 `estimate`。技能 / 专精 / 模组当前等级不在 Box 中，必须由用户提供。
+- 抽出共用的 `src/agent/http.js`（`fetchJson`，支持 POST）与 `state.js` 的 `writeJsonAtomically`；`planning-data.js` 改用它们。
+- 新增 `test/feature-tools.test.mjs` 及若干单元测试（掉落目标、开放日、排班、作业站、公招回调、生成文件、培养消耗、ArkPlanner 回退）。
+
 ### 确认面板与运行面板：停止、最小化、关闭与状态统一
 
 - 修复运行面板「停止任务」按钮消失/失效：`runs.json` 中尚未请求停止的记录 `stopRequestedAt` 为 `null`，旧代码用 `Number.isFinite(Number(null))` 判断，结果所有执行中的记录都被报告为「正在停止」，面板读到状态后停止按钮立即变成禁用的「正在停止…」；同一判断还让 `markRunStopping` 永远不写入停止时间。现改为只有真实时间戳才算已请求停止。

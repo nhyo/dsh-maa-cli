@@ -107,6 +107,7 @@ export async function processMaaCallback(runId, callback, options = {}) {
     progress.stage = ''
     relevant = true
   }
+  if (RECRUIT_EVENTS.has(what)) relevant = recordRecruitCallback(progress, what, details) || relevant
   if (relevant) {
     progress.lastEvent = what
     progress.lastEventAt = options.now ?? Date.now()
@@ -135,6 +136,43 @@ export async function processMaaCallback(runId, callback, options = {}) {
   if (!changed) return { progress: refreshed.progress, triggered: null }
   options.stop?.(trigger.id)
   return { progress: refreshed.progress, triggered: await getInstruction(runId, trigger.id, options) }
+}
+
+// Public recruitment results come from MaaCore's SubTaskExtraInfo callbacks
+// (RecruitTagsDetected / RecruitSpecialTag / RecruitResult). They are only
+// recorded: an already-running maa-cli cannot be asked to wait for the user,
+// so high-star tags are reported after the fact instead of "paused".
+const RECRUIT_EVENTS = new Set(['RecruitTagsDetected', 'RecruitSpecialTag', 'RecruitResult', 'RecruitTagsSelected'])
+const MAX_RECRUIT_ENTRIES = 12
+
+function recordRecruitCallback(progress, what, details) {
+  const recruit = { results: [], special: [], notices: [], ...(progress.recruit ?? {}) }
+  const tags = Array.isArray(details.tags) ? details.tags.filter(tag => typeof tag === 'string').slice(0, 5) : []
+  if (what === 'RecruitTagsDetected') {
+    if (tags.length === 0) return false
+    recruit.lastTags = tags
+  } else if (what === 'RecruitTagsSelected') {
+    if (tags.length === 0) return false
+    recruit.lastSelected = tags
+  } else if (what === 'RecruitSpecialTag') {
+    if (typeof details.tag !== 'string' || !details.tag) return false
+    recruit.special = [...recruit.special, details.tag].slice(-MAX_RECRUIT_ENTRIES)
+    recruit.notices = [...recruit.notices, `检测到稀有 Tag「${details.tag}」`].slice(-MAX_RECRUIT_ENTRIES)
+  } else if (what === 'RecruitResult') {
+    const level = Number.isInteger(details.level) ? details.level : null
+    if (level === null) return false
+    const resultTags = tags.length ? tags : recruit.lastTags ?? []
+    recruit.results = [...recruit.results, { level, tags: resultTags }].slice(-MAX_RECRUIT_ENTRIES)
+    if (level >= 5) recruit.notices = [...recruit.notices, `检测到 ${level}★ Tag 组合：${resultTags.join('、') || '未知'}`].slice(-MAX_RECRUIT_ENTRIES)
+  }
+  progress.recruit = recruit
+  return true
+}
+
+export function recruitNotices(run) {
+  const recruit = run?.progress?.recruit
+  if (!recruit) return []
+  return [...new Set(recruit.notices ?? [])]
 }
 
 export async function completeTriggeredInstructions(runId, options = {}) {

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { stateDirectory } from '../runtime/state.js'
-import { applyDropRates, operatorUpgradeRequirements } from './planning-data.js'
+import { applyDropRates, applyJointPlan, expandSynthesis, mergeRequirements, operatorUpgradeRequirements } from './planning-data.js'
 
 const VERSION = 1
 const MAX_GOALS = 30
@@ -59,7 +59,7 @@ export async function planGoal(input, context = {}) {
   const kind = String(input.kind ?? '')
   const constraints = normalizeConstraints(input.budget)
   if (kind === 'daily') return dailyPlan(constraints)
-  if (kind === 'operator_training') return trainingPlan(input, context, constraints)
+  if (kind === 'operator_training') return await trainingPlan(input, context, constraints)
   if (kind === 'materials') return materialGoalPlan(input, context, constraints)
   if (kind === 'custom') return customPlan(input, constraints)
   throw new Error(`不支持的目标类型：${kind}`)
@@ -96,42 +96,101 @@ function dailyPlan(constraints) {
   }
 }
 
-function trainingPlan(input, context, constraints) {
-  const operator = String(input.operator ?? '').trim()
-  if (!operator) throw new Error('干员培养目标必须提供 operator。')
+// One or more operator goals. Elite/level come from the verified Box; skill,
+// mastery and module levels must be supplied (MAA's OperBox has none of them).
+export function trainingTargets(input) {
+  const list = Array.isArray(input.operators) && input.operators.length > 0 ? input.operators : [input]
+  if (list.length > 12) throw new Error('一次最多规划 12 名干员。')
+  return list.map((entry, index) => {
+    const operator = String(entry?.operator ?? '').trim()
+    if (!operator) throw new Error(`干员培养目标 #${index + 1} 必须提供 operator。`)
+    return {
+      operator, targetElite: entry.targetElite, targetLevel: entry.targetLevel,
+      skillLevel: entry.skillLevel, masteries: entry.masteries, modules: entry.modules,
+    }
+  })
+}
+
+// Pure requirement calculation shared by goal planning and read-only estimates.
+export function trainingRequirements(input, context) {
+  const targets = trainingTargets(input)
+  const facts = []
+  const lists = []
+  for (const target of targets) {
+    const owned = context.operatorBox?.operators?.find(item => item.name === target.operator)
+    if (!owned) return { needsUser: `Box 缓存中没有已拥有干员“${target.operator}”。请确认干员名称或先重新扫描 Box。`, facts }
+    facts.push(`${target.operator} 当前精${owned.elite} ${owned.level}级，潜能${owned.potential}。`)
+    let calculated
+    try {
+      calculated = operatorUpgradeRequirements(context.planningData, { ...target, current: owned, depot: context.depot })
+    } catch (error) {
+      if (error?.code === 'MAA_NEEDS_INPUT') return { needsUser: error.message, facts }
+      throw error
+    }
+    facts.push(`${target.operator} 培养目标：${calculated.breakdown.join('、') || '无变化'}；需 ${calculated.totalExp} 经验、${calculated.totalLmd} 龙门币（不含加工站）。`)
+    lists.push(calculated.requirements)
+  }
+  let requirements = mergeRequirements(lists)
+  let syntheses = []
+  if (input.expandSynthesis === true) {
+    const expanded = expandSynthesis(requirements, context.planningData, context.depot)
+    requirements = expanded.requirements
+    syntheses = expanded.syntheses
+    if (syntheses.length) facts.push(`按加工站配方展开 ${syntheses.length} 种高阶材料（加工站另需 ${expanded.workshopLmd} 龙门币）；展开前已扣除库存。`)
+  }
+  return { requirements, syntheses, facts, targets }
+}
+
+async function trainingPlan(input, context, constraints) {
+  const targets = trainingTargets(input)
+  const names = targets.map(target => target.operator).join('、')
   const steps = []
   const facts = []
   if (!context.operatorBox) {
     steps.push(maa('scan-box', '读取干员 Box', { type: 'OperBox', params: {} }))
     if (!context.depot) steps.push(maa('scan-depot', '读取仓库库存', { type: 'Depot', params: {} }))
-    steps.push(decision('replan-after-state-scan', `完成状态扫描后重新规划 ${operator} 的培养；在确认新计划前不会刷图或消耗资源。`))
+    steps.push(decision('replan-after-state-scan', `完成状态扫描后重新规划 ${names} 的培养；在确认新计划前不会刷图或消耗资源。`))
     return {
       status: 'ready', constraints,
-      completion: `取得可靠的 Box 与 Depot 缓存后重新规划 ${operator} 的培养。`,
+      completion: `取得可靠的 Box 与 Depot 缓存后重新规划 ${names} 的培养。`,
       facts: ['当前没有可用的干员 Box 缓存，未假定干员已拥有或当前等级。'], gaps: [], steps, needsUser: '',
     }
   }
-  const owned = context.operatorBox?.operators?.find(item => item.name === operator)
-  if (context.operatorBox && !owned) return needsInput(constraints, [`Box 缓存中没有已拥有干员“${operator}”。`], '请确认干员名称或先重新扫描 Box。')
-  if (owned) facts.push(`${operator} 当前精${owned.elite} ${owned.level}级，潜能${owned.potential}。`)
   let planningInput = input
   if (!Array.isArray(input.requirements) || input.requirements.length === 0) {
     if (!context.planningData) {
       return needsInput(constraints, facts, `无法自动取得可靠培养需求：${context.planningDataError || '培养数据不可用'}。可稍后重试，或明确提供材料需求。`)
     }
-    const calculated = operatorUpgradeRequirements(context.planningData, {
-      operator, current: owned, targetElite: input.targetElite, targetLevel: input.targetLevel, depot: context.depot,
-    })
-    const requirements = applyDropRates(calculated.requirements, context.planningData, context.depot, context.stages)
-      .sort((a, b) => Number(Boolean(b.stage)) - Number(Boolean(a.stage)))
+    const calculated = trainingRequirements(input, context)
+    facts.push(...calculated.facts)
+    if (calculated.needsUser) return needsInput(constraints, facts, calculated.needsUser)
+    let requirements = null
+    if (typeof context.jointPlanner === 'function' && context.depot) {
+      const joint = await context.jointPlanner(calculated.requirements)
+      if (joint?.source === 'arkplanner' && joint.stages.length > 0) {
+        requirements = applyJointPlan(calculated.requirements, joint, context.depot)
+        facts.push(`企鹅物流 ArkPlanner 联合规划：${joint.stages.slice(0, 6).map(stage => `${stage.stage}×${stage.count}`).join('、')}，预计共 ${joint.cost} 理智（统计期望）。`)
+      } else if (joint) {
+        facts.push(`ArkPlanner 暂不可用（${joint.error || '未返回关卡'}），已按单材料最低期望理智选关，未联合优化。`)
+      }
+    }
+    if (!requirements) {
+      requirements = applyDropRates(calculated.requirements, context.planningData, context.depot, context.stages)
+    }
+    requirements.sort((a, b) => Number(Boolean(b.stage)) - Number(Boolean(a.stage)))
     planningInput = { ...input, requirements, dynamicRates: true }
-    facts.push(`培养目标：精${calculated.target.elite} ${calculated.target.level}级；游戏数据计算需 ${calculated.totalExp} 经验、${calculated.totalLmd} 龙门币。`)
     facts.push(`培养数据更新时间：${context.planningData.updatedAt}（${context.planningData.server}）；掉率为企鹅物流统计值，执行后必须重扫仓库。`)
-    if (context.planningData.stale) facts.push(context.planningData.warning)
+    if (context.planningData.stale || context.planningData.warning) facts.push(context.planningData.warning)
+  } else {
+    for (const target of targets) {
+      const owned = context.operatorBox.operators.find(item => item.name === target.operator)
+      if (!owned) return needsInput(constraints, [`Box 缓存中没有已拥有干员“${target.operator}”。`], '请确认干员名称或先重新扫描 Box。')
+      facts.push(`${target.operator} 当前精${owned.elite} ${owned.level}级，潜能${owned.potential}。`)
+    }
   }
   const material = materialPlan(planningInput, context, constraints, steps, facts)
-  material.completion = `材料缺口归零并由用户在游戏内完成 ${operator} 的升级/精英化；MAA 当前没有通用干员升级任务，插件不会把收集材料误报为培养完成。`
-  if (material.steps.length === 0) material.steps.push(decision('manual-upgrade', `材料状态已满足已提供的需求；请在游戏内手动完成 ${operator} 的升级/精英化后确认。`))
+  material.completion = `材料缺口归零并由用户在游戏内完成 ${names} 的升级/精英化/技能/模组；MAA 当前没有通用干员升级任务，插件不会把收集材料误报为培养完成。`
+  if (material.steps.length === 0 && material.status === 'ready') material.steps.push(decision('manual-upgrade', `材料状态已满足已提供的需求；请在游戏内手动完成 ${names} 的培养后确认。`))
   return material
 }
 

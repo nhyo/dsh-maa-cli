@@ -173,7 +173,7 @@ test('the composer dock persists panel interaction state and never polls the com
   // The dock needs the command runner injected, otherwise the on-demand record
   // read never has a transport and the panel falls back to a stale bar.
   assert.match(clientSource, /id: 'maa-confirm'[\s\S]*?execute: commandRunner\(ctx, sessionId\)/u)
-  assert.match(clientSource, /\[\s*'maa_prepare_plan',\s*'maa_prepare_strategy',\s*'maa_prepare_note',\s*'maa_goal_manager',\s*'maa_workflow_manager'\s*\]/u)
+  assert.match(clientSource, /\[\s*'maa_prepare_plan',\s*'maa_prepare_strategy',\s*'maa_prepare_note',\s*'maa_goal_manager',\s*'maa_workflow_manager',\s*'maa_prepare_infrast',\s*'maa_copilot'\s*\]/u)
   // DSH echoes every `/maa ...` command into the conversation, so the dock may
   // restore once on mount and after explicit gestures, but must never poll.
   assert.match(clientSource, /function readStoredRun\(sessionId\)/u)

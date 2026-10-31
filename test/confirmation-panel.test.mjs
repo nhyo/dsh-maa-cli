@@ -537,3 +537,21 @@ test('offers MAX difficulty and resolves it to the theme maximum', () => {
   assert.equal(numeric.tasks[0].params.difficulty, 3)
   assert.equal(roguelikePanelFromDocument(numeric).difficulty, 3)
 })
+
+test('fight panel drop targets accept item names and show names back', async () => {
+  const { applyTaskPanelOverrides, taskPanelFromDocument } = await import('../src/commands/task-panel.js')
+  const itemIndex = {
+    byId: new Map([['30013', { id: '30013', name: '固源岩组' }], ['30062', { id: '30062', name: '装置' }]]),
+    byName: new Map([['固源岩组', { id: '30013', name: '固源岩组' }], ['装置', { id: '30062', name: '装置' }]]),
+  }
+  const document = { tasks: [{ type: 'Fight', params: { stage: '1-7', times: 5 } }] }
+  const patched = applyTaskPanelOverrides(document, { drops: encodeURIComponent('固源岩组=3；30062=2') }, undefined, { itemIndex })
+  assert.deepEqual(patched.document.tasks[0].params.drops, { 30013: 3, 30062: 2 })
+  const panel = taskPanelFromDocument(patched.document, undefined, { itemIndex })
+  assert.equal(panel.values.drops, '固源岩组=3;装置=2')
+  assert.equal(panel.fields.find(field => field.key === 'drops').kind, 'list')
+  const cleared = applyTaskPanelOverrides(patched.document, { drops: '' }, undefined, { itemIndex })
+  assert.equal('drops' in cleared.document.tasks[0].params, false)
+  assert.throws(() => applyTaskPanelOverrides(document, { drops: encodeURIComponent('不存在=1') }, undefined, { itemIndex }), /找不到/u)
+  assert.throws(() => applyTaskPanelOverrides(document, { drops: encodeURIComponent('固源岩组') }, undefined, { itemIndex }), /名称=数量/u)
+})

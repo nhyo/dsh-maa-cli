@@ -63,6 +63,10 @@ const PANELS = {
         default: 0, min: 0, max: 20,
         description: '本次任务最多使用的源石数量。0 表示绝不使用源石。',
       }),
+      field('drops', '掉落目标（任一达到即停）', 'list', 'drops', {
+        default: '', maxItems: 10, maxLength: 40, placeholder: '固源岩组=3；装置=2', dropsMap: true,
+        description: '按 MAA 物品名或物品 ID 填写“名称=数量”，用分号分隔；任一物品达到数量时停止作战，留空则只按次数。',
+      }),
       field('drGrandet', '博朗台模式', 'boolean', 'DrGrandet', {
         default: false, advanced: true,
         description: '在恢复理智确认界面等待，直到当前 1 点理智自然恢复完成，再立即确认。',
@@ -209,19 +213,46 @@ function listText(value) {
   return Array.isArray(value) ? value.join(';') : (typeof value === 'string' ? value : '')
 }
 
-function valuesFromTask(type, params) {
+function valuesFromTask(type, params, context = {}) {
   const definition = PANELS[type]
   const values = {}
   for (const item of definition.fields) {
     const raw = item.param ? params[item.param] : undefined
     values[item.key] = raw === undefined
       ? clone(item.default)
-      : item.kind === 'list' ? listText(raw) : clone(raw)
+      : item.dropsMap ? dropsText(raw, context.itemIndex)
+        : item.kind === 'list' ? listText(raw) : clone(raw)
   }
   return values
 }
 
-export function taskPanelFromDocument(document, capabilities = fallbackCapabilities()) {
+function dropsText(value, itemIndex) {
+  if (!isObject(value)) return ''
+  return Object.entries(value).map(([id, count]) => `${itemIndex?.byId?.get(id)?.name ?? id}=${count}`).join(';')
+}
+
+// "固源岩组=3；装置=2" → { "30013": 3, "30062": 2 } using MAA's item_index.json.
+export function parseDropTargets(entries, itemIndex) {
+  const result = {}
+  for (const entry of entries) {
+    const match = String(entry).match(/^(.+?)\s*[=＝:：×xX*]\s*(\d{1,5})$/u)
+    if (!match) throw new Error(`掉落目标“${entry}”格式应为 名称=数量。`)
+    const id = resolveItemId(match[1].trim(), itemIndex)
+    result[id] = (result[id] ?? 0) + Number(match[2])
+  }
+  return result
+}
+
+export function resolveItemId(raw, itemIndex) {
+  if (!itemIndex?.byId) throw new Error('无法读取 MAA 物品索引（item_index.json），不能设置掉落目标。')
+  const value = String(raw ?? '').trim()
+  if (itemIndex.byId.has(value)) return value
+  const found = itemIndex.byName.get(value.toLocaleLowerCase('zh-CN'))
+  if (found) return found.id
+  throw new Error(`MAA 物品索引中找不到“${value}”，请使用游戏内的物品全名。`)
+}
+
+export function taskPanelFromDocument(document, capabilities = fallbackCapabilities(), context = {}) {
   const tasks = isObject(document) && Array.isArray(document.tasks) ? document.tasks : []
   const onlyDataTasks = tasks.length > 0 && tasks.every(task => task && (task.type === 'OperBox' || task.type === 'Depot'))
   if (onlyDataTasks) {
@@ -247,7 +278,7 @@ export function taskPanelFromDocument(document, capabilities = fallbackCapabilit
     title: definition.title,
     fields: clone(definition.fields),
     notes: clone(definition.notes ?? []),
-    values: valuesFromTask(task.type, params),
+    values: valuesFromTask(task.type, params, context),
   }
 }
 
@@ -255,7 +286,7 @@ function decoded(raw, label) {
   try { return decodeURIComponent(String(raw ?? '')) } catch { throw new Error(`${label} 的 URL 编码不合法。`) }
 }
 
-function coerce(item, raw) {
+function coerce(item, raw, context = {}) {
   if (item.kind === 'boolean') {
     if (raw === true || raw === 'true') return true
     if (raw === false || raw === 'false') return false
@@ -288,7 +319,7 @@ function coerce(item, raw) {
     if (values.length > item.maxItems || values.some(itemValue => itemValue.length > item.maxLength)) {
       throw new Error(`${item.label}最多 ${item.maxItems} 项，每项最多 ${item.maxLength} 字。`)
     }
-    return values
+    return item.dropsMap ? parseDropTargets(values, context.itemIndex) : values
   }
   if (value.length > item.maxLength) throw new Error(`${item.label}最多 ${item.maxLength} 字。`)
   return value
@@ -305,8 +336,8 @@ function validateCombination(type, params) {
   }
 }
 
-export function applyTaskPanelOverrides(document, overrides, capabilities = fallbackCapabilities()) {
-  const panel = taskPanelFromDocument(document, capabilities)
+export function applyTaskPanelOverrides(document, overrides, capabilities = fallbackCapabilities(), context = {}) {
+  const panel = taskPanelFromDocument(document, capabilities, context)
   if (!panel) throw new Error('当前计划没有可编辑的 MAA 参数面板。')
   const normalizedOverrides = applyUnset(panel, overrides)
   if (panel.type === 'Roguelike') return applyRoguelikeOverrides(document, normalizedOverrides, capabilities)
@@ -335,12 +366,12 @@ export function applyTaskPanelOverrides(document, overrides, capabilities = fall
   const applied = []
   for (const [key, raw] of Object.entries(normalizedOverrides)) {
     const item = fields.get(key)
-    const value = coerce(item, raw)
+    const value = coerce(item, raw, context)
     if (item.param) {
       if (!item.required && emptyValue(value)) delete task.params[item.param]
       else task.params[item.param] = value
     }
-    applied.push(`${item.label}=${Array.isArray(value) ? value.join('、') : value}`)
+    applied.push(`${item.label}=${Array.isArray(value) ? value.join('、') : isObject(value) ? dropsText(value, context.itemIndex) || '无' : value}`)
   }
   validateCombination(panel.type, task.params)
   return { document: result, applied }
@@ -481,4 +512,4 @@ function featureValues(theme) {
     supportsDiceRefresh: theme?.features?.refreshTraderWithDice === true,
   }
 }
-function emptyValue(value) { return value === '' || (Array.isArray(value) && value.length === 0) }
+function emptyValue(value) { return value === '' || (Array.isArray(value) && value.length === 0) || (isObject(value) && Object.keys(value).length === 0) }

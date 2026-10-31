@@ -144,3 +144,34 @@
 3. 不轮询意味着任务自然结束后，运行面板要等用户展开/刷新/点停止才会显示“已结束”。若 DSH 将来提供服务端→客户端事件，可在任务结算时推送。
 4. 孤儿记录（本插件进程已不持有）任何会话都可以停止，因为它已经没有所有者；另一个仍存活的 DSH 进程持有的记录不会被碰。
 5. 工作流在两个步骤之间没有运行记录时，面板会短暂显示为结束；工作流本身的停止仍按确认码生效。
+
+
+## 阶段 14：MAA 功能补全与养成规划扩展（已完成，未实机验证）
+
+> 2026-10-31。依据 `claude/prompt-feature-1-2.md`。未修改版本号，未提交、未推送、未发布。代码在云端工作区编辑和测试，通过文件桥直接写回 `E:\DESK\dsh-maa-cli`；没有在本机 Windows 上运行命令。
+
+### 现状核对
+- 读取本机 `E:\DESK\MAA-v6.18.0-win-x64\resource`：`stages.json` 只有 `apCost / code / dropInfos / stageId`，**没有 `zoneId`**，因此周常关卡分区改为取自企鹅物流关卡列表；`item_index.json` 物品名（固源岩组=30013、模组数据块=mod_unlock_token 等）、`battle_data.json` 干员结构、`custom_infrast` 排班格式与实现一致。
+- 外部接口按官方文档核对：MaaCore 集成协议（Fight.drops、Infrast filename/plan_index、Copilot copilot_list / formation / use_sanity_potion、SSSCopilot）、基建排班协议、MaaBackendCenter `copilot/query`（level_keyword/page/limit/order_by/desc）与 `copilot/get/{id}`、ArkPlanner `POST /plan`（owned/required/output_lang=id）。**均未在本机实际请求验证。**
+
+### 改动
+- `src/agent/http.js`：共用 `fetchJson`（超时、大小上限、SHA-256、POST）。`src/runtime/state.js`：共用 `writeJsonAtomically`。
+- `src/agent/planning-data.js` v2：技能 / 专精（character_table）、模组（uniequip_table）、加工站配方（building_data F_EVOLVE）、周常开放日（zone_table weeklyAdditionInfos）、关卡分区（企鹅物流 stages）；`expandSynthesis`、`weeklyStageSchedule`、`serverWeekday`、`planWithArkPlanner`、`applyJointPlan`、`mergeRequirements`。
+- `src/commands/planner.js`：Fight `drops`、剿灭别名、`@` 关卡名；Infrast mode 10000（只接受插件生成文件标记）；Copilot / SSSCopilot 步骤；公招摘要标明高星确认。
+- `src/strategy/compiler.js`：`generatedFileMarker` / `materializeGeneratedFiles`，导出 `loadOperatorNames`。
+- 新增 `src/strategy/infrast-plan.js`、`src/strategy/copilot-site.js`。
+- `src/commands/runtime-instructions.js`：公招回调记录与 `recruitNotices`。
+- `src/commands/task-panel.js`：Fight 掉落目标字段（list 类型，客户端无需改动），面板上下文携带物品索引。
+- `src/agent/goal-manager.js`：多干员、技能 / 专精 / 模组、合成展开、ArkPlanner 联合规划与回退；导出 `trainingRequirements`。
+- `src/index.js`：新工具 `maa_stage_schedule`、`maa_prepare_infrast`、`maa_copilot`；`maa_goal_manager` 新参数与 `estimate`；生成文件在执行时写入、结束时删除；公招提醒写入运行结论。
+- `src/client/index.js`：新工具接入确认卡；运行进度对非肉鸽任务不再显示“局数 / 楼层”，并显示公招提醒。
+
+### 测试
+- Linux 云端工作区 `npm test`：217 项，203 通过、3 跳过、11 失败。失败项与改动前完全相同（Windows 路径、需要私有运行时、`.cmd` / `cmd.exe`），其中 `panel-lifecycle` 第 6 项在改动前后都偶发失败。新增 13 项全部通过。
+- **未在 Windows 上运行测试，未连接模拟器，未执行真实 MAA 任务，未实际请求作业站 / ArkPlanner / 企鹅物流关卡列表。**
+
+### 需要实机验证
+1. 在 Windows 上运行 `npm test`。
+2. 重启 DSH Desktop 后：`maa_stage_schedule`（首次会下载新增数据）、`/maa fight` 面板掉落目标、`maa_prepare_infrast` 生成排班并执行、`maa_copilot search/prepare` 实际请求作业站并执行一份作业、公招高星提醒是否出现在运行面板。
+3. ArkPlanner 若长期不可用，规划会一直显示“未联合优化”，属预期回退。
+

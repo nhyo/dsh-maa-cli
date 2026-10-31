@@ -25,7 +25,7 @@ test('operator training scans unknown state and does not schedule farming first'
 
 test('operator training derives promotion costs and one verified farming iteration from updated data', async () => {
   const planningData = {
-    version: 1, server: 'CN', updatedAt: '2026-10-30T00:00:00.000Z', stale: false, warning: '',
+    version: 2, server: 'CN', updatedAt: '2026-10-30T00:00:00.000Z', stale: false, warning: '',
     operators: [{ id: 'char_4217_makoto', name: '结城理', rarity: 6, phases: [
       { maxLevel: 2, evolveCost: [] }, { maxLevel: 2, evolveCost: [{ id: '30012', count: 2 }] }, { maxLevel: 3, evolveCost: [] },
     ] }],

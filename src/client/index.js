@@ -892,11 +892,19 @@ window.__ModuleLoader__.load({
     function formatRuntimeProgress(run) {
       const progress = run && run.progress ? run.progress : null
       if (!progress) return '实时进度尚未读取。'
-      const parts = ['本次进程已完成 ' + Number(progress.explorationsCompleted || 0) + ' 局探索']
-      if (progress.floorReliable && Number.isInteger(progress.floor)) parts.push('当前第 ' + progress.floor + ' 层')
-      else if (Number.isInteger(progress.lastSettlementFloor)) parts.push('上次结算于第 ' + progress.lastSettlementFloor + ' 层')
+      const roguelike = !Array.isArray(run.taskTypes) || run.taskTypes.length === 0 || run.taskTypes.includes('Roguelike')
+      const parts = []
+      if (roguelike) {
+        parts.push('本次进程已完成 ' + Number(progress.explorationsCompleted || 0) + ' 局探索')
+        if (progress.floorReliable && Number.isInteger(progress.floor)) parts.push('当前第 ' + progress.floor + ' 层')
+        else if (Number.isInteger(progress.lastSettlementFloor)) parts.push('上次结算于第 ' + progress.lastSettlementFloor + ' 层')
+      }
       if (progress.stage) parts.push('关卡：' + progress.stage)
-      if (!progress.floorReliable) parts.push('当前楼层未知')
+      if (roguelike && !progress.floorReliable) parts.push('当前楼层未知')
+      const recruit = progress.recruit
+      if (recruit && Array.isArray(recruit.results) && recruit.results.length) parts.push('公招已识别 ' + recruit.results.length + ' 次')
+      if (recruit && Array.isArray(recruit.notices) && recruit.notices.length) parts.push('⚠ ' + recruit.notices.join('；') + '（未自动确认的高星招募需在游戏内手动处理）')
+      if (parts.length === 0) parts.push('暂无可靠进度回调')
       const instruction = Array.isArray(run.instructions)
         ? run.instructions.find(function (item) { return ['received', 'applied', 'triggered'].includes(item.status) })
         : null
@@ -1285,7 +1293,7 @@ window.__ModuleLoader__.load({
       // Every planning tool shares the same confirmation dock: `maa_prepare_plan`
       // builds a task-panel plan, while `maa_prepare_strategy` / `maa_prepare_note`
       // prepare plans from notes. All three end in a MAA-XXXXXX confirmation code.
-      ;['maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note', 'maa_goal_manager', 'maa_workflow_manager'].forEach(function (toolKey) {
+      ;['maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note', 'maa_goal_manager', 'maa_workflow_manager', 'maa_prepare_infrast', 'maa_copilot'].forEach(function (toolKey) {
         ctx.slots.inject('tool.call.toolview', function () {
           return ctx.slots.register({
             name: 'tool.call.toolview',

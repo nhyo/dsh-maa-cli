@@ -92,6 +92,55 @@ export async function materializeStrategy(document, strategy, options) {
   }
 }
 
+// Plugin-generated files that a task reads (custom base schedules, copilot
+// jobs downloaded from the MAA copilot site). They live next to the generated
+// strategy Copilot file, are referenced through markers in the confirmed plan,
+// and are removed again after the run.
+export function generatedFileMarker(name) {
+  const key = String(name ?? '').toUpperCase().replace(/[^A-Z0-9]+/gu, '_').replace(/^_+|_+$/gu, '')
+  if (!key) throw new TypeError('generated file name is required')
+  return `__DSH_GENERATED_${key}__`
+}
+
+export async function materializeGeneratedFiles(document, files, options) {
+  const configDir = requireAbsolute(options.configDir, 'maa-cli config directory')
+  if (!Array.isArray(files) || files.length === 0) return { document, restore: async () => {} }
+  const directory = path.join(configDir, 'dsh-strategies')
+  await mkdir(directory, { recursive: true })
+  const paths = new Map()
+  for (const file of files) {
+    if (!plain(file) || typeof file.marker !== 'string' || !plain(file.content)) throw new Error('生成文件格式无效。')
+    const target = path.join(directory, `dsh-generated-${file.marker.replace(/^__DSH_GENERATED_|__$/gu, '').toLowerCase()}.json`)
+    await atomicWrite(target, `${JSON.stringify(file.content, null, 2)}\n`)
+    paths.set(file.marker, target)
+  }
+  const clone = structuredClone(document)
+  const used = new Set()
+  const swap = value => {
+    if (typeof value === 'string' && paths.has(value)) { used.add(value); return paths.get(value) }
+    if (Array.isArray(value)) return value.map(swap)
+    if (plain(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, swap(item)]))
+    return value
+  }
+  for (const task of clone.tasks ?? []) if (plain(task?.params)) task.params = swap(task.params)
+  // A marker left in the plan has no file behind it: refuse to start MAA. A
+  // generated file nobody references (the user replaced the path on the
+  // panel) is harmless and simply removed after the run.
+  const unresolved = JSON.stringify(clone).match(/__DSH_GENERATED_[A-Z0-9_]+__/u)
+  if (unresolved && unresolved[0] !== COPILOT_MARKER) throw new Error(`计划引用了不存在的生成文件：${unresolved[0]}`)
+  let restored = false
+  return {
+    document: clone,
+    files: [...paths.values()],
+    unused: [...paths.keys()].filter(marker => !used.has(marker)),
+    restore: async () => {
+      if (restored) return
+      restored = true
+      await Promise.all([...paths.values()].map(target => rm(target, { force: true }).catch(() => {})))
+    },
+  }
+}
+
 export async function recoverStrategyOverlay(configDir) {
   const root = path.join(requireAbsolute(configDir, 'maa-cli config directory'), 'dsh-strategy-overlay')
   const manifestPath = path.join(root, MANIFEST_NAME)
@@ -309,7 +358,7 @@ async function findAutopilotFile(base, stageName) {
   return null
 }
 
-async function loadOperatorNames(resourceDir) {
+export async function loadOperatorNames(resourceDir) {
   let data
   try { data = JSON.parse(await readFile(path.join(resourceDir, 'battle_data.json'), 'utf8')) } catch (error) { return null }
   const chars = data?.chars

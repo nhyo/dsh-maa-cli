@@ -9,6 +9,7 @@ import {
   parseMaaCallbackLine,
   parseRuntimeInstruction,
   processMaaCallback,
+  recruitNotices,
   startLogTail,
 } from '../src/commands/runtime-instructions.js'
 import { beginRun, clearRunStateForTest, finishRun, getRun } from '../src/commands/run-state.js'
@@ -161,4 +162,25 @@ test('accepts a condition while maa-cli is still running and really stops its pr
   assert.equal(final.status, 'stopped')
   assert.equal(final.progress.explorationsCompleted, 1)
   assert.equal(final.instructions[0].status, 'completed')
+})
+
+test('records recruitment tags and reports 5★/6★ combinations without triggering anything', async t => {
+  const { root, env, run } = await fixture(['Recruit'])
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const line = body => `[2026-10-31 12:00:00.000][INF][Px][Tx] Assistant::append_callback | SubTaskExtraInfo ${JSON.stringify(body)}`
+  for (const body of [
+    { taskchain: 'Recruit', what: 'RecruitTagsDetected', details: { tags: ['近卫干员', '输出', '高级资深干员', '控场', '远程位'] } },
+    { taskchain: 'Recruit', what: 'RecruitSpecialTag', details: { tag: '高级资深干员' } },
+    { taskchain: 'Recruit', what: 'RecruitResult', details: { tags: ['近卫干员', '输出', '高级资深干员', '控场', '远程位'], level: 6, result: [] } },
+    { taskchain: 'Recruit', what: 'RecruitResult', details: { tags: ['先锋干员'], level: 3, result: [] } },
+  ]) {
+    const callback = parseMaaCallbackLine(line(body))
+    assert.ok(callback)
+    const result = await processMaaCallback(run.id, callback, { env, stop: () => assert.fail('recruit callbacks must not stop the run') })
+    assert.equal(result.triggered, null)
+  }
+  const stored = await getRun(run.id, { env })
+  assert.equal(stored.progress.recruit.results.length, 2)
+  assert.deepEqual(stored.progress.recruit.special, ['高级资深干员'])
+  assert.deepEqual(recruitNotices(stored), ['检测到稀有 Tag「高级资深干员」', '检测到 6★ Tag 组合：近卫干员、输出、高级资深干员、控场、远程位'])
 })

@@ -371,3 +371,20 @@ test('reports unsupported native names without inventing resource entries', asyn
   assert.equal(preview.unsupported.length, 4)
   assert.match(preview.unsupported.map(item => item.reason).join('\n'), /没有该干员|不存在的原生分组|没有该物品|没有该事件/u)
 })
+
+test('generated files replace plan markers, reject unknown markers and are removed afterwards', async t => {
+  const { generatedFileMarker, materializeGeneratedFiles } = await import('../src/strategy/compiler.js')
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-generated-files-'))
+  t.after(() => rm(configDir, { recursive: true, force: true }))
+  const marker = generatedFileMarker('copilot-site-42')
+  assert.equal(marker, '__DSH_GENERATED_COPILOT_SITE_42__')
+  const document = { tasks: [{ type: 'Copilot', params: { copilot_list: [{ filename: marker, stage_name: '1-7' }] } }] }
+  const result = await materializeGeneratedFiles(document, [{ marker, content: { stage_name: '1-7', actions: [] } }], { configDir })
+  const target = result.document.tasks[0].params.copilot_list[0].filename
+  assert.ok(path.isAbsolute(target))
+  assert.equal(JSON.parse(await readFile(target, 'utf8')).stage_name, '1-7')
+  assert.equal(document.tasks[0].params.copilot_list[0].filename, marker)
+  await result.restore()
+  await assert.rejects(readFile(target, 'utf8'), /ENOENT/u)
+  await assert.rejects(materializeGeneratedFiles({ tasks: [{ type: 'Infrast', params: { filename: '__DSH_GENERATED_INFRAST__' } }] }, [{ marker, content: {} }], { configDir }), /不存在的生成文件/u)
+})
