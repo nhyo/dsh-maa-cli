@@ -1,4 +1,5 @@
 import { resolveRoguelikeTheme } from './planner.js'
+import { parseRuntimeInstruction } from './runtime-instructions.js'
 
 const HELP = [
   'MAA 零模型任务（输入项目名后在确认面板修改参数，不会立即操作游戏）：',
@@ -14,7 +15,10 @@ const HELP = [
   '/maa closedown    关闭游戏',
   '',
   '兼容旧写法：/maa fight 1-7 2、/maa rouge 萨米 3；它们也只会预填面板，不会直接执行。',
-  '/maa stop         或  /maa 停止任务',
+  '/maa stop         或  /maa 停止任务（也会清理 DSH 重启后残留的 maa-cli 进程）',
+  '/maa status       查看当前执行中的任务与最近几次执行记录（面板内部使用）',
+  '/maa 这把肉鸽打完就停 / 第五层 Boss 前停止 / 再打两局就停',
+  '/maa 取消刚才的停止要求 / 现在打到哪里了',
   '/maa confirm MAA-XXXXXX  确认并执行待确认计划（参数由面板自动附加）',
   '                  末尾也可加 note=<URL 编码的备注>，备注必须先在面板完成策略预览',
   '/maa peek MAA-XXXXXX     只读查看待确认计划的摘要与参数（面板内部使用，不会执行）',
@@ -70,6 +74,8 @@ export function parseLocalMaaCommand(rawInput) {
   const peek = input.match(/^(?:peek|查看计划)\s*(MAA-[A-F0-9]{6})?$/iu)
   if (peek) return { kind: 'peek', confirmationCode: peek[1] ? peek[1].toUpperCase() : '' }
   if (/^(?:stop|停止|停止任务|终止任务)$/iu.test(input)) return { kind: 'stop' }
+  if (/^(?:status|状态|任务状态|执行状态)$/iu.test(input)) return { kind: 'status' }
+  try { return { kind: 'runtime-instruction', request: parseRuntimeInstruction(input) } } catch {}
   if (/^(?:setup|安装运行时|初始化)$/iu.test(input)) return { kind: 'setup' }
 
   if (/^(?:startup|启动|启动游戏|打开游戏|打开明日方舟)$/iu.test(input)) {

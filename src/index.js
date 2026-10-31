@@ -1,8 +1,12 @@
-import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa } from './runtime/runner.js'
+import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa, startMaa } from './runtime/runner.js'
+import path from 'node:path'
 import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './commands/planner.js'
 import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, updatePendingPlan } from './commands/confirmation.js'
 import { parseLocalMaaCommand } from './commands/local-command.js'
+import { activeRun, beginRun, describeRunState, finishRun, getRun, reapGeneratedTaskProcesses, stopRun } from './commands/run-state.js'
+import { applyRuntimeInstruction, completeTriggeredInstructions, parseMaaCallbackLine, processMaaCallback, startLogTail } from './commands/runtime-instructions.js'
 import { applyTaskPanelOverrides, taskPanelFromDocument } from './commands/task-panel.js'
+import { applyRememberedConfig, rememberPanelValues } from './commands/panel-memory.js'
 import { discoverMaaCapabilities } from './capabilities/discovery.js'
 import { formatReport, runDoctor } from './runtime/doctor.js'
 import { prepareRuntimeDirectories } from './runtime/preflight.js'
@@ -73,6 +77,22 @@ const STRATEGY_PREPARE_RESULT_SCHEMA = {
         properties: { request: { type: 'string' }, reason: { type: 'string' } },
       },
     },
+  },
+}
+const NOTE_PREPARE_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['status', 'note'],
+  properties: {
+    status: { type: 'string', enum: ['ready', 'needs_model'] },
+    note: { type: 'string' },
+    purpose: { type: 'string' }, planJson: { type: 'string' }, planSummary: { type: 'string' },
+    confirmationCode: { type: 'string' }, confirmationPhrase: { type: 'string' }, expiresAt: { type: 'string' },
+    supported: { type: 'array', items: { type: 'string' } },
+    unsupported: STRATEGY_PREPARE_RESULT_SCHEMA.properties.unsupported,
+    memory: MEMORY_RESULT_SCHEMA,
+    recognized: { type: 'array', items: { type: 'string' } },
+    unresolved: { type: 'array', items: { type: 'string' } },
+    modelPrompt: { type: 'string' },
   },
 }
 const DOCTOR_RESULT_SCHEMA = {
@@ -237,6 +257,18 @@ function documentWithNoteStrategy(document, strategy) {
   return result
 }
 
+function roguelikeThemeOf(document) {
+  const task = (document?.tasks ?? []).find(item => item?.type === 'Roguelike')
+  return typeof task?.params?.theme === 'string' ? task.params.theme : ''
+}
+
+async function rememberConfirmedPanel(document, environment) {
+  const tasks = Array.isArray(document?.tasks) ? document.tasks : []
+  if (!tasks.some(task => task?.type === 'Roguelike')) return
+  const capabilities = environment?.capabilities ?? (await strategyEnvironment()).capabilities
+  await rememberPanelValues(taskPanelFromDocument(document, capabilities))
+}
+
 async function prepareNotePreview(agent, confirmationCode, rawNote, overrides, signal) {
   const note = decodeConfirmationNote(rawNote)
   const pending = await peekPendingPlan(agent)
@@ -254,7 +286,15 @@ async function prepareNotePreview(agent, confirmationCode, rawNote, overrides, s
   const compiled = compileStrategyRequest(parsed.input)
   const applied = await applyStrategyMemory(compiled, { ...environment, persist: false })
   const details = await previewStrategyDetails(applied.strategy, environment.resourceDir)
-  const document = documentWithNoteStrategy(previewPending.document, applied.strategy)
+  // A note may switch the roguelike theme. Rebuild the task chain for the new
+  // theme instead of cloning the old plan, and keep the plan title in step with
+  // it: the dock must never say one theme while MAA runs another.
+  const noteTheme = applied.strategy.kind === 'Roguelike' ? applied.strategy.step?.theme ?? '' : ''
+  const themeShifted = noteTheme !== '' && noteTheme !== roguelikeThemeOf(previewPending.document)
+  const document = themeShifted
+    ? buildTaskDocument([applied.strategy.step], environment.capabilities)
+    : documentWithNoteStrategy(previewPending.document, applied.strategy)
+  if (themeShifted) details.supported.unshift(`按备注切换到主题 ${noteTheme}，任务链已按该主题重建`)
   if (applied.strategy.kind === 'Copilot') {
     details.changes.unshift({ kind: 'task', target: 'MAA task chain', detail: `Fight → Copilot (${applied.strategy.stageName})` })
   }
@@ -264,7 +304,11 @@ async function prepareNotePreview(agent, confirmationCode, rawNote, overrides, s
     memory: applied.memory, strategy: applied.strategy, document,
     overrides: overrides ?? {}, adjustments: patch?.applied ?? [],
   }
-  await updatePendingPlan(agent, current => ({ ...current, notePreview: preview }))
+  await updatePendingPlan(agent, current => ({
+    ...current,
+    ...(themeShifted ? { purpose: summarizePlan([applied.strategy.step], environment.capabilities) } : {}),
+    notePreview: preview,
+  }))
   return preview
 }
 
@@ -304,6 +348,13 @@ function renderResult(_args, value) {
   lines.push(`Command: ${value.command}`, `Exit code: ${value.exitCode}`, value.stdout || '(no stdout)')
   if (value.stderr) lines.push(`[stderr]\n${value.stderr}`)
   return [{ type: 'text', text: lines.join('\n') }]
+}
+
+function renderNoteResult(_args, value) {
+  if (value.status === 'needs_model') {
+    return [{ type: 'text', text: [value.modelPrompt, '', `仍未解析：${(value.unresolved ?? []).join('、')}`].join('\n') }]
+  }
+  return renderResult(_args, value)
 }
 
 // The 备注 field arrives URL-encoded on the local command plane so spaces
@@ -356,6 +407,7 @@ export function classifyMaaExecution(result, strategyApplied = false) {
 }
 
 const activeExecutions = new Map()
+const activeRuns = new Map()
 let activeStrategyExecution = false
 
 function agentKey(agent) {
@@ -363,23 +415,84 @@ function agentKey(agent) {
   return String(agent.id)
 }
 
-function stopActiveExecution(agent) {
-  const key = agentKey(agent)
-  const active = activeExecutions.get(key)
-  if (!active) return false
-  active.controller.abort()
-  return true
+async function executeRuntimeInstruction(request) {
+  const running = await activeRun()
+  if (!running) return { status: 'not_running', message: '当前没有正在执行的 MAA 任务。', run: null }
+  const active = activeRuns.get(running.id)
+  const result = await applyRuntimeInstruction(running.id, request, {
+    monitorAvailable: Boolean(active),
+    stop: instructionId => {
+      if (!active) return
+      active.triggerInstructionId = instructionId
+      active.controller.abort()
+    },
+  })
+  if (request.action === 'stop_now' && !active) {
+    await stopRun(running.id)
+    await completeTriggeredInstructions(running.id)
+  }
+  const latest = await getRun(running.id)
+  return { ...result, run: latest }
+}
+
+function formatRuntimeInstructionResult(result) {
+  if (result.status === 'ok' && result.run) return JSON.stringify({ running: result.run })
+  return result.message || JSON.stringify(result)
+}
+
+// A running MAA task owns the emulator, the generated task file, and the user
+// resource overlay. Until it ends no new plan may replace them, not even from
+// another DSH session.
+async function assertNoActiveRun() {
+  const running = await activeRun()
+  if (!running) return
+  throw new Error(`MAA 任务正在执行中（${running.purpose || running.confirmationCode || running.id}，已运行 ${new Date(running.startedAt).toLocaleTimeString('zh-CN', { hour12: false })} 起）。为避免抢屏幕和覆盖临时资源，完成前不接受新的计划或任务；可以等待，或在确认面板点击「停止任务」/ 输入 /maa stop。`)
 }
 
 async function executeDocument(agent, signal, document, planSummary, options = {}) {
   const key = agentKey(agent)
   if (activeExecutions.has(key)) throw new Error('当前 DSH 会话已有一个 MAA 任务正在执行。')
+  // Persist the lifecycle before doing any work: the composer control panel and
+  // a DSH restart both read this record, not a component's local state.
+  const run = await beginRun({
+    purpose: options.purpose ?? '',
+    planSummary,
+    confirmationCode: options.confirmationCode ?? '',
+    sessionId: key,
+    taskTypes: document.tasks?.map(task => task.type) ?? [],
+  })
   const controller = new AbortController()
-  const executionSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
-  const active = { controller, planSummary }
+  // Background runs must not inherit the command's signal: the command plane may
+  // abort it the moment the handler returns, which would kill a healthy MAA run.
+  const backgroundWanted = options.background === true
+  const executionSignal = backgroundWanted
+    ? controller.signal
+    : (signal ? AbortSignal.any([signal, controller.signal]) : controller.signal)
+  const active = { controller, planSummary, runId: run.id, monitor: null, triggerInstructionId: '' }
   activeExecutions.set(key, active)
+  activeRuns.set(run.id, active)
   let strategyExecution = null
   let strategyReserved = false
+  let recorded = { status: 'failed', exitCode: null, summary: 'MAA 执行没有返回结果。' }
+  let detached = false
+
+  const release = async () => {
+    // Never let bookkeeping failure hide the execution outcome.
+    if (active.monitor) {
+      await active.monitor.flush().catch(() => {})
+      active.monitor.stop()
+    }
+    await finishRun(run.id, recorded).catch(() => {})
+    await completeTriggeredInstructions(run.id).catch(() => {})
+    try {
+      if (strategyExecution) await strategyExecution.restore()
+    } finally {
+      if (strategyReserved) activeStrategyExecution = false
+      if (activeExecutions.get(key) === active) activeExecutions.delete(key)
+      if (activeRuns.get(run.id) === active) activeRuns.delete(run.id)
+    }
+  }
+
   try {
     const cliPath = await ensureMaaCli(executionSignal)
     const maintenance = isRuntimePath(cliPath)
@@ -414,37 +527,107 @@ async function executeDocument(agent, signal, document, planSummary, options = {
     }
     const written = await writeGeneratedTask(executionDocument, { configDir })
     const hasOperatorBox = executionDocument.tasks.some(task => task.type === 'OperBox')
-    const result = await runMaa(actionArguments('run_task', GENERATED_TASK_NAME, true, strategyExecution?.userResource === true), {
+    const settle = async result => {
+      const executionFeedback = classifyMaaExecution(result, strategyExecution !== null)
+      recorded = {
+        status: executionFeedback.status === 'failed' || result.exitCode !== 0 ? 'failed' : 'succeeded',
+        exitCode: result.exitCode,
+        summary: executionFeedback.headline,
+      }
+      if (!hasOperatorBox) return { ...result, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback }
+      const cleanStderr = stripOperBoxCallbacks(result.stderr)
+      if (result.exitCode !== 0) {
+        return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback }
+      }
+      try {
+        const operatorBox = parseCompletedOperatorBox(`${result.stdout}\n${result.stderr}`)
+        await saveOperatorBox(operatorBox)
+        return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, operatorBox, maintenanceWarning: maintenance.warning, executionFeedback }
+      } catch (error) {
+        recorded = { status: 'failed', exitCode: result.exitCode, summary: '任务已执行，但无法解析干员 Box。' }
+        return {
+          ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary,
+          operatorBoxError: error instanceof Error ? error.message : String(error), maintenanceWarning: maintenance.warning, executionFeedback,
+        }
+      }
+    }
+    const runOptions = {
       signal: executionSignal,
       timeoutMs: 30 * 60_000,
       outputLimit: hasOperatorBox ? 16 * 1024 * 1024 : undefined,
       envPatch: hasOperatorBox ? { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } : undefined,
-    })
-    const executionFeedback = classifyMaaExecution(result, strategyExecution !== null)
-    if (!hasOperatorBox) return { ...result, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback }
-
-    const cleanStderr = stripOperBoxCallbacks(result.stderr)
-    if (result.exitCode !== 0) {
-      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback }
     }
-    try {
-      const operatorBox = parseCompletedOperatorBox(`${result.stdout}\n${result.stderr}`)
-      await saveOperatorBox(operatorBox)
-      return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, operatorBox, maintenanceWarning: maintenance.warning, executionFeedback }
-    } catch (error) {
-      return {
-        ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary,
-        operatorBoxError: error instanceof Error ? error.message : String(error), maintenanceWarning: maintenance.warning, executionFeedback,
-      }
+    const runArguments = actionArguments('run_task', GENERATED_TASK_NAME, true, strategyExecution?.userResource === true)
+    if (!backgroundWanted) {
+      const result = await runMaa(runArguments, runOptions)
+      return await settle(result)
     }
+    // Background mode: return as soon as MAA is running. A five-minute command
+    // timeout used to abort healthy runs, so the child is owned by this process
+    // instead of the command call; /maa stop aborts `controller` and kills it.
+    const logResult = await runMaa(queryArguments('log_dir'), { signal: executionSignal, timeoutMs: 20_000 })
+    const logDir = logResult.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1)
+    if (logResult.exitCode === 0 && logDir) {
+      const seen = new Set()
+      active.monitor = await startLogTail(path.join(logDir, 'asst.log'), async line => {
+        const callback = parseMaaCallbackLine(line)
+        if (!callback) return
+        const signature = line
+        if (seen.has(signature)) return
+        seen.add(signature)
+        if (seen.size > 200) seen.delete(seen.values().next().value)
+        await processMaaCallback(run.id, callback, {
+          stop: instructionId => {
+            active.triggerInstructionId = instructionId
+            controller.abort()
+          },
+        })
+      })
+    }
+    const handle = startMaa(runArguments, { ...runOptions, hardTimeoutMs: 6 * 60 * 60_000 })
+    active.pid = handle.pid
+    detached = true
+    void handle.done
+      .then(result => settle(result))
+      .catch(error => {
+        recorded = error?.name === 'AbortError'
+          ? { status: 'stopped', exitCode: null, summary: '已停止。' }
+          : { status: 'failed', exitCode: null, summary: error instanceof Error ? error.message : String(error) }
+      })
+      .finally(() => { void release() })
+    return {
+      background: true,
+      runId: run.id,
+      pid: handle.pid,
+      planFile: written.path,
+      planJson: written.json,
+      planSummary,
+      maintenanceWarning: maintenance.warning,
+      executionFeedback: {
+        status: 'running',
+        headline: 'MAA 已开始执行。',
+        detail: '任务在后台运行：面板显示「执行中」与本地计时，需要中止时点击「停止任务」或输入 /maa stop；结束后点「查看执行记录」查看结果。',
+        statuses: [],
+      },
+    }
+  } catch (error) {
+    recorded = error?.name === 'AbortError'
+      ? { status: 'stopped', exitCode: null, summary: '已停止。' }
+      : { status: 'failed', exitCode: null, summary: error instanceof Error ? error.message : String(error) }
+    throw error
   } finally {
-    try {
-      if (strategyExecution) await strategyExecution.restore()
-    } finally {
-      if (strategyReserved) activeStrategyExecution = false
-      if (activeExecutions.get(key) === active) activeExecutions.delete(key)
-    }
+    // A detached child settles the record itself when it exits.
+    if (!detached) await release()
   }
+}
+
+function formatBackgroundResult(result) {
+  return [
+    `MAA 已开始执行（${result.runId}）。`,
+    `计划：${result.planSummary}`,
+    '任务在后台运行：确认面板会显示「执行中」和本地计时，需要中止时点击「停止任务」或输入 /maa stop；结束后点「查看执行记录」查看结果。',
+    result.maintenanceWarning ?? '',
+  ].filter(Boolean).join('\n')
 }
 
 export function apply(ctx) {
@@ -470,10 +653,36 @@ export function apply(ctx) {
             text: `${formatRuntimeReport(status)}${steps.length ? `\n\n${steps.map(step => `- ${step.id}：${step.detail}`).join('\n')}` : ''}`,
           }
         }
+        if (parsed.kind === 'status') {
+          // Read-only snapshot for the composer control panel. The client reads
+          // this on demand (never polls): command-plane calls are echoed into
+          // the transcript, so polling here would spam the conversation.
+          return { kind: 'success', text: JSON.stringify(await describeRunState()) }
+        }
+        if (parsed.kind === 'runtime-instruction') {
+          const result = await executeRuntimeInstruction(parsed.request)
+          return { kind: result.status === 'not_running' ? 'error' : 'success', text: formatRuntimeInstructionResult(result) }
+        }
         if (parsed.kind === 'stop') {
-          return stopActiveExecution(agent)
-            ? { kind: 'success', text: '已停止当前 DSH 会话启动的 MAA 任务。游戏和模拟器没有被关闭。' }
-            : { kind: 'error', text: '当前 DSH 会话没有正在执行的 MAA 任务。' }
+          const runtime = await executeRuntimeInstruction({ action: 'stop_now' })
+          if (runtime.status !== 'not_running') {
+            return { kind: 'success', text: formatRuntimeInstructionResult(runtime) }
+          }
+          // DSH may have restarted while maa-cli kept running. Finish the stray
+          // record and stop only the process tree that runs dsh-generated.
+          const snapshot = await describeRunState()
+          const stale = snapshot.running ?? snapshot.interrupted
+          if (stale) {
+            await stopRun(stale.id)
+            return { kind: 'success', text: `已结束残留的 MAA 执行记录（${stale.purpose || stale.id}，${stale.duration}），并清理了正在运行的 dsh-generated 进程。` }
+          }
+          const reaped = await reapGeneratedTaskProcesses()
+          return {
+            kind: reaped.killed > 0 ? 'success' : 'error',
+            text: reaped.killed > 0
+              ? `已清理 ${reaped.killed} 个残留的 dsh-generated maa-cli 进程。`
+              : '当前没有正在执行的 MAA 任务。',
+          }
         }
         if (parsed.kind === 'peek') {
           // Read-only: the local client asks for the pending plan's MAA-style
@@ -488,7 +697,8 @@ export function apply(ctx) {
             text: JSON.stringify({
               code: pending.confirmationCode,
               summary: pending.planSummary,
-              panel: taskPanelFromDocument(pending.document, environment.capabilities),
+              theme: roguelikeThemeOf(pending.document),
+              panel: await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities)),
               capabilitySignature: environment.capabilities.signature,
               capabilitySource: environment.capabilities.source,
               capabilityWarning: environment.capabilities.warning ?? '',
@@ -513,6 +723,7 @@ export function apply(ctx) {
         if (parsed.kind === 'confirm') {
           // The slash command or the button that invokes it is the explicit
           // human authorization; the pending plan remains scoped and one-shot.
+          await assertNoActiveRun()
           await ensureMaaCli(signal)
           const emulator = await checkEmulator({ runMaa, signal })
           if (!emulator.ok) throw new Error(emulatorErrorMessage(emulator))
@@ -555,7 +766,19 @@ export function apply(ctx) {
           const adjustments = patched && patched.applied.length > 0 ? `｜确认时调整：${patched.applied.join('、')}` : ''
           const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
           const planSummary = `${pending.planSummary}${adjustments}${noteSummary}`
-          const result = await executeDocument(agent, signal, patched ? patched.document : (confirmationDocument ?? pending.document), planSummary, { emulatorChecked: true, strategy: confirmationStrategy ?? pending.strategy })
+          const finalDocument = patched ? patched.document : (confirmationDocument ?? pending.document)
+          // Remember what the human actually confirmed, so the next panel opens
+          // with the same theme/difficulty/squad instead of MAA's defaults.
+          await rememberConfirmedPanel(finalDocument, confirmationEnvironment).catch(() => {})
+          // Keep the run label honest: the panel may have switched the theme at
+          // confirm time, and the dock must not claim the old theme.
+          const finalTheme = roguelikeThemeOf(finalDocument)
+          const baseTheme = roguelikeThemeOf(pending.document)
+          const purpose = finalTheme !== '' && baseTheme !== '' && finalTheme !== baseTheme
+            ? `肉鸽 ${finalTheme}（确认时从 ${baseTheme} 切换）`
+            : pending.purpose
+          const result = await executeDocument(agent, signal, finalDocument, planSummary, { background: true, emulatorChecked: true, strategy: confirmationStrategy ?? pending.strategy, purpose, confirmationCode: pending.confirmationCode })
+          if (result.background) return { kind: 'success', text: formatBackgroundResult(result) }
           const text = formatCommandResult(result)
           return { kind: result.executionFeedback?.status !== 'failed' && !result.operatorBoxError ? 'success' : 'error', text }
         }
@@ -581,7 +804,8 @@ export function apply(ctx) {
             text: `MAA 计划待确认：${summary}\n确认码 ${pending.confirmationCode}（30 分钟内有效）。参数面板已在输入框上方打开，确认后执行；也可以输入 /maa confirm ${pending.confirmationCode}。`,
           }
         }
-        const result = await executeDocument(agent, signal, document, summary)
+        const result = await executeDocument(agent, signal, document, summary, { background: true })
+        if (result.background) return { kind: 'success', text: formatBackgroundResult(result) }
         return { kind: result.executionFeedback?.status !== 'failed' && !result.operatorBoxError ? 'success' : 'error', text: formatCommandResult(result) }
       } catch (error) {
         return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
@@ -596,6 +820,26 @@ export function apply(ctx) {
     output: { schema: RESULT_SCHEMA, render: renderResult },
     async execute(args, exec) { await requireMaaCli(); return await runMaa(queryArguments(args.operation), { signal: exec.signal, timeoutMs: 30_000 }) },
     presentCall: args => ({ card: 'terminal', title: `maa_query ${args.operation}` }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_runtime_instruction',
+    description: 'Control or inspect the MAA task that is already running. Use this for runtime requests such as stop now, stop after the current roguelike exploration, stop before a numbered boss floor, stop after N more explorations, cancel a pending stop, query progress, or request a recruitment preference. Common requests are handled locally; temporary runtime instructions are never written to long-term strategy memory. A recruitment preference may return unsupported instead of pretending that maa-cli applied it live.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['stop_now', 'stop_after_current', 'stop_after_runs', 'stop_before_boss', 'cancel_stop', 'status', 'prefer_recruit'] },
+        count: { type: 'integer', minimum: 1, maximum: 99 },
+        floor: { type: 'integer', minimum: 1, maximum: 99 },
+        operator: { type: 'string', minLength: 1, maxLength: 20 },
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true, required: ['status'], properties: { status: { type: 'string' }, message: { type: 'string' } } },
+      render: (_args, value) => [{ type: 'text', text: formatRuntimeInstructionResult(value) }],
+    },
+    async execute(args) { return await executeRuntimeInstruction(args) },
+    presentCall: args => ({ card: 'terminal', title: `MAA 运行时指令：${args.action}` }),
   })
 
   ctx.tools.register({
@@ -679,6 +923,7 @@ export function apply(ctx) {
     },
     output: { schema: PREPARE_RESULT_SCHEMA, render: renderResult },
     async execute(args, exec) {
+      await assertNoActiveRun()
       const environment = await strategyEnvironment(exec.signal)
       const document = buildTaskDocument(args.steps, environment.capabilities)
       let memory
@@ -729,7 +974,16 @@ export function apply(ctx) {
         encounters: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'choose'], properties: { name: { type: 'string' }, choose: { type: 'integer' }, optionCount: { type: 'integer' } } } },
         operators: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string' }, skill: { type: 'integer' }, skillUsage: { type: 'integer' }, skillTimes: { type: 'integer' } } } },
         groups: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'opers'], properties: { name: { type: 'string' }, opers: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string' }, skill: { type: 'integer' }, skillUsage: { type: 'integer' }, skillTimes: { type: 'integer' } } } } } } },
-        tactics: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['kind', 'name'], properties: { kind: { type: 'string', enum: ['guard_blue', 'block_entrance'] }, name: { type: 'string' }, kills: { type: 'integer' } } } },
+        tactics: {
+          type: 'array', items: {
+            type: 'object', additionalProperties: false, required: ['kind', 'name'], properties: {
+              kind: { type: 'string', enum: ['guard_blue', 'block_entrance'] }, name: { type: 'string' }, kills: { type: 'integer' },
+              stageName: { type: 'string', description: 'Roguelike only: autopilot stage name whose deploy_plan is edited. Omit it to apply the tactic to every native autopilot stage, with positions derived from the MAA map data.' },
+              location: { type: 'array', items: { type: 'integer' }, description: 'Roguelike only: [x, y] deploy tile, only used when a stage is named; derived from the map data otherwise.' },
+              direction: { type: 'string', description: 'Roguelike only: facing such as 下/上/左/右/down/up/left/right, only used when a stage is named.' },
+            },
+          },
+        },
         actions: {
           type: 'array', items: {
             type: 'object', additionalProperties: false, required: ['type'], properties: {
@@ -745,6 +999,7 @@ export function apply(ctx) {
     },
     output: { schema: STRATEGY_PREPARE_RESULT_SCHEMA, render: renderResult },
     async execute(args, exec) {
+      await assertNoActiveRun()
       let strategy = compileStrategyRequest(args)
       const environment = await strategyEnvironment(exec.signal)
       const { resourceDir, compatibility: compatibilityResult, capabilities } = environment
@@ -775,6 +1030,82 @@ export function apply(ctx) {
       }
     },
     presentCall: args => ({ card: 'terminal', title: `编译MAA策略：${args.purpose}` }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_prepare_note',
+    description: `Use this when the MAA task-panel note was reported as unresolved by the local rules. First identify the subject (operator, collectible or event name; correct typos and aliases) and the verb (抓/拿/捞/取/选/选择/招募 all mean recruit), then rewrite the note into short canonical Chinese and pass it here. The local parser and compiler re-validate every intent against the installed MAA resources and prepare the existing one-time confirmation flow. Do not call maa_prepare_strategy directly for such a note, do not invent operators, collectibles, groups, stage names or coordinates, and never claim the game was operated. Unrepresentable intents are returned in unsupported with a concrete reason; language that is still ambiguous returns status "needs_model" with unresolved clauses so you can ask the user. This tool only prepares the plan; it never executes it.`,
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['note'],
+      properties: {
+        note: { type: 'string', description: 'Canonicalized Chinese note, 1-120 characters, e.g. 优先招募结城理，并在暗箭难防让结城理堵门 [3,1] 朝下' },
+        purpose: { type: 'string', description: 'Short purpose label for the confirmation card; defaults to 备注策略：<note>' },
+        confirmationCode: { type: 'string', description: 'Optional confirmation code of the panel being edited; defaults to the latest pending plan of this session.' },
+        theme: { type: 'string', description: 'Roguelike theme id of the panel being edited (e.g. BlackFlow). Pass it so the note lands on that theme instead of whichever plan is latest in the session.' },
+        mode: { type: 'integer', description: 'Optional Roguelike mode of the panel being edited; defaults to the pending plan value.' },
+      },
+    },
+    output: { schema: NOTE_PREPARE_RESULT_SCHEMA, render: renderNoteResult },
+    async execute(args, exec) {
+      await assertNoActiveRun()
+      const note = String(args.note ?? '').replace(/[\r\n\t]+/gu, ' ').trim()
+      if (note === '') throw new Error('备注不能为空。')
+      if (note.length > 120) throw new Error('备注最多 120 个字符。')
+      const pending = await peekPendingPlan(exec.agent)
+      if (!pending) throw new Error('当前没有待确认计划；请先用 maa_prepare_plan 打开任务面板。')
+      if (args.confirmationCode && args.confirmationCode !== pending.confirmationCode) throw new Error('MAA 确认码与待确认计划不一致。')
+      const theme = typeof args.theme === 'string' ? args.theme.trim() : ''
+      const pendingTheme = roguelikeThemeOf(pending.document)
+      const contextPending = theme
+        ? { confirmationCode: pending.confirmationCode, strategy: { kind: 'Roguelike', step: { theme, ...(Number.isInteger(args.mode) ? { mode: args.mode } : {}) } } }
+        : pending
+      const parsed = await parseStrategyNote(note, contextPending)
+      if (parsed.needsModel) {
+        return { status: 'needs_model', note, recognized: parsed.recognized, unresolved: parsed.unresolved, modelPrompt: noteModelPrompt(parsed) }
+      }
+      if (!parsed.input) throw new Error('备注没有可编译的策略。')
+      const environment = await strategyEnvironment(exec.signal)
+      const strategy = compileStrategyRequest(parsed.input)
+      if (!environment.capabilities.roguelike.themes.some(theme => strategy.kind !== 'Roguelike' || theme.id === strategy.theme)) {
+        throw new Error(`当前 MAA 资源不支持肉鸽主题 ${strategy.theme}`)
+      }
+      let memory
+      let applied = strategy
+      try {
+        const result = await applyStrategyMemory(strategy, { resourceDir: environment.resourceDir, compatibility: environment.compatibility })
+        applied = result.strategy
+        memory = result.memory
+      } catch (error) {
+        memory = memoryFallback(error, 1)
+      }
+      const preview = await previewStrategyDetails(applied, environment.resourceDir)
+      const themeShifted = applied.kind === 'Roguelike' && theme !== '' && theme !== pendingTheme
+      if (themeShifted) {
+        preview.supported.unshift(`按面板主题 ${theme} 重建任务，未沿用会话里的 ${pendingTheme || '其他主题'} 计划`)
+      }
+      const document = themeShifted
+        ? buildTaskDocument([applied.step], environment.capabilities)
+        : documentWithNoteStrategy(pending.document, applied)
+      const purpose = String(args.purpose ?? '').trim()
+        || (applied.kind === 'Roguelike' ? `肉鸽 ${applied.step.theme}：${note.slice(0, 48)}` : `备注策略：${note.slice(0, 60)}`)
+      const fallback = preview.unsupported.length ? `｜安全回退：${preview.unsupported.map(item => item.request).join('、')}` : ''
+      const planSummary = `${purpose}｜生效：${preview.supported.join('、')}${fallback}${memorySummary(memory)}`
+      const planJson = `${JSON.stringify(document, null, 2)}\n`
+      const panelNote = pending.notePreview?.note ?? note
+      const notePreview = {
+        status: 'ready', note: panelNote, recognized: parsed.recognized,
+        supported: preview.supported, unsupported: preview.unsupported, changes: preview.changes,
+        memory, strategy: applied, document, overrides: {}, adjustments: [],
+      }
+      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, strategy: applied, notePreview })
+      exec.concludeTurn()
+      return {
+        status: 'ready', note, purpose, planJson, planSummary,
+        confirmationCode: confirmation.confirmationCode, confirmationPhrase: confirmation.confirmationPhrase, expiresAt: confirmation.expiresAt,
+        supported: preview.supported, unsupported: preview.unsupported, memory, recognized: parsed.recognized,
+      }
+    },
+    presentCall: args => ({ card: 'terminal', title: `识别备注：${args.note}` }),
   })
 
   ctx.tools.register({

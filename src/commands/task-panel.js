@@ -16,6 +16,10 @@ const DRONE_OPTIONS = [
   ['OriginStone', '制造站－源石碎片'], ['Chip', '制造站－芯片'],
 ]
 const STAR_OPTIONS = [1, 2, 3, 4, 5, 6].map(value => [value, `${value} 星`])
+// The roguelike difficulty field offers a synthetic MAX value: the panel shows
+// it as the theme's highest difficulty, and the confirm handler resolves it
+// against the theme MAA will actually run (planner.js coerceOverride).
+const MAX_DIFFICULTY = 'MAX'
 
 function option(value, label, extra = {}) { return { value, label, ...extra } }
 function options(entries) { return entries.map(([value, label]) => option(value, label)) }
@@ -373,6 +377,7 @@ function roguelikePanel(document, capabilities) {
   const operatorOptions = []
   for (const theme of themes) {
     for (const mode of theme.modes ?? []) pushScoped(modeOptions, mode.value, mode.label, theme.id)
+    if ((theme.difficulties ?? []).length > 0) pushScoped(difficultyOptions, MAX_DIFFICULTY, 'MAX（当前最高）', theme.id)
     for (const difficulty of theme.difficulties ?? []) pushScoped(difficultyOptions, difficulty, String(difficulty), theme.id)
     for (const value of theme.squads ?? []) pushScoped(squadOptions, value, recommended(value, theme.defaults?.squad), theme.id)
     for (const value of theme.roles ?? []) pushScoped(roleOptions, value, recommended(value, theme.defaults?.roles), theme.id)
@@ -380,7 +385,14 @@ function roguelikePanel(document, capabilities) {
   }
   const currentMatchesTheme = current.theme === selected.id
   const selectedMode = scopedValue(modeOptions, selected.id, currentMatchesTheme ? current.mode : undefined, defaults.mode, true)
-  const selectedDifficulty = scopedValue(difficultyOptions, selected.id, currentMatchesTheme ? current.difficulty : undefined, defaults.difficulty, true)
+  const themeDifficulties = (selected.difficulties ?? []).filter(item => Number.isFinite(item))
+  const selectedDifficulty = scopedValue(
+    difficultyOptions,
+    selected.id,
+    currentMatchesTheme ? current.difficulty : undefined,
+    themeDifficulties.length > 0 ? MAX_DIFFICULTY : undefined,
+    true,
+  )
   const selectedSquad = scopedValue(squadOptions, selected.id, currentMatchesTheme ? current.squad : undefined, defaults.squad, false)
   const selectedRoles = scopedValue(roleOptions, selected.id, currentMatchesTheme ? current.roles : undefined, defaults.roles, false)
   const selectedOperator = scopedValue(operatorOptions, selected.id, currentMatchesTheme ? current.coreChar : undefined, defaults.coreChar, false)
@@ -454,7 +466,7 @@ function validThemeDefaults(theme) {
   const modes = (theme?.modes ?? []).map(item => item.value)
   return {
     mode: modes.includes(defaults.mode) ? defaults.mode : modes[0],
-    difficulty: (theme?.difficulties ?? []).includes(defaults.difficulty) ? defaults.difficulty : theme?.difficulties?.[0],
+    difficulty: (theme?.difficulties ?? []).length > 0 ? MAX_DIFFICULTY : undefined,
     squad: choose(theme?.squads, defaults.squad), roles: choose(theme?.roles, defaults.roles),
     coreChar: choose(theme?.operators, defaults.coreChar), useSupport: defaults.useSupport === true,
   }

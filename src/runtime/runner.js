@@ -155,6 +155,92 @@ export async function runMaa(args, options = {}) {
   })
 }
 
+/**
+ * Start a maa-cli process without waiting for it.
+ *
+ * A long task (`maa run task --batch`) can take far longer than a command-plane
+ * call is allowed to live, so the caller starts it here, returns to the user
+ * immediately and settles the run record from the returned `done` promise.
+ * The returned handle keeps the same validation, output limits and process-tree
+ * termination rules as `runMaa`.
+ */
+export function startMaa(args, options = {}) {
+  if (!Array.isArray(args) || args.length === 0 || args.some(arg => !/^[A-Za-z0-9._-]+$/.test(arg))) {
+    throw new TypeError('maa-cli arguments must come from the validated command map')
+  }
+  const hardTimeoutMs = options.hardTimeoutMs ?? 6 * 60 * 60_000
+  const outputLimit = options.outputLimit ?? 131_072
+  const signal = options.signal
+  if (!Number.isFinite(outputLimit) || outputLimit <= 0) throw new TypeError('outputLimit must be positive')
+  if (signal?.aborted) throw abortError()
+
+  const cliPath = options.cliPath ?? resolveMaaCliPath()
+  const command = `call "${cliPath}" ${args.join(' ')}`
+  const commandProcessor = process.env.ComSpec || String.raw`C:\Windows\System32\cmd.exe`
+  const childEnv = { ...(options.env ?? process.env) }
+  if (options.env === undefined && isRuntimePath(cliPath)) {
+    Object.assign(childEnv, runtimeEnvironment(runtimeLayout()))
+  }
+  Object.assign(childEnv, options.envPatch ?? {})
+
+  const child = spawn(command, {
+    shell: commandProcessor,
+    windowsHide: true,
+    env: childEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const stdout = []
+  const stderr = []
+  let outputBytes = 0
+  let state = 'running'
+
+  const stop = nextState => {
+    if (state !== 'running') return
+    state = nextState
+    terminateProcessTree(child)
+  }
+  const onAbort = () => stop('aborted')
+  signal?.addEventListener('abort', onAbort, { once: true })
+  const timer = setTimeout(() => stop('timed-out'), hardTimeoutMs)
+
+  const collect = destination => chunk => {
+    outputBytes += chunk.length
+    if (outputBytes > outputLimit) {
+      stop('output-limit')
+      return
+    }
+    destination.push(chunk)
+  }
+  child.stdout.on('data', collect(stdout))
+  child.stderr.on('data', collect(stderr))
+
+  const done = new Promise((resolve, reject) => {
+    child.on('error', error => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      reject(error)
+    })
+    child.on('close', (code, terminationSignal) => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      if (state === 'aborted') return reject(abortError())
+      if (state === 'timed-out') return reject(new Error(`maa-cli timed out after ${hardTimeoutMs} ms`))
+      if (state === 'output-limit') return reject(new Error(`maa-cli output exceeded ${outputLimit} bytes`))
+      resolve({
+        command: `${cliPath} ${args.join(' ')}`,
+        exitCode: typeof code === 'number' ? code : -1,
+        terminationSignal: terminationSignal ?? '',
+        stdout: Buffer.concat(stdout).toString('utf8').trimEnd(),
+        stderr: Buffer.concat(stderr).toString('utf8').trimEnd(),
+      })
+    })
+  })
+  // Keep the process handle alive until it exits even when nobody awaits it
+  // immediately; `done` is awaited by the caller's settlement code.
+  done.catch(() => {})
+  return { pid: child.pid ?? null, done, kill: () => stop('aborted') }
+}
+
 function terminateProcessTree(child) {
   if (process.platform === 'win32' && Number.isInteger(child.pid)) {
     // runMaa starts through cmd.exe so the actual maa executable is a child.

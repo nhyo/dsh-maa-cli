@@ -10,6 +10,7 @@ import {
   previewStrategy,
   recoverStrategyOverlay,
 } from '../src/strategy/compiler.js'
+import { parseStrategyNote } from '../src/strategy/note.js'
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-strategy-'))
@@ -96,6 +97,206 @@ test('compiles native roguelike priorities into user resources and restores them
   assert.deepEqual(restored, originals)
   assert.equal(await readFile(overlayFiles[0], 'utf8'), existingUserResource)
   await assert.rejects(readFile(overlayFiles[1], 'utf8'), /ENOENT/)
+})
+
+async function fixtureAutopilot() {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-strategy-autopilot-'))
+  const resource = path.join(root, 'resource')
+  const config = path.join(root, 'config')
+  const theme = path.join(resource, 'roguelike', 'Sami')
+  await mkdir(path.join(theme, 'autopilot'), { recursive: true })
+  await mkdir(config, { recursive: true })
+  await writeFile(path.join(theme, 'recruitment.json'), JSON.stringify({
+    theme: 'Sami',
+    priority: [
+      { name: '高台C', opers: [{ name: '维什戴尔', skill: 3, recruit_priority: 900, promote_priority: 800 }] },
+      { name: '回费', opers: [{ name: '桃金娘', skill: 1, recruit_priority: 500, promote_priority: 100 }] },
+    ],
+    team_complete_condition: [{ groups: ['高台C'], threshold: 1 }],
+  }, null, 2))
+  await writeFile(path.join(theme, 'autopilot', '暗箭难防.json'), JSON.stringify({
+    stage_name: '暗箭难防',
+    replacement_home: [{ location: [9, 1], direction: 'down' }],
+    blacklist_location: [],
+    deploy_plan: [{ groups: ['高台C'], location: [3, 2], direction: 'down' }],
+  }, null, 2))
+  await writeFile(path.join(resource, 'battle_data.json'), JSON.stringify({
+    chars: {
+      char_4217_makoto: { name: '结城理', name_en: 'Makoto Yuki', position: 'MELEE', profession: 'SPECIAL', rarity: 6 },
+      char_2014_vanguard: { name: '维什戴尔', name_en: "Wiš'adel", position: 'RANGED', profession: 'CASTER', rarity: 6 },
+    },
+  }, null, 2))
+  return { root, resource, config, cleanup: () => rm(root, { recursive: true, force: true }) }
+}
+
+async function fixtureWildcard() {
+  const env = await fixtureAutopilot()
+  const theme = path.join(env.resource, 'roguelike', 'Sami')
+  const tileDir = path.join(env.resource, 'Arknights-Tile-Pos')
+  await mkdir(tileDir, { recursive: true })
+  await writeFile(path.join(tileDir, 'overview.json'), JSON.stringify([
+    { code: 'S1', filename: 's1.json', name: '暗箭难防' },
+    { code: 'S2', filename: 's2.json', name: '二号关卡' },
+  ], null, 2))
+  const tiles = [
+    [{ buildableType: 0 }, { buildableType: 1 }, { buildableType: 2, heightType: 1 }],
+    [{ buildableType: 0, isStart: true }, { buildableType: 1 }, { buildableType: 2, heightType: 1 }],
+    [{ buildableType: 0 }, { buildableType: 1 }, { buildableType: 0, isEnd: true }],
+  ]
+  for (const filename of ['s1.json', 's2.json']) await writeFile(path.join(tileDir, filename), JSON.stringify({ tiles }, null, 2))
+  await writeFile(path.join(theme, 'autopilot', '二号关卡.json'), JSON.stringify({
+    stage_name: '二号关卡',
+    replacement_home: [{ location: [0, 0], direction: 'down' }],
+    blacklist_location: [],
+    deploy_plan: [],
+  }, null, 2))
+  await writeFile(path.join(theme, 'autopilot', '无地图关卡.json'), JSON.stringify({
+    stage_name: '无地图关卡',
+    replacement_home: [],
+    blacklist_location: [],
+    deploy_plan: [],
+  }, null, 2))
+  return env
+}
+
+test('synthesizes a missing operator group and writes a roguelike block tactic into the autopilot file MAA uses', async t => {
+  const env = await fixtureAutopilot()
+  t.after(env.cleanup)
+  const strategy = compileStrategyRequest({
+    kind: 'Roguelike', task: { theme: 'Sami' },
+    recruitment: { prioritize: [{ name: '结城理' }] },
+    tactics: [{ kind: 'block_entrance', name: '结城理', stageName: '暗箭难防', location: [3, 1], direction: '下' }],
+  })
+  const preview = await previewStrategy(strategy, env.resource)
+  assert.deepEqual(preview.unsupported, [])
+  assert.ok(preview.supported.includes('优先招募 结城理（新增分组 结城理）'))
+  assert.ok(preview.supported.includes('堵门：结城理 @ 暗箭难防 [3,1] down'))
+
+  const materialized = await materializeStrategy(
+    { tasks: [{ type: 'Roguelike', params: { theme: 'Sami' } }] }, strategy,
+    { resourceDir: env.resource, configDir: env.config },
+  )
+  const overlayBase = path.join(env.config, 'resource', 'roguelike', 'Sami')
+  const recruitment = JSON.parse(await readFile(path.join(overlayBase, 'recruitment.json'), 'utf8'))
+  const created = recruitment.priority.find(group => group.name === '结城理')
+  assert.deepEqual(created, {
+    name: '结城理',
+    opers: [{ name: '结城理', skill: 1, is_key: false, is_start: false, recruit_priority: 2000, promote_priority: 2000 }],
+  })
+  const autopilot = JSON.parse(await readFile(path.join(overlayBase, 'autopilot', '暗箭难防.json'), 'utf8'))
+  assert.deepEqual(autopilot.replacement_home, [{ location: [9, 1], direction: 'down' }])
+  assert.deepEqual(autopilot.deploy_plan.at(-1), { groups: ['结城理'], location: [3, 1], direction: 'down' })
+  await materialized.restore()
+  await assert.rejects(readFile(path.join(overlayBase, 'autopilot', '暗箭难防.json'), 'utf8'), /ENOENT/)
+})
+
+test('rejects a roguelike tactic without map data, coordinates or facing', async t => {
+  const env = await fixtureAutopilot()
+  t.after(env.cleanup)
+  const strategy = compileStrategyRequest({
+    kind: 'Roguelike', task: { theme: 'Sami' },
+    tactics: [
+      { kind: 'block_entrance', name: '结城理' },
+      { kind: 'guard_blue', name: '结城理', stageName: '暗箭难防' },
+      { kind: 'guard_blue', name: '结城理', stageName: '暗箭难防', location: [3, 1] },
+    ],
+  })
+  const preview = await previewStrategy(strategy, env.resource)
+  assert.equal(preview.unsupported.length, 3)
+  assert.match(preview.unsupported.map(item => item.reason).join('\n'), /地图数据|部署坐标|部署朝向/u)
+})
+
+test('applies a stage-less tactic to every native autopilot stage by deriving positions from the map', async t => {
+  const env = await fixtureWildcard()
+  t.after(env.cleanup)
+  const strategy = compileStrategyRequest({
+    kind: 'Roguelike', task: { theme: 'Sami' },
+    tactics: [{ kind: 'block_entrance', name: '结城理' }],
+  })
+  const preview = await previewStrategy(strategy, env.resource)
+  assert.equal(preview.unsupported.length, 1, JSON.stringify(preview.unsupported))
+  assert.match(preview.unsupported[0].reason, /缺少地图数据|可部署落点/u)
+  assert.ok(preview.supported.some(line => line.includes('全部 2 个原生关卡')), preview.supported.join('\n'))
+
+  const materialized = await materializeStrategy(
+    { tasks: [{ type: 'Roguelike', params: { theme: 'Sami' } }] }, strategy,
+    { resourceDir: env.resource, configDir: env.config },
+  )
+  const overlayBase = path.join(env.config, 'resource', 'roguelike', 'Sami')
+  for (const name of ['暗箭难防', '二号关卡']) {
+    const autopilot = JSON.parse(await readFile(path.join(overlayBase, 'autopilot', `${name}.json`), 'utf8'))
+    assert.deepEqual(autopilot.deploy_plan.at(-1), { groups: ['结城理'], location: [1, 1], direction: 'left' })
+  }
+  await assert.rejects(readFile(path.join(overlayBase, 'autopilot', '无地图关卡.json'), 'utf8'), /ENOENT/)
+  await materialized.restore()
+
+  const ranged = compileStrategyRequest({
+    kind: 'Roguelike', task: { theme: 'Sami' },
+    tactics: [{ kind: 'block_entrance', name: '维什戴尔' }],
+  })
+  const rangedPreview = await previewStrategy(ranged, env.resource)
+  assert.equal(rangedPreview.unsupported.length, 1, JSON.stringify(rangedPreview.unsupported))
+  const rangedDeploy = await materializeStrategy(
+    { tasks: [{ type: 'Roguelike', params: { theme: 'Sami' } }] }, ranged,
+    { resourceDir: env.resource, configDir: env.config },
+  )
+  const highGround = JSON.parse(await readFile(path.join(overlayBase, 'autopilot', '暗箭难防.json'), 'utf8'))
+  assert.deepEqual(highGround.deploy_plan.at(-1), { groups: ['高台C'], location: [2, 1], direction: 'left' })
+  await rangedDeploy.restore()
+})
+
+test('routes a natural-language note end to end into the autopilot and recruitment resources', async t => {
+  const env = await fixtureAutopilot()
+  t.after(env.cleanup)
+  const currentDir = process.env.DSH_MAA_CLI_STATE_DIR
+  process.env.DSH_MAA_CLI_STATE_DIR = path.join(env.root, 'state')
+  t.after(() => {
+    if (currentDir === undefined) delete process.env.DSH_MAA_CLI_STATE_DIR
+    else process.env.DSH_MAA_CLI_STATE_DIR = currentDir
+  })
+  const pending = { document: { tasks: [{ type: 'Roguelike', params: { theme: 'Sami', mode: 0, starts_count: 1 } }] } }
+  const parsed = await parseStrategyNote('优先抓结城理，并在暗箭难防让结城理堵门 [3,1] 朝下', pending)
+  assert.equal(parsed.needsModel, false)
+  const strategy = compileStrategyRequest(parsed.input)
+  const preview = await previewStrategy(strategy, env.resource)
+  assert.deepEqual(preview.unsupported, [])
+  const materialized = await materializeStrategy(pending.document, strategy, { resourceDir: env.resource, configDir: env.config })
+  const overlayBase = path.join(env.config, 'resource', 'roguelike', 'Sami')
+  const recruitment = JSON.parse(await readFile(path.join(overlayBase, 'recruitment.json'), 'utf8'))
+  assert.equal(recruitment.priority.some(group => group.opers.some(operator => operator.name === '结城理')), true)
+  const autopilot = JSON.parse(await readFile(path.join(overlayBase, 'autopilot', '暗箭难防.json'), 'utf8'))
+  assert.deepEqual(autopilot.deploy_plan.at(-1), { groups: ['结城理'], location: [3, 1], direction: 'down' })
+  await materialized.restore()
+})
+
+test('keeps the whole theme recruitment table and finds a stage by its stage_name field', async t => {
+  const env = await fixtureAutopilot()
+  t.after(env.cleanup)
+  const theme = path.join(env.resource, 'roguelike', 'Sami')
+  await rm(path.join(theme, 'autopilot', '暗箭难防.json'))
+  await writeFile(path.join(theme, 'autopilot', 'stage-alias.json'), JSON.stringify({
+    stage_name: '暗箭难防',
+    replacement_home: [{ location: [9, 1], direction: 'down' }],
+    blacklist_location: [],
+    deploy_plan: [{ groups: ['高台C'], location: [3, 2], direction: 'down' }],
+  }, null, 2))
+  const strategy = compileStrategyRequest({
+    kind: 'Roguelike', task: { theme: 'Sami' },
+    recruitment: { prioritize: [{ name: '结城理' }] },
+    tactics: [{ kind: 'guard_blue', name: '结城理', stageName: '暗箭难防', location: [9, 1], direction: '下' }],
+  })
+  const materialized = await materializeStrategy(
+    { tasks: [{ type: 'Roguelike', params: { theme: 'Sami' } }] }, strategy,
+    { resourceDir: env.resource, configDir: env.config },
+  )
+  const overlayBase = path.join(env.config, 'resource', 'roguelike', 'Sami')
+  const recruitment = JSON.parse(await readFile(path.join(overlayBase, 'recruitment.json'), 'utf8'))
+  assert.deepEqual(recruitment.priority.map(group => group.name).slice(0, 3), ['结城理', '高台C', '回费'])
+  assert.deepEqual(recruitment.team_complete_condition, [{ groups: ['高台C'], threshold: 1 }])
+  const autopilot = JSON.parse(await readFile(path.join(overlayBase, 'autopilot', 'stage-alias.json'), 'utf8'))
+  assert.equal(autopilot.stage_name, '暗箭难防')
+  assert.deepEqual(autopilot.deploy_plan.at(-1), { groups: ['结城理'], location: [9, 1], direction: 'down' })
+  await materialized.restore()
 })
 
 test('recovers an interrupted roguelike overlay before another run', async t => {

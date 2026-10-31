@@ -68,6 +68,11 @@ window.__ModuleLoader__.load({
       '.maa-memory-row{display:grid;grid-template-columns:minmax(120px,1fr) auto;gap:8px;align-items:center;padding:5px 0}',
       '.maa-memory-meta{font-size:11px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}',
       '.maa-memory-actions{display:flex;gap:5px}',
+      '.maa-run-dock{border-color:var(--dsw-alias-brand-primary)}',
+      '.maa-run-meta{font-size:11px;line-height:17px;color:var(--dsw-alias-label-secondary)}',
+      '.maa-run-warn{font-size:11px;line-height:17px;color:var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary));margin-top:6px}',
+      '.maa-run-result{width:100%;margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}',
+      '.maa-run-blocked{font-size:12px;line-height:18px;color:var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary));padding:8px 10px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px}',
     ].join('')
 
     function installStyles() {
@@ -213,6 +218,7 @@ window.__ModuleLoader__.load({
       const execute = options.execute
       const line = options.line
       const onSuccess = options.onSuccess
+      const onStart = options.onStart
       const statePair = React.useState('ready')
       const state = statePair[0]
       const setState = statePair[1]
@@ -229,6 +235,7 @@ window.__ModuleLoader__.load({
         setError('')
         setResult('')
         stopRequested.current = false
+        if (onStart) onStart(line)
         Promise.resolve(execute(line)).then(function (outcome) {
           if (stopRequested.current) {
             setState('stopped')
@@ -250,7 +257,7 @@ window.__ModuleLoader__.load({
           setState('ready')
           setError(reason instanceof Error ? reason.message : String(reason))
         })
-      }, [execute, line, state, onSuccess])
+      }, [execute, line, state, onSuccess, onStart])
       const stop = React.useCallback(function () {
         if (state !== 'running') return
         stopRequested.current = true
@@ -281,7 +288,7 @@ window.__ModuleLoader__.load({
       const preview = previewPair[0]
       const setPreview = previewPair[1]
       const previewReady = note === '' || (preview.state === 'ready' && preview.note === note && preview.line === props.previewLine)
-      const action = useCommandButton({ execute: props.execute, line: previewReady ? props.line : '', onSuccess: props.onSuccess })
+      const action = useCommandButton({ execute: props.execute, line: previewReady ? props.line : '', onSuccess: props.onSuccess, onStart: props.onStart })
       const runPreview = React.useCallback(function () {
         if (!note || !props.previewLine || preview.state === 'running') return
         setPreview({ state: 'running', note: note, line: props.previewLine, data: null, error: '' })
@@ -356,17 +363,14 @@ window.__ModuleLoader__.load({
           onClick: runPreview,
         }, preview.state === 'running' ? '解析中…' : previewReady ? '重新预览' : '解析并预览备注') : null,
         note ? h('button', { className: 'maa-secondary-button', type: 'button', disabled: action.state !== 'ready', onClick: cancelNote }, '取消备注策略') : null,
+        // Only acknowledge the note here. The compiled details (supported,
+        // unsupported, memory deltas) stay in the command JSON for the model and
+        // the server, never in the panel: the panel is for humans, not a log.
         data && data.status === 'ready' ? h('div', { className: 'maa-note-preview', role: 'status' },
-          h('div', { className: 'maa-note-preview-title' }, '实际生效策略预览'),
-          h('div', null, '生效：' + (data.supported || []).join('、')),
-          h('div', null, '记忆：复用 ' + data.memory.reused + '，本次确认后新增/更新 ' + data.memory.stored + '，拒绝 ' + data.memory.rejected),
-          (data.changes || []).length ? h('ul', { className: 'maa-note-preview-list' }, data.changes.map(function (item, index) {
-            return h('li', { key: String(index) }, item.target + '：' + item.detail)
-          })) : null,
-          (data.unsupported || []).length ? h('div', { className: 'maa-note-preview-warn' }, '无法执行：' + data.unsupported.map(function (item) { return item.request + '（' + item.reason + '）' }).join('；')) : null,
+          h('div', { className: 'maa-note-preview-title' }, '已收到并解析【' + (data.note || note) + '】'),
           h('div', { className: 'maa-note-preview-warn' }, '尚未操作游戏；点击确认后才会写入临时配置并调用 MAA。')) : null,
-        data && data.status === 'needs_model' ? h('div', { className: 'maa-note-preview maa-note-preview-warn' },
-          '本地规则未识别：' + (data.unresolved || []).join('、')) : null,
+        data && data.status === 'needs_model' ? h('div', { className: 'maa-note-preview', role: 'status' },
+          h('div', { className: 'maa-note-preview-title' }, '已收到备注【' + (data.note || note) + '】，正在请模型识别')) : null,
         preview.error ? h('div', { className: 'maa-plan-error' }, preview.error) : null,
         action.error ? h('div', { className: 'maa-plan-error' }, action.error) : null,
         action.result ? h('div', { className: 'maa-plan-result', role: 'status' }, action.result) : null)
@@ -488,6 +492,7 @@ window.__ModuleLoader__.load({
             if (!payload || payload.code !== code || !payload.panel) return
             props.store.sync({
               code: code, summary: summary || payload.summary || 'MAA 操作计划', execute: props.execute,
+              theme: typeof payload.theme === 'string' ? payload.theme : '',
               taskPanel: payload.panel, capabilitySignature: payload.capabilitySignature || '', params: null,
             })
           }, function () {})
@@ -516,6 +521,10 @@ window.__ModuleLoader__.load({
                 onNoteChange: function (next) {
                   props.store.setParams(code, Object.assign({}, effective, { note: next }))
                 },
+                onStart: function () {
+                  writeStoredRun({ startedAt: Date.now(), summary: summary || '', code: code })
+                  try { globalThis.localStorage.setItem('dsh.maa.history', '1') } catch (_) {}
+                },
                 onSuccess: function () { props.store.clear(code) },
               }))
           : props.phase === 'result' && !props.block.isError && !dismissed
@@ -524,34 +533,267 @@ window.__ModuleLoader__.load({
       )
     }
 
+    const RUN_STATUS_LABELS = {
+      running: '执行中', succeeded: '已完成', failed: '失败', stopped: '已停止', finished: '已结束',
+    }
+
+    function formatRunClock(iso) {
+      if (!iso) return ''
+      const date = new Date(iso)
+      if (Number.isNaN(date.getTime())) return ''
+      const pad = function (value) { return String(value).padStart(2, '0') }
+      return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
+    }
+
+    // Every `/maa …` line goes through the command plane and is echoed into the
+    // transcript, so the dock never polls: it remembers the run it started, and
+    // reads the host record only when the user explicitly asks (停止 / 查看记录).
+    const RUN_STORAGE_KEY = 'dsh.maa.run'
+
+    function readStoredRun() {
+      try {
+        const parsed = JSON.parse(globalThis.localStorage.getItem(RUN_STORAGE_KEY) || 'null')
+        if (!parsed || typeof parsed.startedAt !== 'number') return null
+        if (Date.now() - parsed.startedAt > 40 * 60_000) return null
+        return parsed
+      } catch (_) { return null }
+    }
+
+    function writeStoredRun(run) {
+      try {
+        if (run) globalThis.localStorage.setItem(RUN_STORAGE_KEY, JSON.stringify(run))
+        else globalThis.localStorage.removeItem(RUN_STORAGE_KEY)
+      } catch (_) {}
+    }
+
+    function readRunRecord(execute) {
+      if (typeof execute !== 'function') return Promise.resolve(null)
+      return Promise.resolve(execute('/maa status')).then(function (outcome) {
+        if (!outcome || outcome.kind !== 'success' || typeof outcome.text !== 'string') return null
+        try { return JSON.parse(outcome.text) } catch (_) { return null }
+      }, function () { return null })
+    }
+
+    function formatElapsed(ms) {
+      const total = Math.max(0, Math.round(ms / 1000))
+      const minutes = Math.floor(total / 60)
+      const seconds = total % 60
+      return minutes > 0 ? minutes + ' 分 ' + String(seconds).padStart(2, '0') + ' 秒' : seconds + ' 秒'
+    }
+
+    // Pure client-side ticker: the elapsed time stays honest without issuing a
+    // single command (which would otherwise spam the conversation).
+    function useRunClock(active) {
+      const pair = React.useState(0)
+      const setTick = pair[1]
+      React.useEffect(function () {
+        if (!active) return undefined
+        const timer = globalThis.setInterval(function () { setTick(value => value + 1) }, 1000)
+        return function () { globalThis.clearInterval(timer) }
+      }, [active])
+      return pair[0]
+    }
+
+    function formatRuntimeProgress(run) {
+      const progress = run && run.progress ? run.progress : null
+      if (!progress) return '实时进度尚未读取。'
+      const parts = ['本次进程已完成 ' + Number(progress.explorationsCompleted || 0) + ' 局探索']
+      if (progress.floorReliable && Number.isInteger(progress.floor)) parts.push('当前第 ' + progress.floor + ' 层')
+      else if (Number.isInteger(progress.lastSettlementFloor)) parts.push('上次结算于第 ' + progress.lastSettlementFloor + ' 层')
+      if (progress.stage) parts.push('关卡：' + progress.stage)
+      if (!progress.floorReliable) parts.push('当前楼层未知')
+      const instruction = Array.isArray(run.instructions)
+        ? run.instructions.find(function (item) { return ['received', 'applied', 'triggered'].includes(item.status) })
+        : null
+      if (instruction) parts.push('运行时指令[' + instruction.status + ']：' + (instruction.message || instruction.type))
+      return parts.join(' · ')
+    }
+
     function MaaConfirmDock(props) {
       const plan = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot)
       const collapsedPair = React.useState(false)
       const collapsed = collapsedPair[0]
       const setCollapsed = collapsedPair[1]
       const code = plan ? plan.code : null
+      const execute = typeof props.execute === 'function' ? props.execute : (plan && plan.execute)
+      const localRunPair = React.useState(function () { return readStoredRun() })
+      const localRun = localRunPair[0]
+      const setLocalRun = localRunPair[1]
+      const snapshotPair = React.useState(null)
+      const snapshot = snapshotPair[0]
+      const setSnapshot = snapshotPair[1]
+      const loadingPair = React.useState(false)
+      const loadingRecord = loadingPair[0]
+      const setLoadingRecord = loadingPair[1]
+      const hiddenPair = React.useState(false)
+      const recordHidden = hiddenPair[0]
+      const setRecordHidden = hiddenPair[1]
+      const stopPair = React.useState(false)
+      const stopping = stopPair[0]
+      const setStopping = stopPair[1]
+      const stopErrorPair = React.useState('')
+      const stopError = stopErrorPair[0]
+      const setStopError = stopErrorPair[1]
+      const runtimePair = React.useState('')
+      const runtimeMessage = runtimePair[0]
+      const setRuntimeMessage = runtimePair[1]
+      const runtimeBusyPair = React.useState(false)
+      const runtimeBusy = runtimeBusyPair[0]
+      const setRuntimeBusy = runtimeBusyPair[1]
+
+      const runningRecord = snapshot && snapshot.running ? snapshot.running : null
+      const interruptedRecord = snapshot && snapshot.interrupted ? snapshot.interrupted : null
+      const recentRuns = snapshot && Array.isArray(snapshot.recent) ? snapshot.recent : []
+      const finishedRun = runningRecord ? null : (interruptedRecord || recentRuns[0] || null)
+      // The tab that clicked confirm remembers the run locally, so the control
+      // panel appears instantly — without a single `/maa status` round trip.
+      const liveRun = runningRecord || (localRun && !finishedRun ? {
+        id: 'local',
+        startedAt: new Date(localRun.startedAt).toISOString(),
+        startedAtMs: localRun.startedAt,
+        planSummary: localRun.summary || '',
+        purpose: '',
+        confirmationCode: localRun.code || '',
+        duration: '',
+      } : null)
+      useRunClock(Boolean(liveRun))
+      const liveStartedAt = liveRun
+        ? (liveRun.startedAtMs || Date.parse(liveRun.startedAt) || Date.now())
+        : 0
+      const liveElapsed = liveRun ? (liveRun.duration || formatElapsed(Date.now() - liveStartedAt)) : ''
+
+      const rememberRun = function (summary, codeValue) {
+        const record = { startedAt: Date.now(), summary: summary || '', code: codeValue || '' }
+        writeStoredRun(record)
+        setLocalRun(record)
+        setSnapshot(null)
+        setRecordHidden(false)
+      }
+      const forgetRun = function () {
+        writeStoredRun(null)
+        setLocalRun(null)
+      }
+      const loadRecord = function () {
+        setLoadingRecord(true)
+        return readRunRecord(execute).then(function (data) {
+          setLoadingRecord(false)
+          if (data) setSnapshot(data)
+          return data
+        })
+      }
+      const stopRunning = function () {
+        if (typeof execute !== 'function' || stopping) return
+        setStopping(true)
+        setStopError('')
+        Promise.resolve(execute('/maa stop')).then(function (outcome) {
+          setStopping(false)
+          if (!outcome || outcome.kind !== 'success') {
+            setStopError(outcome && outcome.text ? outcome.text : '停止任务失败。')
+            return
+          }
+          forgetRun()
+          loadRecord()
+        }, function (reason) {
+          setStopping(false)
+          setStopError(reason instanceof Error ? reason.message : String(reason))
+        })
+      }
+      const runtimeCommand = function (command) {
+        if (typeof execute !== 'function' || runtimeBusy) return
+        setRuntimeBusy(true)
+        setRuntimeMessage('')
+        Promise.resolve(execute('/maa ' + command)).then(function (outcome) {
+          setRuntimeBusy(false)
+          setRuntimeMessage(outcome && outcome.text ? outcome.text : '运行时指令没有返回结果。')
+          loadRecord()
+        }, function (reason) {
+          setRuntimeBusy(false)
+          setRuntimeMessage(reason instanceof Error ? reason.message : String(reason))
+        })
+      }
       // A fresh plan always opens expanded; collapsing is a per-plan choice.
       React.useEffect(function () { setCollapsed(false) }, [code])
-      React.useEffect(function () {
-        if (!plan || plan.result || !code || typeof plan.execute !== 'function') return undefined
-        let disposed = false
-        const refresh = function () {
-          Promise.resolve(plan.execute('/maa peek ' + code)).then(function (outcome) {
-            if (disposed || !outcome || outcome.kind !== 'success') return
-            let payload
-            try { payload = JSON.parse(outcome.text) } catch (_) { return }
-            if (!payload || payload.code !== code || !payload.panel) return
-            props.store.sync({
-              code: code, taskPanel: payload.panel,
-              capabilitySignature: payload.capabilitySignature || '',
-            })
-          }, function () {})
-        }
-        const timer = globalThis.setInterval(refresh, 15000)
-        return function () { disposed = true; globalThis.clearInterval(timer) }
-      }, [code, plan && plan.execute, plan && plan.result, props.store])
+      const finishedView = function (record) {
+        const label = RUN_STATUS_LABELS[record.status] || record.status || '已结束'
+        return h('div', { className: 'maa-confirm-dock', role: 'status' },
+          h('div', { className: 'maa-confirm-dock-head' },
+            h('div', { className: 'maa-confirm-dock-copy' },
+              h('div', { className: 'maa-confirm-dock-title' }, '最近一次 MAA 执行：' + label),
+              h('div', { className: 'maa-confirm-dock-summary' }, record.planSummary || record.purpose || '（没有任务摘要）')),
+            h('div', { className: 'maa-dock-actions' },
+              h('button', {
+                key: 'hide', className: 'maa-dock-icon', type: 'button',
+                title: '隐藏最近一次执行记录', 'aria-label': '隐藏执行记录',
+                onClick: function () { setRecordHidden(true) },
+              }, '\u00d7'))),
+          h('div', { className: 'maa-run-meta' },
+            (record.finishedAt ? '结束于 ' + formatRunClock(record.finishedAt) + ' · ' : '')
+              + '耗时 ' + record.duration
+              + (typeof record.exitCode === 'number' ? ' · exit ' + record.exitCode : '')
+              + (record.status === 'stopped' ? ' · 已停止' : '')),
+          h('div', { className: 'maa-run-result' }, record.summary || 'MAA 没有返回可读的执行摘要，可以查看日志排查。'))
+      }
+      if (liveRun && !recordHidden) {
+        return h('div', { className: 'maa-confirm-dock maa-run-dock', role: 'status' },
+          h('div', { className: 'maa-confirm-dock-head' },
+            h('div', { className: 'maa-confirm-dock-copy' },
+              h('div', { className: 'maa-confirm-dock-title' }, 'MAA 任务执行中'),
+              h('div', { className: 'maa-confirm-dock-summary' }, liveRun.planSummary || liveRun.purpose || '正在执行')),
+            h('div', { className: 'maa-dock-actions' },
+              h('button', {
+                key: 'hide', className: 'maa-dock-icon', type: 'button',
+                title: '隐藏这次执行的提示（任务继续在后台运行）', 'aria-label': '隐藏执行提示',
+                onClick: function () { setRecordHidden(true) },
+              }, '\u00d7'))),
+          h('div', { className: 'maa-run-meta' },
+            '已运行 ' + liveElapsed + ' · 开始于 ' + formatRunClock(liveRun.startedAt)
+              + (liveRun.confirmationCode ? ' · ' + liveRun.confirmationCode : '')),
+          runningRecord ? h('div', { className: 'maa-run-result' }, formatRuntimeProgress(runningRecord)) : null,
+          h('div', { className: 'maa-run-blocked' }, '执行完成前不接受新的计划或任务：这会抢占模拟器并覆盖临时资源，所以新计划会被明确拒绝。'),
+          h('div', { className: 'maa-plan-actions' },
+            h('button', { className: 'maa-stop-button', type: 'button', disabled: stopping, onClick: stopRunning },
+              stopping ? '正在停止…' : '停止任务'),
+            h('button', { className: 'maa-secondary-button', type: 'button', disabled: runtimeBusy, onClick: function () { runtimeCommand('这把肉鸽打完就停') } }, '本局结束后停'),
+            h('button', { className: 'maa-secondary-button', type: 'button', disabled: runtimeBusy, onClick: function () { runtimeCommand('取消刚才的停止要求') } }, '取消停止条件'),
+            h('button', { className: 'maa-secondary-button', type: 'button', disabled: loadingRecord, onClick: loadRecord },
+              loadingRecord ? '正在读取…' : '查看实时进度')),
+          runtimeMessage ? h('div', { className: 'maa-run-result' }, runtimeMessage) : null,
+          stopError ? h('div', { className: 'maa-plan-error' }, stopError) : null)
+      }
+      if ((plan === null || plan === undefined || Boolean(plan.result)) && finishedRun && !recordHidden) {
+        return finishedView(finishedRun)
+      }
+      if (plan === null || plan === undefined) {
+        let hasHistory = false
+        try { hasHistory = globalThis.localStorage.getItem('dsh.maa.history') === '1' } catch (_) { hasHistory = false }
+        if (!hasHistory || recordHidden) return null
+        return h('div', { className: 'maa-confirm-dock', role: 'status' },
+          h('div', { className: 'maa-confirm-dock-head' },
+            h('div', { className: 'maa-confirm-dock-copy' },
+              h('div', { className: 'maa-confirm-dock-title' }, 'MAA 执行记录'),
+              h('div', { className: 'maa-confirm-dock-summary' }, '查看上一次执行的状态与结果（只读，不会调用模型）。')),
+            h('div', { className: 'maa-dock-actions' },
+              h('button', {
+                key: 'hide', className: 'maa-dock-icon', type: 'button',
+                title: '不再显示执行记录入口', 'aria-label': '不再显示执行记录入口',
+                onClick: function () {
+                  try { globalThis.localStorage.removeItem('dsh.maa.history') } catch (_) {}
+                  setRecordHidden(true)
+                },
+              }, '\u00d7'))),
+          h('div', { className: 'maa-plan-actions' },
+            h('button', { className: 'maa-secondary-button', type: 'button', disabled: loadingRecord, onClick: loadRecord },
+              loadingRecord ? '正在读取…' : '查看执行记录')))
+      }
       if (!plan) return null
       const effective = plan.params || (plan.taskPanel ? plan.taskPanel.values : null) || null
+      // The hunk shows the plan MAA will run. If the panel's theme select no
+      // longer matches the plan's theme, say so instead of pretending.
+      const chosenTheme = effective && typeof effective.theme === 'string' ? effective.theme : ''
+      const themeNotice = plan.theme && chosenTheme && chosenTheme !== plan.theme
+        ? '\n当前选择：' + chosenTheme + '（确认后按此主题执行）'
+        : ''
+      const dockSummary = (plan.summary || '') + themeNotice
       const dismiss = function () {
         dismissedPlans.add(plan.code)
         props.store.clear(plan.code)
@@ -582,14 +824,14 @@ window.__ModuleLoader__.load({
           h('div', { className: 'maa-confirm-dock-head' },
             h('div', { className: 'maa-confirm-dock-copy' },
               h('div', { className: 'maa-confirm-dock-title' }, 'MAA 计划等待你的确认'),
-              h('div', { className: 'maa-confirm-dock-summary' }, plan.summary))),
+              h('div', { className: 'maa-confirm-dock-summary' }, dockSummary))),
           actions)
       }
       return h('div', { className: 'maa-confirm-dock', role: 'status' },
         h('div', { className: 'maa-confirm-dock-head' },
           h('div', { className: 'maa-confirm-dock-copy' },
             h('div', { className: 'maa-confirm-dock-title' }, 'MAA 计划等待你的确认'),
-            h('div', { className: 'maa-confirm-dock-summary' }, plan.summary))),
+            h('div', { className: 'maa-confirm-dock-summary' }, dockSummary))),
         actions,
         plan.taskPanel && effective
           ? h(TaskSettingsPanel, {
@@ -610,7 +852,21 @@ window.__ModuleLoader__.load({
             onNoteChange: function (next) {
               props.store.setParams(plan.code, Object.assign({}, effective, { note: next }))
             },
-            onSuccess: function (outcome) { props.store.complete(plan.code, outcome.text) },
+            // The plan is consumed on the host; the dock must keep showing the
+            // run instead of disappearing. The local record is written when the
+            // confirm command starts, so no polling is needed to notice it.
+            onStart: function () {
+              rememberRun(plan.summary, plan.code)
+            },
+            onSuccess: function (outcome) {
+              // The run is over: drop the optimistic local record and read the
+              // authoritative one exactly once, so the dock shows duration and
+              // exit code without ever polling while the task was running.
+              forgetRun()
+              props.store.complete(plan.code, outcome.text)
+              try { globalThis.localStorage.setItem('dsh.maa.history', '1') } catch (_) {}
+              loadRecord()
+            },
           })))
     }
 
@@ -716,6 +972,7 @@ window.__ModuleLoader__.load({
           if (!panel || typeof panel.type !== 'string' || !panel.values || typeof panel.values !== 'object') return
           const common = {
             code: code,
+            theme: typeof payload.theme === 'string' ? payload.theme : '',
             summary: typeof payload.summary === 'string' && payload.summary ? payload.summary : 'MAA 计划',
             execute: execute,
             params: null,
@@ -730,30 +987,33 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       installStyles()
       attachPlanNotices(ctx)
-      ctx.slots.inject('tool.call.toolview', function () {
-        return ctx.slots.register({
-          name: 'tool.call.toolview',
-          key: 'maa_prepare_plan',
-          inject: function (sessionId) {
-            return {
-              execute: commandRunner(ctx, sessionId),
-              store: storeFor(sessionId),
-            }
-          },
-        }, MaaPlanCard)
+      // Every planning tool shares the same confirmation dock: `maa_prepare_plan`
+      // builds a task-panel plan, while `maa_prepare_strategy` / `maa_prepare_note`
+      // prepare plans from notes. All three end in a MAA-XXXXXX confirmation code.
+      ;['maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note'].forEach(function (toolKey) {
+        ctx.slots.inject('tool.call.toolview', function () {
+          return ctx.slots.register({
+            name: 'tool.call.toolview',
+            key: toolKey,
+            inject: function (sessionId) {
+              return {
+                execute: commandRunner(ctx, sessionId),
+                store: storeFor(sessionId),
+              }
+            },
+          }, MaaPlanCard)
+        })
       })
       ctx.slots.inject('conversation.input.dock', function () {
         return ctx.slots.register({
           name: 'conversation.input.dock', id: 'maa-confirm', order: 5,
-          inject: function (sessionId) { return { store: storeFor(sessionId) } },
+          inject: function (sessionId) {
+            return { store: storeFor(sessionId), execute: commandRunner(ctx, sessionId) }
+          },
         }, MaaConfirmDock)
       })
-      ctx.slots.inject('conversation.input.dock', function () {
-        return ctx.slots.register({
-          name: 'conversation.input.dock', id: 'maa-strategy-memory', order: 6,
-          inject: function (sessionId) { return { execute: commandRunner(ctx, sessionId) } },
-        }, MaaStrategyMemory)
-      })
+      // The strategy-memory manager is intentionally not mounted: the model
+      // calls /maa strategies itself, and the panel must stay about one plan.
     }
 
     return { inject, apply }

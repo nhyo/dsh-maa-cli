@@ -7,6 +7,7 @@ const DIRECTIONS = new Map([
   ['left', 'Left'], ['左', 'Left'], ['right', 'Right'], ['右', 'Right'],
   ['up', 'Up'], ['上', 'Up'], ['down', 'Down'], ['下', 'Down'], ['none', 'None'], ['无', 'None'],
 ])
+const AUTOPILOT_DIRECTIONS = new Map([['Left', 'left'], ['Right', 'right'], ['Up', 'up'], ['Down', 'down']])
 const COPILOT_MARKER = '__DSH_GENERATED_COPILOT__'
 const MANIFEST_NAME = 'active-overlay.json'
 
@@ -144,7 +145,20 @@ function compileRoguelikeRequest(input, unsupported) {
     choose: integer(entry?.choose, 1, 20, `encounters[${index}].choose`),
     optionCount: optionalInteger(entry?.optionCount, 1, 20, `encounters[${index}].optionCount`),
   })) : []
-  return { kind: 'Roguelike', theme, step, recruitment, shopping, encounters, unsupported }
+  const tactics = Array.isArray(input.tactics) ? input.tactics.map((tactic, index) => roguelikeTactic(tactic, `tactics[${index}]`)) : []
+  return { kind: 'Roguelike', theme, step, recruitment, shopping, encounters, tactics, unsupported }
+}
+
+function roguelikeTactic(tactic, label) {
+  if (!plain(tactic)) throw new TypeError(`${label} must be an object`)
+  const result = {
+    kind: ['guard_blue', 'block_entrance'].includes(tactic.kind) ? tactic.kind : invalid(`${label}.kind is unsupported`),
+    name: requiredText(tactic.name, `${label}.name`, 64),
+  }
+  if (tactic.stageName !== undefined) result.stageName = requiredText(tactic.stageName, `${label}.stageName`, 96)
+  if (tactic.location !== undefined) result.location = point(tactic.location, `${label}.location`)
+  if (tactic.direction !== undefined) result.direction = direction(tactic.direction, `${label}.direction`)
+  return result
 }
 
 function compileCopilotRequest(input, unsupported) {
@@ -173,39 +187,31 @@ async function compileRoguelikeFiles(strategy, resourceDir, includeFiles) {
   const files = []
   const supported = [`切换肉鸽主题 ${strategy.theme}`]
   const unsupported = []
-  if (strategy.recruitment && (strategy.recruitment.prioritize.length || strategy.recruitment.promote.length || strategy.recruitment.teamComplete.length)) {
-    const target = path.join(base, 'recruitment.json')
-    const json = await readJson(target, '肉鸽招募策略')
-    const groups = Array.isArray(json.priority) ? json.priority : []
-    const groupNames = new Set(groups.map(group => group?.name).filter(Boolean))
-    for (const preference of strategy.recruitment.prioritize) {
-      const matched = findOperators(groups, preference.name)
-      if (matched.length === 0) unsupported.push({ request: `优先招募 ${preference.name}`, reason: `${strategy.theme} 的招募策略中没有该干员，未新增不可靠分组` })
-      else {
-        for (const operator of matched) {
-          operator.recruit_priority = preference.priority ?? 2000
-          if (preference.skill !== undefined) operator.skill = preference.skill
-        }
-        supported.push(`优先招募 ${preference.name}`)
-      }
+  const tactics = Array.isArray(strategy.tactics) ? strategy.tactics : []
+  const recruitment = strategy.recruitment && (strategy.recruitment.prioritize.length || strategy.recruitment.promote.length || strategy.recruitment.teamComplete.length)
+    ? strategy.recruitment : null
+  const registry = recruitment || tactics.length ? await openRecruitmentRegistry(base, resourceDir) : null
+  if (recruitment) {
+    for (const preference of recruitment.prioritize) {
+      const resolved = ensureOperatorGroup(registry, preference.name, { priority: preference.priority, skill: preference.skill })
+      if (!resolved) unsupported.push({ request: `优先招募 ${preference.name}`, reason: `${missingOperatorReason(registry)}，未新增不可靠分组` })
+      else supported.push(`优先招募 ${preference.name}${resolved.created ? `（新增分组 ${resolved.groupName}）` : ''}`)
     }
-    for (const preference of strategy.recruitment.promote) {
-      const matched = findOperators(groups, preference.name)
-      if (matched.length === 0) unsupported.push({ request: `优先精二 ${preference.name}`, reason: `${strategy.theme} 的招募策略中没有该干员` })
-      else {
-        for (const operator of matched) operator.promote_priority = preference.priority ?? 2000
-        supported.push(`优先精二 ${preference.name}`)
-      }
+    for (const preference of recruitment.promote) {
+      const resolved = ensureOperatorGroup(registry, preference.name, { promotePriority: preference.priority })
+      if (!resolved) unsupported.push({ request: `优先精二 ${preference.name}`, reason: missingOperatorReason(registry) })
+      else supported.push(`优先精二 ${preference.name}${resolved.created ? `（新增分组 ${resolved.groupName}）` : ''}`)
     }
-    if (strategy.recruitment.teamComplete.length) {
-      const invalidGroups = strategy.recruitment.teamComplete.flatMap(condition => condition.groups.filter(name => !groupNames.has(name)))
+    if (recruitment.teamComplete.length) {
+      const groupNames = new Set(registry.groups.map(group => group?.name).filter(Boolean))
+      const invalidGroups = recruitment.teamComplete.flatMap(condition => condition.groups.filter(name => !groupNames.has(name)))
       if (invalidGroups.length) unsupported.push({ request: '调整阵容完备条件', reason: `不存在的原生分组：${[...new Set(invalidGroups)].join('、')}` })
       else {
-        json.team_complete_condition = strategy.recruitment.teamComplete
+        registry.json.team_complete_condition = recruitment.teamComplete
+        registry.dirty = true
         supported.push('调整阵容完备条件')
       }
     }
-    if (includeFiles) files.push({ target, content: json })
   }
   if (strategy.shopping && (strategy.shopping.prioritize.length || strategy.shopping.avoid.length)) {
     const target = path.join(base, 'shopping.json')
@@ -247,7 +253,198 @@ async function compileRoguelikeFiles(strategy, resourceDir, includeFiles) {
     }
     if (includeFiles) files.push({ target, content: json })
   }
+  if (tactics.length) {
+    for (const tactic of tactics) {
+      const label = tactic.kind === 'guard_blue' ? '守蓝门' : '堵门'
+      const request = `${label}：${tactic.name}`
+      const resolved = ensureOperatorGroup(registry, tactic.name, {})
+      if (!resolved) { unsupported.push({ request, reason: `${missingOperatorReason(registry)}，无法写入 deploy_plan` }); continue }
+      if (!tactic.stageName) {
+        await writeWildcardTactic({ strategy, tactic, label, registry, resolved, base, resourceDir, files, supported, unsupported })
+        continue
+      }
+      if (!tactic.location) { unsupported.push({ request, reason: `缺少部署坐标，无法确定 ${tactic.stageName} 的落点` }); continue }
+      if (!tactic.direction) { unsupported.push({ request, reason: '缺少部署朝向（左/右/上/下）' }); continue }
+      const facing = AUTOPILOT_DIRECTIONS.get(tactic.direction)
+      if (!facing) { unsupported.push({ request, reason: `不支持的部署朝向：${tactic.direction}` }); continue }
+      const found = await findAutopilotFile(base, tactic.stageName)
+      if (!found) {
+        unsupported.push({ request, reason: `${strategy.theme} 没有关卡 ${tactic.stageName} 的原生自动战斗配置，请检查关卡名` })
+        continue
+      }
+      const { target, json } = found
+      const plan = Array.isArray(json.deploy_plan) ? json.deploy_plan : (json.deploy_plan = [])
+      const duplicated = plan.some(entry => Array.isArray(entry?.location) && entry.location[0] === tactic.location[0] && entry.location[1] === tactic.location[1] && Array.isArray(entry.groups) && entry.groups.includes(resolved.groupName))
+      if (!duplicated) {
+        plan.push({ groups: [resolved.groupName], location: [...tactic.location], direction: facing })
+        files.push({ target, content: json })
+      }
+      supported.push(`${label}：${tactic.name} @ ${tactic.stageName} [${tactic.location.join(',')}] ${facing}`)
+    }
+  }
+  if (registry?.dirty && includeFiles && !files.some(file => file.target === registry.target)) files.push({ target: registry.target, content: registry.json })
   return { files, supported, unsupported }
+}
+
+async function openRecruitmentRegistry(base, resourceDir) {
+  const target = path.join(base, 'recruitment.json')
+  const json = await readJson(target, '肉鸽招募策略')
+  const groups = Array.isArray(json.priority) ? json.priority : (json.priority = [])
+  return { target, json, groups, operators: await loadOperatorNames(resourceDir), dirty: false }
+}
+
+async function findAutopilotFile(base, stageName) {
+  const directory = path.join(base, 'autopilot')
+  let directError = null
+  try { return { target: path.join(directory, `${stageName}.json`), json: await readJson(path.join(directory, `${stageName}.json`), '肉鸽自动战斗配置') } } catch (error) { directError = error }
+  let names
+  try { names = await readdir(directory) } catch { throw directError }
+  for (const name of names.sort()) {
+    if (!name.toLowerCase().endsWith('.json')) continue
+    const target = path.join(directory, name)
+    let json
+    try { json = JSON.parse(await readFile(target, 'utf8')) } catch { continue }
+    if (json?.stage_name === stageName) return { target, json }
+  }
+  return null
+}
+
+async function loadOperatorNames(resourceDir) {
+  let data
+  try { data = JSON.parse(await readFile(path.join(resourceDir, 'battle_data.json'), 'utf8')) } catch (error) { return null }
+  const chars = data?.chars
+  if (!chars || typeof chars !== 'object') return null
+  const operators = new Map()
+  for (const entry of Object.values(chars)) {
+    if (!entry || typeof entry !== 'object') continue
+    const info = { position: typeof entry.position === 'string' ? entry.position : '', profession: typeof entry.profession === 'string' ? entry.profession : '' }
+    for (const key of ['name', 'name_en']) if (typeof entry?.[key] === 'string' && entry[key].trim()) operators.set(entry[key].trim(), info)
+  }
+  return operators
+}
+
+async function listAutopilotStages(base) {
+  const directory = path.join(base, 'autopilot')
+  let names
+  try { names = await readdir(directory) } catch { return [] }
+  const stages = []
+  for (const name of names.filter(item => item.toLowerCase().endsWith('.json')).sort()) {
+    const target = path.join(directory, name)
+    let json
+    try { json = JSON.parse(await readFile(target, 'utf8')) } catch { continue }
+    if (typeof json?.stage_name !== 'string' || !json.stage_name.trim()) continue
+    stages.push({ stageName: json.stage_name.trim(), target, json })
+  }
+  return stages
+}
+
+async function loadTileIndex(resourceDir) {
+  const directory = path.join(resourceDir, 'Arknights-Tile-Pos')
+  let overview
+  try { overview = JSON.parse(await readFile(path.join(directory, 'overview.json'), 'utf8')) } catch { return null }
+  const entries = Array.isArray(overview) ? overview : Object.values(overview ?? {})
+  const index = new Map()
+  for (const entry of entries) {
+    const name = typeof entry?.name === 'string' ? entry.name.trim() : ''
+    const filename = typeof entry?.filename === 'string' ? entry.filename.trim() : ''
+    if (!name || !filename) continue
+    if (!index.has(name)) index.set(name, filename)
+    const normalized = stageNameKey(name)
+    if (normalized && !index.has(normalized)) index.set(normalized, filename)
+  }
+  if (!index.size) return null
+  const cache = new Map()
+  return async stageName => {
+    if (cache.has(stageName)) return cache.get(stageName)
+    let map = null
+    const filename = index.get(stageName) ?? index.get(stageNameKey(stageName))
+    if (filename) {
+      try { map = JSON.parse(await readFile(path.join(directory, filename), 'utf8')) } catch { map = null }
+    }
+    cache.set(stageName, map)
+    return map
+  }
+}
+
+async function writeWildcardTactic(context) {
+  const { strategy, tactic, label, registry, resolved, base, resourceDir, files, supported, unsupported } = context
+  const request = `${label}：${tactic.name}（全部关卡）`
+  const stages = await listAutopilotStages(base)
+  if (!stages.length) { unsupported.push({ request, reason: `${strategy.theme} 没有任何原生自动战斗关卡配置` }); return }
+  const tiles = await loadTileIndex(resourceDir)
+  if (!tiles) { unsupported.push({ request, reason: '缺少 Arknights-Tile-Pos 地图数据，无法为全部关卡自动选点' }); return }
+  const position = registry.operators?.get(tactic.name)?.position
+  const buildableType = position === 'RANGED' ? 2 : position === 'MELEE' ? 1 : 0
+  const atEnd = tactic.kind === 'guard_blue'
+  if (tactic.location || tactic.direction) supported.push(`${label}：未指定关卡，已忽略手动坐标与朝向，改为按地图自动选点`)
+  const planned = []
+  const skipped = []
+  for (const stage of stages) {
+    const map = await tiles(stage.stageName)
+    const route = map ? shortestRoute(map) : null
+    const placement = route ? placementFor(route, map, atEnd, buildableType) : null
+    const direction = placement ? AUTOPILOT_DIRECTIONS.get(directionBetween(placement.location, placement.facing)) : null
+    if (!placement || !direction) { skipped.push(stage.stageName); continue }
+    const plan = Array.isArray(stage.json.deploy_plan) ? stage.json.deploy_plan : (stage.json.deploy_plan = [])
+    const [x, y] = placement.location
+    const duplicated = plan.some(entry => Array.isArray(entry?.location) && entry.location[0] === x && entry.location[1] === y && Array.isArray(entry.groups) && entry.groups.includes(resolved.groupName))
+    if (!duplicated) {
+      plan.push({ groups: [resolved.groupName], location: [x, y], direction })
+      files.push({ target: stage.target, content: stage.json })
+    }
+    planned.push(`${stage.stageName} [${x},${y}] ${direction}`)
+  }
+  if (planned.length) supported.push(`${label}：${tactic.name}（全部 ${planned.length} 个原生关卡按地图自动选点）`)
+  if (skipped.length) {
+    const names = skipped.slice(0, 6).join('、')
+    unsupported.push({ request: `${label}：${tactic.name}（其余关卡）`, reason: `${skipped.length} 个关卡缺少地图数据或可部署落点：${names}${skipped.length > 6 ? ' 等' : ''}` })
+  }
+}
+
+function ensureOperatorGroup(registry, name, options) {
+  const existing = findOperators(registry.groups, name)
+  if (existing.length) {
+    const group = registry.groups.find(item => Array.isArray(item?.opers) && item.opers.some(operator => operator?.name === name))
+    for (const operator of existing) {
+      if (options.priority !== undefined && operator.recruit_priority !== options.priority) { operator.recruit_priority = options.priority; registry.dirty = true }
+      if (options.promotePriority !== undefined && operator.promote_priority !== options.promotePriority) { operator.promote_priority = options.promotePriority; registry.dirty = true }
+      if (options.skill !== undefined && operator.skill !== options.skill) { operator.skill = options.skill; registry.dirty = true }
+    }
+    return { groupName: group?.name ?? name, created: false }
+  }
+  if (!registry.operators?.has(name)) return null
+  const groupName = uniqueGroupName(registry.groups, name)
+  registry.groups.unshift({
+    name: groupName,
+    opers: [{
+      name,
+      skill: options.skill ?? 1,
+      is_key: false,
+      is_start: false,
+      recruit_priority: options.priority ?? 2000,
+      promote_priority: options.promotePriority ?? 2000,
+    }],
+  })
+  registry.dirty = true
+  return { groupName, created: true }
+}
+
+function uniqueGroupName(groups, name) {
+  const used = new Set(groups.map(group => group?.name).filter(Boolean))
+  if (!used.has(name)) return name
+  for (let index = 2; index < 100; index += 1) {
+    const candidate = `${name}（优先${index}）`
+    if (!used.has(candidate)) return candidate
+  }
+  return `${name}（备注）`
+}
+
+function missingOperatorReason(registry) {
+  return registry?.operators ? 'MAA 干员数据中没有该干员' : '缺少 MAA 的 battle_data.json，无法确认干员真实存在'
+}
+
+function stageNameKey(value) {
+  return String(value ?? '').replace(/^[\u201c\u201d"「『]+|[\u201c\u201d"」』]+$/gu, '').trim()
 }
 
 async function selectEncounterStrategy(base, mode) {
@@ -365,16 +562,25 @@ function shortestRoute(map) {
   const ends = []
   for (let y = 0; y < map.tiles.length; y += 1) for (let x = 0; x < map.tiles[y].length; x += 1) {
     const tile = map.tiles[y][x]
+    if (tile?.tileKey === 'tile_forbidden') continue
     if (tile?.isStart) starts.push([x, y])
     if (tile?.isEnd) ends.push([x, y])
   }
+  if (!starts.length || !ends.length) return null
   let best = null
+  const usable = candidate => candidate.some(([x, y]) => (Number(map.tiles[y]?.[x]?.buildableType) || 0) > 0)
+  const better = (candidate, current) => {
+    const candidateUsable = usable(candidate) ? 1 : 0
+    const currentUsable = usable(current) ? 1 : 0
+    if (candidateUsable !== currentUsable) return candidateUsable > currentUsable
+    return candidate.length < current.length
+  }
   for (const start of starts) {
     const queue = [[start, [start]]]
     const seen = new Set([start.join(',')])
     while (queue.length) {
       const [current, route] = queue.shift()
-      if (ends.some(end => equalPoint(end, current))) { if (!best || route.length < best.length) best = route; break }
+      if (ends.some(end => equalPoint(end, current))) { if (!best || better(route, best)) best = route; break }
       for (const next of neighbors(current)) {
         const [x, y] = next
         const tile = map.tiles[y]?.[x]
@@ -388,18 +594,40 @@ function shortestRoute(map) {
   return best
 }
 
-function tacticalPlacement(route, map, atEnd) {
+function tacticalPlacement(route, map, atEnd, buildableType = 1) {
   const indexes = atEnd
     ? Array.from({ length: route.length }, (_, index) => route.length - 1 - index)
     : Array.from({ length: route.length }, (_, index) => index)
   const index = indexes.find(value => {
     const [x, y] = route[value]
-    return map.tiles[y]?.[x]?.buildableType === 1
+    return map.tiles[y]?.[x]?.buildableType === buildableType
   })
   if (!Number.isInteger(index)) return null
-  const facingIndex = index - 1
+  const facingIndex = index > 0 ? index - 1 : index + 1
   if (facingIndex < 0 || !route[facingIndex]) return null
   return { location: route[index], facing: route[facingIndex] }
+}
+
+function placementFor(route, map, atEnd, buildableType) {
+  if (buildableType === 1) return tacticalPlacement(route, map, atEnd, 1)
+  const anchor = atEnd ? route[route.length - 1] : route[0]
+  if (!anchor || !Array.isArray(map.tiles)) return null
+  let best = null
+  for (let y = 0; y < map.tiles.length; y += 1) {
+    const row = map.tiles[y]
+    if (!Array.isArray(row)) continue
+    for (let x = 0; x < row.length; x += 1) {
+      const type = Number(row[x]?.buildableType)
+      const usable = buildableType === 0 ? (type === 1 || type === 2) : type === buildableType
+      if (!usable) continue
+      const distance = Math.abs(x - anchor[0]) + Math.abs(y - anchor[1])
+      if (!best || distance < best.distance) best = { location: [x, y], distance }
+    }
+  }
+  if (!best) return null
+  const start = route[0] ?? anchor
+  const facing = equalPoint(best.location, start) ? (route[1] ?? start) : start
+  return { location: best.location, facing }
 }
 
 function isPassable(tile) {

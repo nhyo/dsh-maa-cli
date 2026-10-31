@@ -80,6 +80,81 @@ test('routes only unresolved language to the model preparation flow', async t =>
 
   assert.equal(parsed.needsModel, true)
   assert.deepEqual(parsed.unresolved, ['根据敌人血量随机应变'])
-  assert.match(noteModelPrompt(parsed), /只处理本地规则无法确定的部分/u)
-  assert.match(noteModelPrompt(parsed), /maa_prepare_strategy/u)
+  assert.match(noteModelPrompt(parsed), /纠正错别字/u)
+  assert.match(noteModelPrompt(parsed), /maa_prepare_note/u)
+})
+
+test('parses roguelike autopilot tactics with stage, coordinates and facing', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-note-rogue-tactic-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const parsed = await parseStrategyNote('优先抓结城理，并在暗箭难防让结城理堵门 [3,1] 朝下', pendingRogue(), {
+    env: { ...process.env, DSH_MAA_CLI_STATE_DIR: root },
+  })
+
+  assert.equal(parsed.needsModel, false)
+  assert.deepEqual(parsed.input.recruitment.prioritize, [{ name: '结城理' }])
+  assert.deepEqual(parsed.input.tactics, [{ kind: 'block_entrance', name: '结城理', stageName: '暗箭难防', location: [3, 1], direction: '下' }])
+})
+
+test('keeps a roguelike tactic without a stage explicit instead of dropping it', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-note-rogue-nostage-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const parsed = await parseStrategyNote('优先招募结城理，并用他堵门', pendingRogue(), {
+    env: { ...process.env, DSH_MAA_CLI_STATE_DIR: root },
+  })
+
+  assert.equal(parsed.needsModel, false)
+  assert.deepEqual(parsed.input.tactics, [{ kind: 'block_entrance', name: '结城理' }])
+  assert.equal(parsed.recognized.some(item => item.includes('堵门')), true)
+})
+
+test('parses a ticket-qualified note with a trailing placement word', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-note-rogue-ticket-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const parsed = await parseStrategyNote('有特种券优先抓结城理，结城理堵门放置', pendingRogue(), {
+    env: { ...process.env, DSH_MAA_CLI_STATE_DIR: root },
+  })
+
+  assert.equal(parsed.needsModel, false)
+  assert.deepEqual(parsed.input.recruitment.prioritize, [{ name: '结城理' }])
+  assert.deepEqual(parsed.input.tactics, [{ kind: 'block_entrance', name: '结城理' }])
+})
+
+test('resolves 「用来堵门」 to the operator recruited earlier instead of 「来」', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-note-rogue-filler-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const parsed = await parseStrategyNote('有特种券则优先招募结城理，用来堵门', pendingRogue(), {
+    env: { ...process.env, DSH_MAA_CLI_STATE_DIR: root },
+  })
+
+  assert.equal(parsed.needsModel, false)
+  assert.deepEqual(parsed.input.recruitment.prioritize, [{ name: '结城理' }])
+  assert.deepEqual(parsed.input.tactics, [{ kind: 'block_entrance', name: '结城理' }])
+  assert.deepEqual(parsed.unresolved, [])
+})
+
+test('sends a filler-only tactic back to the model instead of inventing an operator', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-note-rogue-filler-only-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const parsed = await parseStrategyNote('用来堵门', pendingRogue(), {
+    env: { ...process.env, DSH_MAA_CLI_STATE_DIR: root },
+  })
+
+  assert.equal(parsed.needsModel, true)
+  assert.deepEqual(parsed.input.tactics ?? [], [])
+})
+
+test('carries the pending confirmation code into the model prompt', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-note-model-code-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const pending = { confirmationCode: 'MAA-ABCDEF', document: { tasks: [{ type: 'Roguelike', params: { theme: 'BlackFlow', mode: 0 } }] } }
+  const parsed = await parseStrategyNote('根据敌人血量随机应变', pending, {
+    env: { ...process.env, DSH_MAA_CLI_STATE_DIR: root },
+  })
+
+  assert.equal(parsed.needsModel, true)
+  const prompt = noteModelPrompt(parsed)
+  assert.match(prompt, /确认码：MAA-ABCDEF/u)
+  assert.match(prompt, /confirmationCode/u)
+  assert.match(prompt, /theme/u)
 })

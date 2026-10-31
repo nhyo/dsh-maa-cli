@@ -67,6 +67,40 @@ test('client submission omits empty optional values and normalizes invalid selec
   assert.equal('core_char' in params, false)
 })
 
+test('client submission keeps URL-encoded roguelike values when confirming', () => {
+  const confirmLine = clientConfirmLine()
+  const rogueDocument = buildTaskDocument([{
+    type: 'Roguelike', theme: 'Sarkaz', startsCount: 3, squad: '蓝图测绘分队',
+  }])
+  const rogue = taskPanelFromDocument(rogueDocument)
+  const line = confirmLine('MAA-1A2B3C', rogue.values, rogue.fields)
+  assert.match(line, /(?:^| )squad=%E8%93%9D/u)
+  const submission = parseLocalMaaCommand(line.replace(/^\/maa\s+/u, ''))
+  const params = applyTaskPanelOverrides(rogueDocument, submission.overrides).document.tasks[0].params
+  assert.equal(params.squad, '蓝图测绘分队')
+  assert.equal(params.theme, 'Sarkaz')
+})
+
+test('decodes URL-encoded roguelike override values before validating them', () => {
+  const document = documentOf([{ type: 'Roguelike', theme: 'Sarkaz', startsCount: 1 }])
+  const outcome = applyRoguelikeOverrides(document, {
+    theme: 'Sarkaz',
+    startsCount: '2',
+    squad: encodeURIComponent('蓝图测绘分队'),
+    roles: encodeURIComponent('稳扎稳打'),
+    coreChar: encodeURIComponent('维什戴尔'),
+  })
+  const params = outcome.document.tasks[0].params
+  assert.equal(params.starts_count, 2)
+  assert.equal(params.squad, '蓝图测绘分队')
+  assert.equal(params.roles, '稳扎稳打')
+  assert.equal(params.core_char, '维什戴尔')
+  assert.throws(
+    () => applyRoguelikeOverrides(document, { squad: encodeURIComponent('蓝图测绘分队'.repeat(6)) }),
+    /分队长度必须在 1–32 之间/u,
+  )
+})
+
 test('parses note preview and strategy memory management commands', () => {
   assert.deepEqual(parseLocalMaaCommand('note-preview MAA-1A2B3C stage=1-7 note=%E5%A0%B5%E9%97%A8'), {
     kind: 'note-preview', confirmationCode: 'MAA-1A2B3C', note: '%E5%A0%B5%E9%97%A8', overrides: { stage: '1-7' },
@@ -479,4 +513,24 @@ test('rejects invalid cross-field MAA panel combinations', () => {
   assert.throws(() => applyTaskPanelOverrides(fight, { shell: 'whoami' }), /不支持参数/)
   assert.throws(() => applyTaskPanelOverrides(fight, { _unset: 'times' }), /作战次数是必填参数/u)
   assert.throws(() => applyTaskPanelOverrides(fight, { _unset: 'shell' }), /不支持清除参数/u)
+})
+
+test('offers MAX difficulty and resolves it to the theme maximum', () => {
+  const document = buildTaskDocument([{ type: 'Roguelike', theme: 'Sarkaz', startsCount: 3 }])
+  const panel = taskPanelFromDocument(document)
+  const difficulty = panel.fields.find(field => field.key === 'difficulty')
+
+  // A fresh panel defaults to MAX so MAA runs the hardest unlocked difficulty.
+  assert.equal(panel.values.difficulty, 'MAX')
+  assert.ok(difficulty.options.some(option => option.value === 'MAX' && option.when.in.includes('Sarkaz')))
+  assert.ok(difficulty.options.some(option => option.value === 3 && option.when.in.includes('Sarkaz')))
+
+  const resolved = applyTaskPanelOverrides(document, { difficulty: 'MAX' })
+  assert.equal(resolved.document.tasks[0].params.difficulty, 15)
+  assert.match(resolved.applied.join('、'), /难度=15/u)
+
+  // An explicit number still wins and round-trips through the panel.
+  const numeric = applyRoguelikeOverrides(document, { difficulty: '3' }).document
+  assert.equal(numeric.tasks[0].params.difficulty, 3)
+  assert.equal(roguelikePanelFromDocument(numeric).difficulty, 3)
 })

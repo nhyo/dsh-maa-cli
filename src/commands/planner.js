@@ -87,7 +87,9 @@ export function applyRoguelikeOverrides(document, overrides, capabilities = fall
   if (!isPlainObject(document) || !Array.isArray(document.tasks)) {
     throw new TypeError('MAA task document must contain a tasks array')
   }
-  const sourceEntries = isPlainObject(overrides) ? Object.entries(overrides) : []
+  const sourceEntries = isPlainObject(overrides)
+    ? Object.entries(overrides).map(([key, value]) => [key, decodePanelValue(value)])
+    : []
   const entries = sourceEntries.slice().sort(([left], [right]) => Number(right === 'theme') - Number(left === 'theme'))
   if (entries.length === 0) return { document, applied: [] }
   const existingTask = document.tasks.find(task => isPlainObject(task) && task.type === 'Roguelike' && isPlainObject(task.params))
@@ -164,6 +166,16 @@ export function roguelikePanelFromDocument(document) {
   return panel
 }
 
+// The confirmation panel URL-encodes every field value so spaces and punctuation
+// survive the whitespace-separated `key=value` tokens it sends back
+// (src/client/index.js confirmLine). Roguelike overrides skip the generic panel
+// coercion in task-panel.js that decodes them, so a Chinese squad such as
+// 蓝图测绘分队 arrives as 54 ASCII characters and trips the 1–32 length check.
+function decodePanelValue(raw) {
+  if (typeof raw !== 'string' || !/%[0-9A-Fa-f]{2}/u.test(raw)) return raw
+  try { return decodeURIComponent(raw) } catch { return raw }
+}
+
 function coerceOverride(spec, raw, key, capabilities, pendingTheme) {
   const value = raw === undefined || raw === null ? '' : String(raw).trim()
   if (spec.kind === 'theme') {
@@ -178,6 +190,14 @@ function coerceOverride(spec, raw, key, capabilities, pendingTheme) {
       throw new Error(`肉鸽模式无效：${value || '(空)'}；主题 ${theme?.id ?? '未知'} 可选 ${allowed.join(' / ')}`)
     }
     return Number(value)
+  }
+  // The panel offers MAX for difficulty: resolve it against the theme the plan
+  // is actually about to run, so a human never has to remember the numbers.
+  if (spec.kind === 'integer' && key === 'difficulty' && value.toUpperCase() === 'MAX') {
+    const theme = findRoguelikeTheme(capabilities, pendingTheme) ?? capabilities.roguelike.themes[0]
+    const values = (theme?.difficulties ?? []).filter(item => Number.isFinite(item))
+    if (values.length === 0) throw new Error(`主题 ${theme?.id ?? '未知'} 没有可用难度`)
+    return Math.max(...values)
   }
   if (spec.kind === 'integer') {
     if (!/^\d+$/.test(value)) throw new Error(`${ROGUELIKE_OVERRIDE_LABELS[key]}必须是整数`)

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { actionArguments, DEFAULT_MAA_CLI_PATH, MAA_CLI_PATH, queryArguments, resolveMaaCliPath, runMaa } from '../src/runtime/runner.js'
+import { actionArguments, DEFAULT_MAA_CLI_PATH, MAA_CLI_PATH, queryArguments, resolveMaaCliPath, runMaa, startMaa } from '../src/runtime/runner.js'
 import { runtimeLayout } from '../src/runtime/runtime.js'
 import { apply, classifyMaaExecution } from '../src/index.js'
 import { buildTaskDocument, generatedTaskPath, summarizePlan, writeGeneratedTask } from '../src/commands/planner.js'
@@ -31,18 +31,21 @@ test('registers a zero-token command plus prepare-only model tools', () => {
     commands: { register: command => commands.push(command) },
   })
   assert.deepEqual(commands.map(command => command.name), ['maa'])
-  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_operator_box', 'maa_training_advice', 'maa_prepare_plan', 'maa_prepare_strategy', 'maa_doctor', 'maa_runtime'])
+  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_runtime_instruction', 'maa_operator_box', 'maa_training_advice', 'maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note', 'maa_doctor', 'maa_runtime'])
   assert.deepEqual(tools[0].parameters.required, ['operation'])
-  assert.deepEqual(tools[2].parameters.required, ['useCached'])
-  assert.match(tools[2].description, /MANDATORY for every operator training-advice request/)
-  assert.match(tools[2].description, /restarting DSH Desktop/)
-  assert.match(tools[2].description, /do not perform unnecessary recursive searches or repeated scans/)
-  assert.deepEqual(tools[3].parameters.required, ['purpose', 'steps'])
-  assert.deepEqual(tools[4].parameters.required, ['purpose', 'kind', 'task'])
-  assert.match(tools[4].description, /real Integrated Strategy resource changes or a real Copilot job/)
-  assert.deepEqual(tools[5].parameters.properties, {})
-  assert.match(tools[3].description, /does not create another model call/)
-  assert.match(tools[1].description, /Always call this/)
+  assert.deepEqual(tools[1].parameters.required, ['action'])
+  assert.deepEqual(tools[3].parameters.required, ['useCached'])
+  assert.match(tools[3].description, /MANDATORY for every operator training-advice request/)
+  assert.match(tools[3].description, /restarting DSH Desktop/)
+  assert.match(tools[3].description, /do not perform unnecessary recursive searches or repeated scans/)
+  assert.deepEqual(tools[4].parameters.required, ['purpose', 'steps'])
+  assert.deepEqual(tools[5].parameters.required, ['purpose', 'kind', 'task'])
+  assert.match(tools[5].description, /real Integrated Strategy resource changes or a real Copilot job/)
+  assert.deepEqual(tools[6].parameters.required, ['note'])
+  assert.match(tools[6].description, /抓\/拿\/捞\/取\/选\/选择\/招募 all mean recruit/)
+  assert.deepEqual(tools[7].parameters.properties, {})
+  assert.match(tools[4].description, /does not create another model call/)
+  assert.match(tools[2].description, /Always call this/)
 })
 
 test('registered slash command prepares and exposes the fight settings panel without executing MAA', async () => {
@@ -113,6 +116,12 @@ test('parses common slash commands without a model', () => {
   assert.equal(parseLocalMaaCommand('基建换班').steps[0].drones, '_NotUse')
   assert.equal(parseLocalMaaCommand('confirm maa-a1b2c3').confirmationCode, 'MAA-A1B2C3')
   assert.equal(parseLocalMaaCommand('停止任务').kind, 'stop')
+  assert.deepEqual(parseLocalMaaCommand('这把肉鸽打完就停').request, { action: 'stop_after_current' })
+  assert.deepEqual(parseLocalMaaCommand('第五层 Boss 前停止').request, { action: 'stop_before_boss', floor: 5 })
+  assert.deepEqual(parseLocalMaaCommand('再打两局就停').request, { action: 'stop_after_runs', count: 2 })
+  assert.deepEqual(parseLocalMaaCommand('取消刚才的停止要求').request, { action: 'cancel_stop' })
+  assert.deepEqual(parseLocalMaaCommand('现在打到哪里了').request, { action: 'status' })
+  assert.deepEqual(parseLocalMaaCommand('接下来优先招结城理').request, { action: 'prefer_recruit', operator: '结城理' })
   assert.equal(parseLocalMaaCommand('setup').kind, 'setup')
   assert.deepEqual(parseLocalMaaCommand('扫描干员Box').steps.map(step => step.type), ['OperBox'])
   assert.deepEqual(parseLocalMaaCommand('更新数据').steps.map(step => step.type), ['OperBox', 'Depot'])
@@ -296,4 +305,35 @@ test('resolves maa-cli from the plugin runtime when it exists', async () => {
   await mkdir(layout.bin, { recursive: true })
   await writeFile(layout.executable, '')
   assert.equal(resolveMaaCliPath(env), layout.executable)
+})
+
+test('starts a long maa-cli task in the background and settles it on exit', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-detached-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cliPath = path.join(directory, 'fake-maa.cmd')
+  await writeFile(cliPath, '@echo off\r\necho [Fight] Completed\r\nexit /b 0\r\n')
+
+  const handle = startMaa(['run', 'Task', '--batch'], { cliPath, hardTimeoutMs: 20_000 })
+  assert.equal(typeof handle.pid, 'number')
+  const started = Date.now()
+  const result = await handle.done
+  // The caller regains control immediately; the promise settles when the child
+  // exits, not when it is started.
+  assert.ok(Date.now() - started < 20_000)
+  assert.equal(result.exitCode, 0)
+  assert.match(result.stdout, /\[Fight\] Completed/u)
+  assert.equal(result.terminationSignal, '')
+})
+
+test('a detached maa-cli task can be killed through its abort signal', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-detached-kill-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cliPath = path.join(directory, 'slow-maa.cmd')
+  // A batch file that keeps the process tree alive long enough to be killed.
+  await writeFile(cliPath, '@echo off\r\nping -n 30 127.0.0.1 > nul\r\nexit /b 0\r\n')
+
+  const controller = new AbortController()
+  const handle = startMaa(['run', 'Task', '--batch'], { cliPath, signal: controller.signal, hardTimeoutMs: 60_000 })
+  controller.abort()
+  await assert.rejects(handle.done, error => error?.name === 'AbortError')
 })
