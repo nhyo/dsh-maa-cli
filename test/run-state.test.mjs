@@ -138,7 +138,7 @@ test('the composer dock reads runs on demand instead of polling the command plan
   // The dock needs the command runner injected, otherwise the on-demand record
   // read never has a transport and the panel falls back to a stale bar.
   assert.match(clientSource, /id: 'maa-confirm'[\s\S]*?execute: commandRunner\(ctx, sessionId\)/u)
-  assert.match(clientSource, /\[\s*'maa_prepare_plan',\s*'maa_prepare_strategy',\s*'maa_prepare_note'\s*\]/u)
+  assert.match(clientSource, /\[\s*'maa_prepare_plan',\s*'maa_prepare_strategy',\s*'maa_prepare_note',\s*'maa_goal_manager',\s*'maa_workflow_manager'\s*\]/u)
   // DSH echoes every `/maa ...` command into the conversation, so the dock must
   // never poll: each command runs only when the user asks for it.
   assert.match(clientSource, /function readStoredRun\(\)/u)
@@ -146,7 +146,10 @@ test('the composer dock reads runs on demand instead of polling the command plan
   assert.match(clientSource, /function useRunClock\(active\)/u)
   assert.match(clientSource, /dsh\.maa\.run/u)
   assert.equal((clientSource.match(/execute\('\/maa status'\)/g) || []).length, 1)
-  assert.equal((clientSource.match(/execute\('\/maa stop'\)/g) || []).length, 2)
+  assert.equal((clientSource.match(/execute\('\/maa stop'\)/g) || []).length, 1)
+  assert.match(clientSource, /placeholder: '输入运行时要求/u)
+  assert.match(clientSource, /runtimeCommand\(command\)/u)
+  assert.doesNotMatch(clientSource, /'本局结束后停'|'取消停止条件'|'查看实时进度'/u)
   assert.match(clientSource, /onStart: function \(\) \{\s*rememberRun\(plan\.summary, plan\.code\)/u)
   assert.doesNotMatch(clientSource, /useRunSnapshot/u)
 })

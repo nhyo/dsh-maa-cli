@@ -494,6 +494,7 @@ window.__ModuleLoader__.load({
               code: code, summary: summary || payload.summary || 'MAA 操作计划', execute: props.execute,
               theme: typeof payload.theme === 'string' ? payload.theme : '',
               taskPanel: payload.panel, capabilitySignature: payload.capabilitySignature || '', params: null,
+              goal: payload.goal || null, workflow: payload.workflow || null,
             })
           }, function () {})
         }
@@ -554,7 +555,7 @@ window.__ModuleLoader__.load({
       try {
         const parsed = JSON.parse(globalThis.localStorage.getItem(RUN_STORAGE_KEY) || 'null')
         if (!parsed || typeof parsed.startedAt !== 'number') return null
-        if (Date.now() - parsed.startedAt > 40 * 60_000) return null
+        if (Date.now() - parsed.startedAt > 7 * 60 * 60_000) return null
         return parsed
       } catch (_) { return null }
     }
@@ -606,6 +607,12 @@ window.__ModuleLoader__.load({
         ? run.instructions.find(function (item) { return ['received', 'applied', 'triggered'].includes(item.status) })
         : null
       if (instruction) parts.push('运行时指令[' + instruction.status + ']：' + (instruction.message || instruction.type))
+      const recovery = run && run.recovery ? run.recovery : null
+      if (recovery && !['idle', 'not_needed'].includes(recovery.status)) {
+        parts.push('恢复状态：' + recovery.status + '（' + Number(recovery.attempt || 0) + '/' + Number(recovery.maxRetries || 0) + '）')
+        if (recovery.diagnosis && recovery.diagnosis.reason) parts.push((recovery.diagnosis.confidence === 'confirmed' ? '已确认：' : '推测：') + recovery.diagnosis.reason)
+        if (recovery.needsUser) parts.push('需要人工处理')
+      }
       return parts.join(' · ')
     }
 
@@ -628,18 +635,15 @@ window.__ModuleLoader__.load({
       const hiddenPair = React.useState(false)
       const recordHidden = hiddenPair[0]
       const setRecordHidden = hiddenPair[1]
-      const stopPair = React.useState(false)
-      const stopping = stopPair[0]
-      const setStopping = stopPair[1]
-      const stopErrorPair = React.useState('')
-      const stopError = stopErrorPair[0]
-      const setStopError = stopErrorPair[1]
       const runtimePair = React.useState('')
       const runtimeMessage = runtimePair[0]
       const setRuntimeMessage = runtimePair[1]
       const runtimeBusyPair = React.useState(false)
       const runtimeBusy = runtimeBusyPair[0]
       const setRuntimeBusy = runtimeBusyPair[1]
+      const runtimeInputPair = React.useState('')
+      const runtimeInput = runtimeInputPair[0]
+      const setRuntimeInput = runtimeInputPair[1]
 
       const runningRecord = snapshot && snapshot.running ? snapshot.running : null
       const interruptedRecord = snapshot && snapshot.interrupted ? snapshot.interrupted : null
@@ -681,23 +685,6 @@ window.__ModuleLoader__.load({
           return data
         })
       }
-      const stopRunning = function () {
-        if (typeof execute !== 'function' || stopping) return
-        setStopping(true)
-        setStopError('')
-        Promise.resolve(execute('/maa stop')).then(function (outcome) {
-          setStopping(false)
-          if (!outcome || outcome.kind !== 'success') {
-            setStopError(outcome && outcome.text ? outcome.text : '停止任务失败。')
-            return
-          }
-          forgetRun()
-          loadRecord()
-        }, function (reason) {
-          setStopping(false)
-          setStopError(reason instanceof Error ? reason.message : String(reason))
-        })
-      }
       const runtimeCommand = function (command) {
         if (typeof execute !== 'function' || runtimeBusy) return
         setRuntimeBusy(true)
@@ -710,6 +697,13 @@ window.__ModuleLoader__.load({
           setRuntimeBusy(false)
           setRuntimeMessage(reason instanceof Error ? reason.message : String(reason))
         })
+      }
+      const submitRuntimeInput = function (event) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        const command = runtimeInput.trim()
+        if (!command || runtimeBusy) return
+        setRuntimeInput('')
+        runtimeCommand(command)
       }
       // A fresh plan always opens expanded; collapsing is a per-plan choice.
       React.useEffect(function () { setCollapsed(false) }, [code])
@@ -731,7 +725,13 @@ window.__ModuleLoader__.load({
               + '耗时 ' + record.duration
               + (typeof record.exitCode === 'number' ? ' · exit ' + record.exitCode : '')
               + (record.status === 'stopped' ? ' · 已停止' : '')),
-          h('div', { className: 'maa-run-result' }, record.summary || 'MAA 没有返回可读的执行摘要，可以查看日志排查。'))
+          h('div', { className: 'maa-run-result' }, record.summary || 'MAA 没有返回可读的执行摘要，可以查看日志排查。'),
+          record.recovery && record.recovery.diagnosis
+            ? h('div', { className: 'maa-run-result' },
+                (record.recovery.diagnosis.confidence === 'confirmed' ? '已确认故障：' : '推测故障：')
+                  + record.recovery.diagnosis.reason
+                  + (record.recovery.needsUser ? '（需要人工处理）' : ''))
+            : null)
       }
       if (liveRun && !recordHidden) {
         return h('div', { className: 'maa-confirm-dock maa-run-dock', role: 'status' },
@@ -750,15 +750,18 @@ window.__ModuleLoader__.load({
               + (liveRun.confirmationCode ? ' · ' + liveRun.confirmationCode : '')),
           runningRecord ? h('div', { className: 'maa-run-result' }, formatRuntimeProgress(runningRecord)) : null,
           h('div', { className: 'maa-run-blocked' }, '执行完成前不接受新的计划或任务：这会抢占模拟器并覆盖临时资源，所以新计划会被明确拒绝。'),
-          h('div', { className: 'maa-plan-actions' },
-            h('button', { className: 'maa-stop-button', type: 'button', disabled: stopping, onClick: stopRunning },
-              stopping ? '正在停止…' : '停止任务'),
-            h('button', { className: 'maa-secondary-button', type: 'button', disabled: runtimeBusy, onClick: function () { runtimeCommand('这把肉鸽打完就停') } }, '本局结束后停'),
-            h('button', { className: 'maa-secondary-button', type: 'button', disabled: runtimeBusy, onClick: function () { runtimeCommand('取消刚才的停止要求') } }, '取消停止条件'),
-            h('button', { className: 'maa-secondary-button', type: 'button', disabled: loadingRecord, onClick: loadRecord },
-              loadingRecord ? '正在读取…' : '查看实时进度')),
-          runtimeMessage ? h('div', { className: 'maa-run-result' }, runtimeMessage) : null,
-          stopError ? h('div', { className: 'maa-plan-error' }, stopError) : null)
+          h('form', { className: 'maa-plan-actions', onSubmit: submitRuntimeInput },
+            h('input', {
+              className: 'maa-note-input', type: 'text', maxLength: 120,
+              placeholder: '输入运行时要求，如“再打两局就停”或“这次 Boss 关前停止”',
+              value: runtimeInput, disabled: runtimeBusy,
+              onChange: function (event) { setRuntimeInput(event.target.value) },
+            }),
+            h('button', {
+              className: 'maa-secondary-button', type: 'submit',
+              disabled: runtimeBusy || runtimeInput.trim() === '',
+            }, runtimeBusy ? '正在分析…' : '发送')),
+          runtimeMessage ? h('div', { className: 'maa-run-result' }, runtimeMessage) : null)
       }
       if ((plan === null || plan === undefined || Boolean(plan.result)) && finishedRun && !recordHidden) {
         return finishedView(finishedRun)
@@ -833,6 +836,14 @@ window.__ModuleLoader__.load({
             h('div', { className: 'maa-confirm-dock-title' }, 'MAA 计划等待你的确认'),
             h('div', { className: 'maa-confirm-dock-summary' }, dockSummary))),
         actions,
+        plan.goal
+          ? h('div', { className: 'maa-run-result' },
+              '目标：' + (plan.goal.title || plan.goal.id || '未命名')
+                + ' · 状态：' + (plan.goal.status || '待确认')
+                + (plan.workflow && Array.isArray(plan.workflow.steps) ? ' · ' + plan.workflow.steps.length + ' 个步骤' : '')
+                + (Array.isArray(plan.goal.facts) && plan.goal.facts.length ? '\n依据：' + plan.goal.facts.join('；') : '')
+                + (plan.goal.completion ? '\n完成条件：' + plan.goal.completion : ''))
+          : null,
         plan.taskPanel && effective
           ? h(TaskSettingsPanel, {
               panel: plan.taskPanel,
@@ -979,6 +990,7 @@ window.__ModuleLoader__.load({
           }
           store.set(Object.assign(common, {
             taskPanel: panel, capabilitySignature: payload.capabilitySignature || '',
+            goal: payload.goal || null, workflow: payload.workflow || null,
           }))
         }, function () {})
       })
@@ -990,7 +1002,7 @@ window.__ModuleLoader__.load({
       // Every planning tool shares the same confirmation dock: `maa_prepare_plan`
       // builds a task-panel plan, while `maa_prepare_strategy` / `maa_prepare_note`
       // prepare plans from notes. All three end in a MAA-XXXXXX confirmation code.
-      ;['maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note'].forEach(function (toolKey) {
+      ;['maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note', 'maa_goal_manager', 'maa_workflow_manager'].forEach(function (toolKey) {
         ctx.slots.inject('tool.call.toolview', function () {
           return ctx.slots.register({
             name: 'tool.call.toolview',

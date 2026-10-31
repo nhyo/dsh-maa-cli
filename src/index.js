@@ -1,10 +1,18 @@
 import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa, startMaa } from './runtime/runner.js'
 import path from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './commands/planner.js'
 import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, updatePendingPlan } from './commands/confirmation.js'
 import { parseLocalMaaCommand } from './commands/local-command.js'
-import { activeRun, beginRun, describeRunState, finishRun, getRun, reapGeneratedTaskProcesses, stopRun } from './commands/run-state.js'
+import { activeRun, addRunCheckpoint, beginRun, describeRunState, finishRun, getRun, reapGeneratedTaskProcesses, stopRun, updateRunRecovery } from './commands/run-state.js'
 import { applyRuntimeInstruction, completeTriggeredInstructions, parseMaaCallbackLine, processMaaCallback, startLogTail } from './commands/runtime-instructions.js'
+import { callbackCheckpoint, decideRecovery, diagnoseExecutionFailure, isExecutionFailure, MAX_RECOVERY_RETRIES } from './agent/recovery-manager.js'
+import { createGoal, getGoal, listGoals, planGoal, updateGoal } from './agent/goal-manager.js'
+import { loadPlanningData, readPlanningData } from './agent/planning-data.js'
+import {
+  auditInterruptedWorkflows, createWorkflowExecution, deleteWorkflowPreset, getWorkflowExecution,
+  getWorkflowPreset, listWorkflowPresets, saveWorkflowPreset, updateWorkflowExecution, workflowDocument,
+} from './agent/workflow-manager.js'
 import { applyTaskPanelOverrides, taskPanelFromDocument } from './commands/task-panel.js'
 import { applyRememberedConfig, rememberPanelValues } from './commands/panel-memory.js'
 import { discoverMaaCapabilities } from './capabilities/discovery.js'
@@ -20,6 +28,7 @@ import {
   saveOperatorBox,
   stripOperBoxCallbacks,
 } from './operators/operator-box.js'
+import { formatDepotScanResult, loadItemIndex, parseCompletedDepot, queryDepot, readDepot, saveDepot, stripDepotCallbacks } from './operators/depot.js'
 import { buildTrainingAdvice, fetchCommunityRanking, formatTrainingAdvice, loadOperatorMetadata } from './operators/training-advice.js'
 import {
   compileStrategyRequest,
@@ -27,6 +36,7 @@ import {
   materializeStrategy,
   previewStrategy,
   previewStrategyDetails,
+  recoverStrategyOverlay,
 } from './strategy/compiler.js'
 import {
   applyStrategyMemory, deleteStrategyMemory, listStrategyMemory, parseMaaCompatibility,
@@ -188,6 +198,15 @@ const TRAINING_ADVICE_RESULT_SCHEMA = {
         topicClosedAt: { type: 'string' }, voteCount: { type: 'integer' }, retrievedAt: { type: 'string' },
       },
     },
+  },
+}
+
+const AGENT_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['status', 'summary', 'goalId', 'workflowId', 'confirmationCode', 'confirmationPhrase', 'expiresAt', 'data'],
+  properties: {
+    status: { type: 'string' }, summary: { type: 'string' }, goalId: { type: 'string' }, workflowId: { type: 'string' },
+    confirmationCode: { type: 'string' }, confirmationPhrase: { type: 'string' }, expiresAt: { type: 'string' }, data: { type: 'string' },
   },
 }
 
@@ -357,6 +376,12 @@ function renderNoteResult(_args, value) {
   return renderResult(_args, value)
 }
 
+function renderAgentResult(_args, value) {
+  const lines = [value.summary]
+  if (value.confirmationPhrase) lines.push('', '尚未操作游戏。请在确认面板核对目标、预算和步骤后确认，或输入：', `/maa confirm ${value.confirmationCode}`)
+  return [{ type: 'text', text: lines.join('\n') }]
+}
+
 // The 备注 field arrives URL-encoded on the local command plane so spaces
 // survive. It is compiled and previewed by DSH; raw note text is never copied
 // into a MaaCore task document.
@@ -378,6 +403,8 @@ function formatCommandResult(result) {
   const lines = [feedback.headline, `计划：${result.planSummary}`, `执行验证：${feedback.detail}`]
   if (result.operatorBox) lines.push('', formatOperatorBoxScanResult(result.operatorBox))
   if (result.operatorBoxError) lines.push('', `干员 Box 结果读取失败：${result.operatorBoxError}`)
+  if (result.depot) lines.push('', formatDepotScanResult(result.depot))
+  if (result.depotError) lines.push('', `仓库结果读取失败：${result.depotError}`)
   if (result.maintenanceWarning) lines.push('', result.maintenanceWarning)
   if (result.stdout) lines.push('', result.stdout)
   if (result.stderr) lines.push('', result.stderr)
@@ -408,7 +435,9 @@ export function classifyMaaExecution(result, strategyApplied = false) {
 
 const activeExecutions = new Map()
 const activeRuns = new Map()
+const activeWorkflows = new Map()
 let activeStrategyExecution = false
+let restartRecoveryPromise = null
 
 function agentKey(agent) {
   if (!agent || agent.id === undefined) throw new Error('当前命令没有可用的 DSH 会话。')
@@ -420,7 +449,7 @@ async function executeRuntimeInstruction(request) {
   if (!running) return { status: 'not_running', message: '当前没有正在执行的 MAA 任务。', run: null }
   const active = activeRuns.get(running.id)
   const result = await applyRuntimeInstruction(running.id, request, {
-    monitorAvailable: Boolean(active),
+    monitorAvailable: Boolean(active?.monitor),
     stop: instructionId => {
       if (!active) return
       active.triggerInstructionId = instructionId
@@ -440,10 +469,68 @@ function formatRuntimeInstructionResult(result) {
   return result.message || JSON.stringify(result)
 }
 
+async function runWithRecovery({ runArguments, runOptions, document, run, active, executionSignal }) {
+  let attempt = 0
+  while (true) {
+    active.failureCallbacks = []
+    await updateRunRecovery(run.id, { status: attempt > 0 ? 'retrying' : 'monitoring', attempt, maxRetries: MAX_RECOVERY_RETRIES, needsUser: false, nextRetryAt: null })
+    let result = null
+    let failureError = null
+    try {
+      const handle = startMaa(runArguments, { ...runOptions, hardTimeoutMs: 6 * 60 * 60_000 })
+      active.pid = handle.pid
+      result = await handle.done
+      if (!isExecutionFailure(result)) {
+        if (attempt > 0) await updateRunRecovery(run.id, { status: 'recovered', needsUser: false, historyEntry: { at: Date.now(), action: 'recovered', detail: `第 ${attempt} 次重试后任务恢复。` } })
+        else await updateRunRecovery(run.id, { status: 'not_needed' })
+        return result
+      }
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error
+      failureError = error
+    }
+
+    const diagnosis = diagnoseExecutionFailure({ result, error: failureError, callbacks: active.failureCallbacks })
+    const latest = await getRun(run.id)
+    let emulator = null
+    if (diagnosis.suggestedAction === 'probe_adb') emulator = await checkEmulator({ runMaa, signal: executionSignal }).catch(() => null)
+    const decision = decideRecovery({ diagnosis, document, attempt, checkpoints: latest?.checkpoints ?? [], emulator })
+    await updateRunRecovery(run.id, {
+      status: decision.action === 'retry' ? 'waiting_retry' : 'needs_user',
+      attempt,
+      diagnosis,
+      needsUser: decision.action !== 'retry',
+      nextRetryAt: decision.action === 'retry' ? Date.now() + decision.delayMs : null,
+      historyEntry: { at: Date.now(), action: decision.action, detail: `${diagnosis.reason} ${decision.reason}` },
+    })
+    if (decision.action !== 'retry') {
+      if (result) return result
+      throw failureError ?? new Error(diagnosis.reason)
+    }
+    await abortableDelay(decision.delayMs, executionSignal)
+    attempt += 1
+  }
+}
+
+function abortableDelay(ms, signal) {
+  if (signal?.aborted) return Promise.reject(Object.assign(new Error('recovery cancelled'), { name: 'AbortError' }))
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', abort)
+    const timer = setTimeout(() => { cleanup(); resolve() }, ms)
+    const abort = () => {
+      clearTimeout(timer)
+      cleanup()
+      reject(Object.assign(new Error('recovery cancelled'), { name: 'AbortError' }))
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
+
 // A running MAA task owns the emulator, the generated task file, and the user
 // resource overlay. Until it ends no new plan may replace them, not even from
 // another DSH session.
 async function assertNoActiveRun() {
+  if (activeWorkflows.size > 0) throw new Error('当前有目标工作流正在执行或等待步骤反馈，请先停止或处理该工作流。')
   const running = await activeRun()
   if (!running) return
   throw new Error(`MAA 任务正在执行中（${running.purpose || running.confirmationCode || running.id}，已运行 ${new Date(running.startedAt).toLocaleTimeString('zh-CN', { hour12: false })} 起）。为避免抢屏幕和覆盖临时资源，完成前不接受新的计划或任务；可以等待，或在确认面板点击「停止任务」/ 输入 /maa stop。`)
@@ -468,7 +555,7 @@ async function executeDocument(agent, signal, document, planSummary, options = {
   const executionSignal = backgroundWanted
     ? controller.signal
     : (signal ? AbortSignal.any([signal, controller.signal]) : controller.signal)
-  const active = { controller, planSummary, runId: run.id, monitor: null, triggerInstructionId: '' }
+  const active = { controller, planSummary, runId: run.id, monitor: null, triggerInstructionId: '', failureCallbacks: [], pid: null }
   activeExecutions.set(key, active)
   activeRuns.set(run.id, active)
   let strategyExecution = null
@@ -527,6 +614,7 @@ async function executeDocument(agent, signal, document, planSummary, options = {
     }
     const written = await writeGeneratedTask(executionDocument, { configDir })
     const hasOperatorBox = executionDocument.tasks.some(task => task.type === 'OperBox')
+    const hasDepot = executionDocument.tasks.some(task => task.type === 'Depot')
     const settle = async result => {
       const executionFeedback = classifyMaaExecution(result, strategyExecution !== null)
       recorded = {
@@ -534,37 +622,42 @@ async function executeDocument(agent, signal, document, planSummary, options = {
         exitCode: result.exitCode,
         summary: executionFeedback.headline,
       }
-      if (!hasOperatorBox) return { ...result, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback }
-      const cleanStderr = stripOperBoxCallbacks(result.stderr)
-      if (result.exitCode !== 0) {
-        return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback }
+      const enriched = {
+        ...result,
+        runId: run.id,
+        stderr: stripDepotCallbacks(stripOperBoxCallbacks(result.stderr)),
+        planFile: written.path, planJson: written.json, planSummary, maintenanceWarning: maintenance.warning, executionFeedback,
       }
-      try {
-        const operatorBox = parseCompletedOperatorBox(`${result.stdout}\n${result.stderr}`)
-        await saveOperatorBox(operatorBox)
-        return { ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary, operatorBox, maintenanceWarning: maintenance.warning, executionFeedback }
-      } catch (error) {
-        recorded = { status: 'failed', exitCode: result.exitCode, summary: '任务已执行，但无法解析干员 Box。' }
-        return {
-          ...result, stderr: cleanStderr, planFile: written.path, planJson: written.json, planSummary,
-          operatorBoxError: error instanceof Error ? error.message : String(error), maintenanceWarning: maintenance.warning, executionFeedback,
+      if (result.exitCode !== 0) return enriched
+      const completeLog = `${result.stdout}\n${result.stderr}`
+      if (hasOperatorBox) {
+        try {
+          enriched.operatorBox = parseCompletedOperatorBox(completeLog)
+          await saveOperatorBox(enriched.operatorBox)
+        } catch (error) {
+          enriched.operatorBoxError = error instanceof Error ? error.message : String(error)
         }
       }
+      if (hasDepot) {
+        try {
+          enriched.depot = parseCompletedDepot(completeLog)
+          await saveDepot(enriched.depot)
+        } catch (error) {
+          enriched.depotError = error instanceof Error ? error.message : String(error)
+        }
+      }
+      if (enriched.operatorBoxError || enriched.depotError) {
+        recorded = { status: 'failed', exitCode: result.exitCode, summary: '任务已执行，但结构化状态缓存不完整。' }
+      }
+      return enriched
     }
     const runOptions = {
       signal: executionSignal,
       timeoutMs: 30 * 60_000,
-      outputLimit: hasOperatorBox ? 16 * 1024 * 1024 : undefined,
-      envPatch: hasOperatorBox ? { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } : undefined,
+      outputLimit: hasOperatorBox || hasDepot ? 16 * 1024 * 1024 : undefined,
+      envPatch: hasOperatorBox || hasDepot ? { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } : undefined,
     }
     const runArguments = actionArguments('run_task', GENERATED_TASK_NAME, true, strategyExecution?.userResource === true)
-    if (!backgroundWanted) {
-      const result = await runMaa(runArguments, runOptions)
-      return await settle(result)
-    }
-    // Background mode: return as soon as MAA is running. A five-minute command
-    // timeout used to abort healthy runs, so the child is owned by this process
-    // instead of the command call; /maa stop aborts `controller` and kills it.
     const logResult = await runMaa(queryArguments('log_dir'), { signal: executionSignal, timeoutMs: 20_000 })
     const logDir = logResult.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1)
     if (logResult.exitCode === 0 && logDir) {
@@ -576,6 +669,10 @@ async function executeDocument(agent, signal, document, planSummary, options = {
         if (seen.has(signature)) return
         seen.add(signature)
         if (seen.size > 200) seen.delete(seen.values().next().value)
+        active.failureCallbacks.push(callback)
+        if (active.failureCallbacks.length > 100) active.failureCallbacks.shift()
+        const checkpoint = callbackCheckpoint(callback)
+        if (checkpoint) await addRunCheckpoint(run.id, checkpoint)
         await processMaaCallback(run.id, callback, {
           stop: instructionId => {
             active.triggerInstructionId = instructionId
@@ -584,10 +681,12 @@ async function executeDocument(agent, signal, document, planSummary, options = {
         })
       })
     }
-    const handle = startMaa(runArguments, { ...runOptions, hardTimeoutMs: 6 * 60 * 60_000 })
-    active.pid = handle.pid
+    const execution = runWithRecovery({ runArguments, runOptions, document: executionDocument, run, active, executionSignal })
+    if (!backgroundWanted) return await settle(await execution)
+    // Background mode: return as soon as the first MAA attempt is running. The
+    // recovery loop and process tree remain owned by this plugin process.
     detached = true
-    void handle.done
+    void execution
       .then(result => settle(result))
       .catch(error => {
         recorded = error?.name === 'AbortError'
@@ -598,7 +697,7 @@ async function executeDocument(agent, signal, document, planSummary, options = {
     return {
       background: true,
       runId: run.id,
-      pid: handle.pid,
+      pid: active.pid,
       planFile: written.path,
       planJson: written.json,
       planSummary,
@@ -621,6 +720,171 @@ async function executeDocument(agent, signal, document, planSummary, options = {
   }
 }
 
+async function goalPlanningContext(signal, server = 'CN', includePlanningData = true) {
+  const environment = await strategyEnvironment(signal)
+  const [operatorBox, depot, itemIndex, stages, planningResult] = await Promise.all([
+    readOperatorBox(),
+    readDepot(),
+    loadItemIndex(environment.resourceDir),
+    readFile(path.join(environment.resourceDir, 'stages.json'), 'utf8').then(JSON.parse).catch(() => []),
+    includePlanningData
+      ? loadPlanningData({ server, signal }).then(value => ({ value, error: '' }), error => ({ value: null, error: error instanceof Error ? error.message : String(error) }))
+      : Promise.resolve({ value: null, error: '' }),
+  ])
+  return { ...environment, operatorBox, depot, itemIndex, stages, planningData: planningResult.value, planningDataError: planningResult.error }
+}
+
+function agentResult(input = {}) {
+  return {
+    status: String(input.status ?? 'ok'), summary: String(input.summary ?? ''),
+    goalId: String(input.goalId ?? ''), workflowId: String(input.workflowId ?? ''),
+    confirmationCode: String(input.confirmationCode ?? ''), confirmationPhrase: String(input.confirmationPhrase ?? ''),
+    expiresAt: String(input.expiresAt ?? ''), data: typeof input.data === 'string' ? input.data : JSON.stringify(input.data ?? null),
+  }
+}
+
+async function prepareGoalConfirmation(args, exec) {
+  await assertNoActiveRun()
+  const context = await goalPlanningContext(exec.signal, args.server, ['operator_training', 'materials'].includes(args.kind))
+  const input = structuredClone(args)
+  if (input.kind === 'custom') {
+    const document = buildTaskDocument(input.steps, context.capabilities)
+    input.steps = document.tasks.map((task, index) => ({ id: `custom-${index + 1}`, kind: 'maa', title: `${index + 1}. ${task.type}`, maa: task }))
+  }
+  const plan = await planGoal(input, context)
+  const goal = await createGoal({ ...input, title: input.title || input.purpose || goalTitle(input) }, plan)
+  if (plan.status !== 'ready') return agentResult({ status: 'needs_input', goalId: goal.id, summary: `${goal.title}：${plan.needsUser}`, data: goal })
+  const execution = await createWorkflowExecution({
+    goalId: goal.id, name: goal.title, steps: plan.steps, constraints: plan.constraints,
+    capabilitySignature: context.capabilities.signature,
+  })
+  await updateGoal(goal.id, { workflowExecutionId: execution.id })
+  const summary = `${goal.title}｜${execution.steps.length} 步｜预算：源石${plan.constraints.allowStone ? '仅按明确数量' : '禁止'}、普通理智药 ${plan.constraints.maxMedicine}、过期理智药 ${plan.constraints.maxExpiringMedicine}${plan.constraints.maxSanity === null ? '' : `、理智上限 ${plan.constraints.maxSanity}`}`
+  const confirmation = await preparePendingPlan(exec.agent, {
+    purpose: goal.title, document: workflowDocument(execution), planSummary: summary,
+    workflowExecutionId: execution.id, goalId: goal.id,
+    goalPreview: { ...goal, workflowExecutionId: execution.id, steps: execution.steps },
+  })
+  exec.concludeTurn()
+  return agentResult({ status: 'pending_confirmation', goalId: goal.id, workflowId: execution.id, summary, ...confirmation, data: { goal, execution } })
+}
+
+function goalTitle(input) {
+  if (input.kind === 'daily') return '完成今天的日常任务'
+  if (input.kind === 'operator_training') return `培养${input.operator || '指定干员'}`
+  if (input.kind === 'materials') return '规划并获取缺少的材料'
+  return '自定义游戏目标'
+}
+
+function workflowSummary(execution) {
+  const completed = execution.steps.filter(step => step.status === 'completed').length
+  return `${execution.name}：${completed}/${execution.steps.length} 步，状态 ${execution.status}${execution.needsUser ? `；${execution.needsUser}` : ''}`
+}
+
+async function startWorkflowExecution(agent, executionId, goalId = '') {
+  if (activeWorkflows.has(executionId)) throw new Error('该工作流已经在执行。')
+  const execution = await getWorkflowExecution(executionId)
+  if (!execution) throw new Error('找不到待执行工作流。')
+  if (execution.status !== 'pending_confirmation') throw new Error(`工作流状态为 ${execution.status}，不能重复启动。`)
+  const effectiveGoalId = goalId || execution.goalId
+  if (effectiveGoalId) {
+    const goal = await getGoal(effectiveGoalId)
+    if (!goal || goal.workflowExecutionId !== executionId || goal.status !== 'pending_confirmation') {
+      throw new Error('该目标已被重新规划、取消或执行过；为避免重复操作，旧工作流不能启动。')
+    }
+  }
+  const controller = new AbortController()
+  const active = { controller, executionId, goalId: effectiveGoalId }
+  activeWorkflows.set(executionId, active)
+  await updateWorkflowExecution(executionId, current => { current.status = 'running'; current.needsUser = ''; return current })
+  if (active.goalId) await updateGoal(active.goalId, { status: 'running' })
+
+  void (async () => {
+    try {
+      while (!controller.signal.aborted) {
+        const current = await getWorkflowExecution(executionId)
+        const step = current?.steps[current.cursor]
+        if (!current || !step) {
+          await updateWorkflowExecution(executionId, value => { value.status = 'completed'; return value })
+          if (active.goalId) await updateGoal(active.goalId, {
+            status: 'awaiting_goal_verification',
+            needsUser: '工作流步骤已完成，但这不等同于游戏目标已达成；请根据最新 Box、Depot 或游戏状态确认目标。',
+          })
+          return
+        }
+        if (step.kind === 'decision') {
+          await updateWorkflowExecution(executionId, value => {
+            value.status = 'needs_user'; value.needsUser = step.prompt
+            value.steps[value.cursor].status = 'waiting'
+            return value
+          })
+          if (active.goalId) await updateGoal(active.goalId, { status: 'needs_user', needsUser: step.prompt })
+          return
+        }
+        await updateWorkflowExecution(executionId, value => {
+          const target = value.steps[value.cursor]
+          target.status = 'running'; target.attempts += 1; target.startedAt = Date.now()
+          return value
+        })
+        const result = await executeDocument(agent, controller.signal, { tasks: [step.maa] }, `${current.name}｜${step.title}`, {
+          background: false, purpose: `工作流：${current.name}`,
+        })
+        const verified = result.executionFeedback?.status === 'verified' && !result.operatorBoxError && !result.depotError
+        if (!verified) {
+          const feedback = result.operatorBoxError || result.depotError || result.executionFeedback?.detail || 'MAA 未提供可验证的完成状态。'
+          await updateWorkflowExecution(executionId, value => {
+            const target = value.steps[value.cursor]
+            target.status = result.executionFeedback?.status === 'failed' ? 'failed' : 'uncertain'
+            target.runId = result.runId ?? ''; target.feedback = feedback; target.finishedAt = Date.now()
+            value.status = 'needs_review'; value.needsUser = `步骤“${target.title}”没有可靠完成证据：${feedback}`
+            return value
+          })
+          if (active.goalId) await updateGoal(active.goalId, { status: 'needs_user', needsUser: `工作流步骤未验证：${feedback}` })
+          return
+        }
+        await updateWorkflowExecution(executionId, value => {
+          const target = value.steps[value.cursor]
+          target.status = 'completed'; target.runId = result.runId ?? ''; target.feedback = result.executionFeedback.detail; target.finishedAt = Date.now()
+          value.cursor += 1
+          return value
+        })
+      }
+      throw Object.assign(new Error('workflow cancelled'), { name: 'AbortError' })
+    } catch (error) {
+      const stopped = error?.name === 'AbortError'
+      await updateWorkflowExecution(executionId, value => {
+        value.status = stopped ? 'stopped' : 'needs_review'
+        value.needsUser = stopped ? '用户已停止工作流。' : `工作流异常中断：${error instanceof Error ? error.message : String(error)}`
+        const step = value.steps[value.cursor]
+        if (step?.status === 'running') { step.status = stopped ? 'stopped' : 'uncertain'; step.finishedAt = Date.now() }
+        return value
+      }).catch(() => {})
+      if (active.goalId) await updateGoal(active.goalId, { status: stopped ? 'stopped' : 'needs_user', needsUser: stopped ? '' : '工作流异常中断，需要检查。' }).catch(() => {})
+    } finally {
+      activeWorkflows.delete(executionId)
+    }
+  })()
+  return await getWorkflowExecution(executionId)
+}
+
+async function recoverAfterRestart() {
+  const interrupted = await auditInterruptedWorkflows()
+  const snapshot = await describeRunState()
+  const orphan = snapshot.running ?? snapshot.interrupted
+  let reaped = { killed: 0 }
+  if (orphan && activeRuns.size === 0) {
+    reaped = await reapGeneratedTaskProcesses().catch(() => ({ killed: 0 }))
+    await stopRun(orphan.id, { reap: false }).catch(() => {})
+  }
+  let overlay = null
+  try {
+    const result = await runMaa(queryArguments('config_dir'), { timeoutMs: 20_000 })
+    const configDir = result.stdout.split(/\r?\n/u).map(line => line.trim()).filter(Boolean).at(-1)
+    if (result.exitCode === 0 && configDir) overlay = await recoverStrategyOverlay(configDir)
+  } catch {}
+  return { interrupted, reaped: reaped.killed, overlay }
+}
+
 function formatBackgroundResult(result) {
   return [
     `MAA 已开始执行（${result.runId}）。`,
@@ -631,6 +895,9 @@ function formatBackgroundResult(result) {
 }
 
 export function apply(ctx) {
+  // A new plugin process cannot prove that an in-flight step completed. Audit
+  // persisted state immediately and clean only this plugin's generated task.
+  if (restartRecoveryPromise === null) restartRecoveryPromise = recoverAfterRestart().catch(() => null)
   ctx.commands.register({
     name: 'maa',
     definitionId: 'dsh-maa-cli/maa',
@@ -664,6 +931,7 @@ export function apply(ctx) {
           return { kind: result.status === 'not_running' ? 'error' : 'success', text: formatRuntimeInstructionResult(result) }
         }
         if (parsed.kind === 'stop') {
+          for (const active of activeWorkflows.values()) active.controller.abort()
           const runtime = await executeRuntimeInstruction({ action: 'stop_now' })
           if (runtime.status !== 'not_running') {
             return { kind: 'success', text: formatRuntimeInstructionResult(runtime) }
@@ -692,17 +960,26 @@ export function apply(ctx) {
             throw new Error('MAA 确认码与待确认计划不一致。')
           }
           const environment = await strategyEnvironment(signal)
+          const workflow = pending.workflowExecutionId ? await getWorkflowExecution(pending.workflowExecutionId) : null
+          const panel = workflow
+            ? {
+                type: 'Workflow', title: '目标工作流', fields: [], values: {},
+                notes: workflow.steps.map((step, index) => ({ text: `${index + 1}. ${step.title}${step.kind === 'decision' ? '（到此暂停并请求人工决策）' : ''}` })),
+              }
+            : await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities))
           return {
             kind: 'success',
             text: JSON.stringify({
               code: pending.confirmationCode,
               summary: pending.planSummary,
               theme: roguelikeThemeOf(pending.document),
-              panel: await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities)),
+              panel,
               capabilitySignature: environment.capabilities.signature,
               capabilitySource: environment.capabilities.source,
               capabilityWarning: environment.capabilities.warning ?? '',
               notePreview: publicNotePreview(pending.notePreview),
+              goal: pending.goalPreview ?? null,
+              workflow,
             }),
           }
         }
@@ -724,6 +1001,13 @@ export function apply(ctx) {
           // The slash command or the button that invokes it is the explicit
           // human authorization; the pending plan remains scoped and one-shot.
           await assertNoActiveRun()
+          const pendingPreview = await peekPendingPlan(agent)
+          if (pendingPreview.workflowExecutionId) {
+            if (Object.keys(parsed.overrides ?? {}).length > 0) throw new Error('目标工作流不接受任务面板参数覆盖；请编辑目标或工作流后重新生成。')
+            const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
+            const execution = await startWorkflowExecution(agent, pending.workflowExecutionId, pending.goalId)
+            return { kind: 'success', text: `目标工作流已开始（${execution.id}）。${workflowSummary(execution)}\n每一步只在 MAA 明确验证完成后继续；遇到人工决策、未知状态或预算风险会自动暂停。` }
+          }
           await ensureMaaCli(signal)
           const emulator = await checkEmulator({ runMaa, signal })
           if (!emulator.ok) throw new Error(emulatorErrorMessage(emulator))
@@ -824,12 +1108,12 @@ export function apply(ctx) {
 
   ctx.tools.register({
     name: 'maa_runtime_instruction',
-    description: 'Control or inspect the MAA task that is already running. Use this for runtime requests such as stop now, stop after the current roguelike exploration, stop before a numbered boss floor, stop after N more explorations, cancel a pending stop, query progress, or request a recruitment preference. Common requests are handled locally; temporary runtime instructions are never written to long-term strategy memory. A recruitment preference may return unsupported instead of pretending that maa-cli applied it live.',
+    description: 'Control or inspect the MAA task that is already running. Use this for runtime requests such as stop now, stop after the current roguelike exploration, stop before the next boss, stop before a numbered boss floor, stop after N more explorations, cancel a pending stop, query progress, or request a recruitment preference. Common requests are handled locally; temporary runtime instructions are never written to long-term strategy memory. A recruitment preference may return unsupported instead of pretending that maa-cli applied it live.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['action'],
       properties: {
-        action: { type: 'string', enum: ['stop_now', 'stop_after_current', 'stop_after_runs', 'stop_before_boss', 'cancel_stop', 'status', 'prefer_recruit'] },
-        count: { type: 'integer', minimum: 1, maximum: 99 },
+        action: { type: 'string', enum: ['stop_now', 'stop_after_current', 'stop_after_runs', 'stop_before_boss', 'stop_before_next_boss', 'cancel_stop', 'status', 'prefer_recruit'] },
+        count: { type: 'integer', minimum: 1, maximum: 9999 },
         floor: { type: 'integer', minimum: 1, maximum: 99 },
         operator: { type: 'string', minLength: 1, maxLength: 20 },
       },
@@ -861,6 +1145,156 @@ export function apply(ctx) {
     },
     async execute(args) { return queryOperatorBox(await readOperatorBox(), args) },
     presentCall: () => ({ card: 'terminal', title: '读取干员 Box 缓存' }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_depot',
+    description: 'Read the last verified DepotInfo warehouse snapshot without operating the game. Use this before inventory or material-gap planning. If no cache exists, prepare a confirmed Depot scan instead of treating unknown inventory as zero.',
+    parameters: { type: 'object', additionalProperties: false, properties: { itemId: { type: 'string' }, name: { type: 'string' } } },
+    output: { schema: AGENT_RESULT_SCHEMA, render: renderAgentResult },
+    async execute(args) {
+      const snapshot = await readDepot()
+      if (!snapshot) return agentResult({ status: 'needs_scan', summary: '尚无可靠仓库缓存；需要确认执行一次 Depot 扫描。' })
+      const environment = await strategyEnvironment()
+      const result = queryDepot(snapshot, await loadItemIndex(environment.resourceDir), args)
+      return agentResult({ status: 'ready', summary: result.summary, data: result })
+    },
+    presentCall: () => ({ card: 'terminal', title: '读取仓库缓存' }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_goal_manager',
+    description: 'Create and manage goal-driven Arknights plans. Use prepare for daily tasks, operator training, material gaps, or a custom multi-step target. Operator training automatically refreshes cached game-data costs and Penguin Statistics drop rates at most once per 24 hours, then cross-checks them with the verified Box/Depot and current MAA stages. It applies explicit resource budgets and prepares a one-time confirmation; it never equates statistical expected drops, plan creation, or process exit with the game goal being achieved. Use replan after a scan or human decision, list/status to inspect, and cancel to stop a goal.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['prepare', 'replan', 'list', 'status', 'cancel', 'data_status', 'refresh_data'] },
+        goalId: { type: 'string' }, kind: { type: 'string', enum: ['daily', 'operator_training', 'materials', 'custom'] },
+        title: { type: 'string' }, purpose: { type: 'string' }, operator: { type: 'string' }, completion: { type: 'string' },
+        server: { type: 'string', enum: ['CN', 'US', 'JP', 'KR'], description: 'Game server used for drop-rate data; defaults to CN.' },
+        targetElite: { type: 'integer', minimum: 0, maximum: 2, description: 'Operator target elite phase; defaults to 2.' },
+        targetLevel: { type: 'integer', minimum: 1, maximum: 90, description: 'Level in the target elite phase; defaults to 1.' },
+        budget: { type: 'object', additionalProperties: false, properties: { allowStone: { type: 'boolean' }, maxMedicine: { type: 'integer' }, maxExpiringMedicine: { type: 'integer' }, maxSanity: { type: 'integer' } } },
+        requirements: { type: 'array', maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['quantity'], properties: { itemId: { type: 'string' }, name: { type: 'string' }, quantity: { type: 'integer' }, stage: { type: 'string' }, runs: { type: 'integer' } } } },
+        steps: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', required: ['type'], properties: STEP_PROPERTIES } },
+      },
+    },
+    output: { schema: AGENT_RESULT_SCHEMA, render: renderAgentResult },
+    async execute(args, exec) {
+      if (args.action === 'data_status' || args.action === 'refresh_data') {
+        const data = args.action === 'refresh_data'
+          ? await loadPlanningData({ server: args.server, signal: exec.signal, force: true })
+          : await readPlanningData()
+        if (!data) return agentResult({ status: 'missing', summary: '尚无培养/掉率缓存；首次准备培养目标时会自动下载。' })
+        const metadata = { server: data.server, updatedAt: data.updatedAt, stale: data.stale, warning: data.warning, operatorCount: data.operators.length, matrixCount: data.matrix.length, sources: data.sources }
+        return agentResult({ status: data.stale ? 'stale' : 'ready', summary: `培养/掉率数据：${data.server}，${data.updatedAt}，${data.operators.length} 条角色、${data.matrix.length} 条掉率记录${data.stale ? '（沿用缓存）' : ''}。`, data: metadata })
+      }
+      if (args.action === 'prepare') {
+        if (!args.kind) throw new Error('prepare 必须提供 kind。')
+        return await prepareGoalConfirmation(args, exec)
+      }
+      if (args.action === 'list') {
+        const goals = await listGoals()
+        return agentResult({ status: 'ready', summary: goals.length ? `共有 ${goals.length} 个目标。` : '尚无目标。', data: goals })
+      }
+      const goal = await getGoal(args.goalId)
+      if (!goal) throw new Error('找不到目标。')
+      if (args.action === 'status') {
+        const execution = goal.workflowExecutionId ? await getWorkflowExecution(goal.workflowExecutionId) : null
+        return agentResult({ status: goal.status, goalId: goal.id, workflowId: execution?.id ?? '', summary: execution ? workflowSummary(execution) : `${goal.title}：${goal.status}`, data: { goal, execution } })
+      }
+      if (args.action === 'cancel') {
+        const active = activeWorkflows.get(goal.workflowExecutionId)
+        if (active) active.controller.abort()
+        else if (goal.workflowExecutionId) await updateWorkflowExecution(goal.workflowExecutionId, current => {
+          if (!['completed', 'failed', 'stopped', 'cancelled'].includes(current.status)) current.status = 'cancelled'
+          current.needsUser = ''
+          return current
+        })
+        await updateGoal(goal.id, { status: 'cancelled', needsUser: '' })
+        return agentResult({ status: 'cancelled', goalId: goal.id, workflowId: goal.workflowExecutionId, summary: `已取消目标“${goal.title}”。` })
+      }
+      await assertNoActiveRun()
+      const context = await goalPlanningContext(exec.signal, args.server ?? goal.request?.server, ['operator_training', 'materials'].includes(goal.kind))
+      const request = { ...goal.request, ...Object.fromEntries(Object.entries(args).filter(([key]) => !['action', 'goalId'].includes(key))) }
+      const plan = await planGoal(request, context)
+      if (plan.status !== 'ready') {
+        await updateGoal(goal.id, { status: 'needs_input', needsUser: plan.needsUser, facts: plan.facts, gaps: plan.gaps })
+        return agentResult({ status: 'needs_input', goalId: goal.id, summary: plan.needsUser, data: plan })
+      }
+      if (goal.workflowExecutionId) {
+        await updateWorkflowExecution(goal.workflowExecutionId, current => {
+          if (current.status === 'pending_confirmation') current.status = 'superseded'
+          return current
+        }).catch(() => {})
+      }
+      const execution = await createWorkflowExecution({ goalId: goal.id, name: goal.title, steps: plan.steps, constraints: plan.constraints, capabilitySignature: context.capabilities.signature })
+      await updateGoal(goal.id, { status: 'pending_confirmation', workflowExecutionId: execution.id, needsUser: '', facts: plan.facts, gaps: plan.gaps, completion: plan.completion, request })
+      const summary = `${goal.title}｜重新规划为 ${execution.steps.length} 步`
+      const confirmation = await preparePendingPlan(exec.agent, { purpose: goal.title, document: workflowDocument(execution), planSummary: summary, workflowExecutionId: execution.id, goalId: goal.id, goalPreview: { ...goal, steps: execution.steps } })
+      exec.concludeTurn()
+      return agentResult({ status: 'pending_confirmation', goalId: goal.id, workflowId: execution.id, summary, ...confirmation, data: { plan, execution } })
+    },
+    presentCall: args => ({ card: 'terminal', title: `目标管理：${args.action}` }),
+  })
+
+  ctx.tools.register({
+    name: 'maa_workflow_manager',
+    description: 'Save, edit, list, delete, inspect, and prepare reusable MAA workflow presets. Presets are validated against the current dynamic capability signature before execution; changed MAA resources require the preset to be reviewed and saved again.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['save', 'list', 'get', 'delete', 'prepare', 'status', 'cancel'] },
+        id: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' },
+        steps: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', required: ['type'], properties: STEP_PROPERTIES } },
+        constraints: { type: 'object', additionalProperties: false, properties: { allowStone: { type: 'boolean' }, maxMedicine: { type: 'integer' }, maxExpiringMedicine: { type: 'integer' }, maxSanity: { type: 'integer' } } },
+      },
+    },
+    output: { schema: AGENT_RESULT_SCHEMA, render: renderAgentResult },
+    async execute(args, exec) {
+      if (args.action === 'list') return agentResult({ status: 'ready', summary: '已读取工作流预设。', data: await listWorkflowPresets() })
+      if (args.action === 'get') {
+        const value = await getWorkflowPreset(args.id)
+        if (!value) throw new Error('找不到工作流预设。')
+        return agentResult({ status: 'ready', workflowId: value.id, summary: `${value.name}：${value.steps.length} 步`, data: value })
+      }
+      if (args.action === 'delete') {
+        const value = await deleteWorkflowPreset(args.id)
+        if (!value) throw new Error('找不到工作流预设。')
+        return agentResult({ status: 'deleted', workflowId: value.id, summary: `已删除预设“${value.name}”。` })
+      }
+      if (args.action === 'status' || args.action === 'cancel') {
+        const execution = await getWorkflowExecution(args.id)
+        if (!execution) throw new Error('找不到工作流执行记录。')
+        if (args.action === 'cancel') {
+          const active = activeWorkflows.get(execution.id)
+          if (active) active.controller.abort()
+          else await updateWorkflowExecution(execution.id, current => {
+            if (!['completed', 'failed', 'stopped', 'cancelled'].includes(current.status)) current.status = 'cancelled'
+            current.needsUser = ''
+            return current
+          })
+          return agentResult({ status: 'cancelled', workflowId: execution.id, summary: `已取消工作流“${execution.name}”。` })
+        }
+        return agentResult({ status: execution.status, workflowId: execution.id, summary: workflowSummary(execution), data: execution })
+      }
+      const environment = await strategyEnvironment(exec.signal)
+      if (args.action === 'save') {
+        const document = buildTaskDocument(args.steps, environment.capabilities)
+        const preset = await saveWorkflowPreset({ id: args.id, name: args.name, description: args.description, constraints: args.constraints, capabilitySignature: environment.capabilities.signature, steps: document.tasks.map((task, index) => ({ id: `preset-${index + 1}`, kind: 'maa', title: `${index + 1}. ${task.type}`, maa: task })) })
+        return agentResult({ status: 'saved', workflowId: preset.id, summary: `已保存工作流“${preset.name}”（${preset.steps.length} 步）。`, data: preset })
+      }
+      await assertNoActiveRun()
+      const preset = await getWorkflowPreset(args.id)
+      if (!preset) throw new Error('找不到工作流预设。')
+      if (preset.capabilitySignature !== environment.capabilities.signature) throw new Error('MAA 版本或资源已变化，工作流预设需要重新检查并保存后才能执行。')
+      const execution = await createWorkflowExecution({ presetId: preset.id, name: preset.name, steps: preset.steps, constraints: preset.constraints, capabilitySignature: preset.capabilitySignature })
+      const summary = `工作流预设：${preset.name}｜${execution.steps.length} 步`
+      const confirmation = await preparePendingPlan(exec.agent, { purpose: preset.name, document: workflowDocument(execution), planSummary: summary, workflowExecutionId: execution.id })
+      exec.concludeTurn()
+      return agentResult({ status: 'pending_confirmation', workflowId: execution.id, summary, ...confirmation, data: execution })
+    },
+    presentCall: args => ({ card: 'terminal', title: `工作流管理：${args.action}` }),
   })
 
   ctx.tools.register({

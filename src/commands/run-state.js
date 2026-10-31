@@ -6,10 +6,10 @@ import { stateDirectory } from '../runtime/state.js'
 
 const RUNS_VERSION = 1
 const MAX_RUNS = 8
-// A run that never reported back (DSH killed, machine slept, maa-cli hung) must
-// not block the plugin forever. The MAA task itself is capped at 30 minutes, so
-// one stray record older than this is treated as interrupted.
-const STALE_MS = 40 * 60_000
+// The runner has a six-hour hard ceiling. Keep the persisted lock slightly
+// longer so a healthy long roguelike run cannot be mistaken for an orphan and
+// started a second time. Plugin startup performs an explicit orphan audit.
+const STALE_MS = 7 * 60 * 60_000
 const INSTRUCTION_LIMIT = 30
 let stateMutation = Promise.resolve()
 
@@ -96,6 +96,8 @@ export async function beginRun(payload, options = {}) {
       exitCode: null,
       summary: '',
       progress: emptyProgress(now),
+      recovery: emptyRecovery(),
+      checkpoints: [],
       instructions: [],
     }
     state.runs = [run, ...state.runs].slice(0, MAX_RUNS)
@@ -202,6 +204,38 @@ export async function updateRunProgress(runId, patch = {}, options = {}) {
   })
 }
 
+export async function updateRunRecovery(runId, patch = {}, options = {}) {
+  const env = options.env ?? process.env
+  return await mutateRunState(env, state => {
+    const run = state.runs.find(item => item.id === runId)
+    if (!run) return null
+    run.recovery = { ...emptyRecovery(), ...(run.recovery ?? {}), ...patch }
+    if (patch.historyEntry) {
+      const { historyEntry: _ignored, ...clean } = run.recovery
+      run.recovery = clean
+      run.recovery.history = [...(run.recovery.history ?? []), patch.historyEntry].slice(-20)
+    }
+    return run.recovery
+  })
+}
+
+export async function addRunCheckpoint(runId, checkpoint, options = {}) {
+  const env = options.env ?? process.env
+  const now = options.now ?? Date.now()
+  return await mutateRunState(env, state => {
+    const run = state.runs.find(item => item.id === runId)
+    if (!run) return null
+    const entry = {
+      taskchain: String(checkpoint.taskchain ?? ''),
+      status: String(checkpoint.status ?? ''),
+      taskId: Number.isInteger(checkpoint.taskId) ? checkpoint.taskId : null,
+      at: now,
+    }
+    run.checkpoints = [...(run.checkpoints ?? []), entry].slice(-100)
+    return entry
+  })
+}
+
 export function summarizeRun(run, now = Date.now()) {
   const startedAt = Number(run.startedAt)
   const finishedAt = Number(run.finishedAt)
@@ -221,6 +255,8 @@ export function summarizeRun(run, now = Date.now()) {
     exitCode: run.exitCode,
     summary: run.summary,
     progress: { ...emptyProgress(startedAt), ...(run.progress ?? {}) },
+    recovery: { ...emptyRecovery(), ...(run.recovery ?? {}) },
+    checkpoints: Array.isArray(run.checkpoints) ? run.checkpoints : [],
     instructions: Array.isArray(run.instructions) ? run.instructions : [],
   }
 }
@@ -253,6 +289,10 @@ function emptyProgress(now) {
     lastEventAt: null,
     updatedAt: now,
   }
+}
+
+function emptyRecovery() {
+  return { status: 'idle', attempt: 0, maxRetries: 2, diagnosis: null, needsUser: false, nextRetryAt: null, history: [] }
 }
 
 function formatDuration(ms) {

@@ -11,6 +11,7 @@ import { clearPendingPlansForTest, consumeConfirmedPlan, consumePlanFromHumanGes
 import { parseLocalMaaCommand } from '../src/commands/local-command.js'
 import { stateFilePath } from '../src/runtime/state.js'
 import { operatorBoxFilePath, saveOperatorBox } from '../src/operators/operator-box.js'
+import { createWorkflowExecution } from '../src/agent/workflow-manager.js'
 
 // Pending plans now live on disk, so the tests keep them out of the real
 // ~/.dsh/maa-cli directory.
@@ -31,20 +32,20 @@ test('registers a zero-token command plus prepare-only model tools', () => {
     commands: { register: command => commands.push(command) },
   })
   assert.deepEqual(commands.map(command => command.name), ['maa'])
-  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_runtime_instruction', 'maa_operator_box', 'maa_training_advice', 'maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note', 'maa_doctor', 'maa_runtime'])
+  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_runtime_instruction', 'maa_operator_box', 'maa_depot', 'maa_goal_manager', 'maa_workflow_manager', 'maa_training_advice', 'maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note', 'maa_doctor', 'maa_runtime'])
   assert.deepEqual(tools[0].parameters.required, ['operation'])
   assert.deepEqual(tools[1].parameters.required, ['action'])
-  assert.deepEqual(tools[3].parameters.required, ['useCached'])
-  assert.match(tools[3].description, /MANDATORY for every operator training-advice request/)
-  assert.match(tools[3].description, /restarting DSH Desktop/)
-  assert.match(tools[3].description, /do not perform unnecessary recursive searches or repeated scans/)
-  assert.deepEqual(tools[4].parameters.required, ['purpose', 'steps'])
-  assert.deepEqual(tools[5].parameters.required, ['purpose', 'kind', 'task'])
-  assert.match(tools[5].description, /real Integrated Strategy resource changes or a real Copilot job/)
-  assert.deepEqual(tools[6].parameters.required, ['note'])
-  assert.match(tools[6].description, /抓\/拿\/捞\/取\/选\/选择\/招募 all mean recruit/)
-  assert.deepEqual(tools[7].parameters.properties, {})
-  assert.match(tools[4].description, /does not create another model call/)
+  assert.deepEqual(tools[6].parameters.required, ['useCached'])
+  assert.match(tools[6].description, /MANDATORY for every operator training-advice request/)
+  assert.match(tools[6].description, /restarting DSH Desktop/)
+  assert.match(tools[6].description, /do not perform unnecessary recursive searches or repeated scans/)
+  assert.deepEqual(tools[7].parameters.required, ['purpose', 'steps'])
+  assert.deepEqual(tools[8].parameters.required, ['purpose', 'kind', 'task'])
+  assert.match(tools[8].description, /real Integrated Strategy resource changes or a real Copilot job/)
+  assert.deepEqual(tools[9].parameters.required, ['note'])
+  assert.match(tools[9].description, /抓\/拿\/捞\/取\/选\/选择\/招募 all mean recruit/)
+  assert.deepEqual(tools[10].parameters.properties, {})
+  assert.match(tools[7].description, /does not create another model call/)
   assert.match(tools[2].description, /Always call this/)
 })
 
@@ -71,6 +72,42 @@ test('registered slash command prepares and exposes the fight settings panel wit
   assert.ok(payload.panel.fields.some(field => field.key === 'stage'))
   assert.ok(payload.panel.fields.some(field => field.key === 'medicine'))
   await clearPendingPlansForTest()
+})
+
+test('workflow confirmation exposes read-only steps and submits no task overrides', async () => {
+  const commands = []
+  apply({ tools: { register: () => {} }, commands: { register: command => commands.push(command) } })
+  const maa = commands.find(command => command.name === 'maa')
+  const agent = { id: 'workflow-panel-test', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] } }
+  const execution = await createWorkflowExecution({ name: '安全日常', capabilitySignature: 'test', steps: [{ kind: 'maa', title: '启动', maa: { type: 'StartUp', params: { client_type: 'Official', start_game_enabled: true } } }] })
+  const pending = await preparePendingPlan(agent, { planSummary: '安全日常', document: { tasks: execution.steps.map(step => step.maa) }, workflowExecutionId: execution.id })
+  const peeked = await maa.handler({ agent, rawInput: `peek ${pending.confirmationCode}`, signal: AbortSignal.timeout(2_000) })
+  assert.equal(peeked.kind, 'success')
+  const payload = JSON.parse(peeked.text)
+  assert.equal(payload.panel.type, 'Workflow')
+  assert.deepEqual(payload.panel.fields, [])
+  assert.deepEqual(payload.panel.values, {})
+  assert.match(payload.panel.notes[0].text, /启动/u)
+})
+
+test('daily goal tool creates a persisted workflow and one-time confirmation without running MAA', async () => {
+  const tools = []
+  apply({ tools: { register: tool => tools.push(tool) }, commands: { register: () => {} } })
+  const goalTool = tools.find(tool => tool.name === 'maa_goal_manager')
+  let concluded = false
+  const agent = { id: 'daily-goal-test', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] } }
+  const result = await goalTool.execute({ action: 'prepare', kind: 'daily', title: '今日安全日常', budget: { allowStone: false, maxMedicine: 0, maxExpiringMedicine: 0 } }, {
+    agent, signal: AbortSignal.timeout(3_000), concludeTurn: () => { concluded = true },
+  })
+  assert.equal(result.status, 'pending_confirmation')
+  assert.match(result.goalId, /^GOAL-/u)
+  assert.match(result.workflowId, /^WFR-/u)
+  assert.match(result.confirmationCode, /^MAA-/u)
+  assert.equal(concluded, true)
+  const pending = await peekPendingPlan(agent)
+  assert.equal(pending.goalId, result.goalId)
+  assert.equal(pending.workflowExecutionId, result.workflowId)
+  assert.deepEqual(pending.document.tasks.map(task => task.type), ['StartUp', 'Infrast', 'Mall', 'Award'])
 })
 
 test('stores a note preview without replacing or extending its confirmation', async () => {

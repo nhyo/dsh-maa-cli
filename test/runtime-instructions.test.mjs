@@ -14,10 +14,10 @@ import {
 import { beginRun, clearRunStateForTest, finishRun, getRun } from '../src/commands/run-state.js'
 import { startMaa } from '../src/runtime/runner.js'
 
-async function fixture(taskTypes = ['Roguelike']) {
+async function fixture(taskTypes = ['Roguelike'], payload = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-runtime-instruction-'))
   const env = { DSH_MAA_CLI_STATE_DIR: root }
-  const run = await beginRun({ purpose: 'test', taskTypes }, { env, now: Date.now() })
+  const run = await beginRun({ purpose: 'test', taskTypes, ...payload }, { env, now: Date.now() })
   return { root, env, run }
 }
 
@@ -25,7 +25,9 @@ test('parses the common runtime phrases locally', () => {
   assert.deepEqual(parseRuntimeInstruction('现在停止'), { action: 'stop_now' })
   assert.deepEqual(parseRuntimeInstruction('这把肉鸽打完就停'), { action: 'stop_after_current' })
   assert.deepEqual(parseRuntimeInstruction('再打两局就停'), { action: 'stop_after_runs', count: 2 })
+  assert.deepEqual(parseRuntimeInstruction('再打 2 局结束'), { action: 'stop_after_runs', count: 2 })
   assert.deepEqual(parseRuntimeInstruction('第五层 Boss 前停止'), { action: 'stop_before_boss', floor: 5 })
+  assert.deepEqual(parseRuntimeInstruction('这次 Boss 关前停止'), { action: 'stop_before_next_boss' })
   assert.deepEqual(parseRuntimeInstruction('取消刚才的停止要求'), { action: 'cancel_stop' })
   assert.deepEqual(parseRuntimeInstruction('现在打到哪里了'), { action: 'status' })
   assert.deepEqual(parseRuntimeInstruction('接下来优先招结城理'), { action: 'prefer_recruit', operator: '结城理' })
@@ -33,7 +35,7 @@ test('parses the common runtime phrases locally', () => {
 })
 
 test('stops after exactly the requested number of reliable settlement callbacks', async t => {
-  const { root, env, run } = await fixture()
+  const { root, env, run } = await fixture(['Roguelike'], { planSummary: '初始肉鸽计划 starts_count=9999' })
   t.after(() => rm(root, { recursive: true, force: true }))
   const applied = await applyRuntimeInstruction(run.id, { action: 'stop_after_runs', count: 2 }, { env, monitorAvailable: true })
   assert.equal(applied.status, 'applied')
@@ -57,6 +59,20 @@ test('boss-floor control triggers only on the exact pre-entry callback', async t
   await processMaaCallback(run.id, { event: 'SubTaskStart', what: '', details: { task: 'StageDreadfulFoe-4' } }, { env, stop: () => { stopped++ } })
   assert.equal(stopped, 0)
   const result = await processMaaCallback(run.id, { event: 'SubTaskStart', what: '', details: { task: 'StageDreadfulFoe-5' } }, { env, stop: () => { stopped++ } })
+  assert.equal(stopped, 1)
+  assert.equal(result.triggered.id, applied.instruction.id)
+})
+
+test('next-boss control can be added after launch and triggers only on a boss entry task', async t => {
+  const { root, env, run } = await fixture()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const applied = await applyRuntimeInstruction(run.id, { action: 'stop_before_next_boss' }, { env, monitorAvailable: true })
+  assert.equal(applied.status, 'applied')
+  let stopped = 0
+  await processMaaCallback(run.id, { event: 'SubTaskStart', what: '', details: { task: 'StageCombatOpsEnter' } }, { env, stop: () => { stopped++ } })
+  await processMaaCallback(run.id, { event: 'SubTaskStart', what: '', details: { task: 'JieGarden@Roguelike@StageDreadfulFoe-5Enter' } }, { env, stop: () => { stopped++ } })
+  assert.equal(stopped, 0)
+  const result = await processMaaCallback(run.id, { event: 'SubTaskStart', what: '', details: { task: 'JieGarden@Roguelike@StageDreadfulFoe-5' } }, { env, stop: () => { stopped++ } })
   assert.equal(stopped, 1)
   assert.equal(result.triggered.id, applied.instruction.id)
 })

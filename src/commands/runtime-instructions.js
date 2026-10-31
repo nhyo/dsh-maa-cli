@@ -1,7 +1,7 @@
 import { open, stat } from 'node:fs/promises'
 import { addRunInstruction, cancelPendingStopInstructions, getRun, updateRunInstruction, updateRunProgress } from './run-state.js'
 
-const STOP_TYPES = new Set(['stop_now', 'stop_after_current', 'stop_after_runs', 'stop_before_boss'])
+const STOP_TYPES = new Set(['stop_now', 'stop_after_current', 'stop_after_runs', 'stop_before_boss', 'stop_before_next_boss'])
 const CHINESE_NUMBER = new Map([
   ['一', 1], ['二', 2], ['两', 2], ['三', 3], ['四', 4], ['五', 5],
   ['六', 6], ['七', 7], ['八', 8], ['九', 9], ['十', 10],
@@ -12,15 +12,16 @@ export function parseRuntimeInstruction(raw) {
   if (text === '') throw new Error('运行时指令不能为空。')
   if (/^(?:现在|立即|马上)?(?:停止|停下|终止)(?:任务)?[。！!]?$/u.test(text)) return { action: 'stop_now' }
   if (/^(?:这|本)(?:把|局)(?:肉鸽|探索)?打完(?:就|后)?停(?:止)?[。！!]?$/u.test(text)) return { action: 'stop_after_current' }
-  const runs = text.match(/^再打(\d+|[一二两三四五六七八九十])(?:把|局|次)(?:就|后)?停(?:止)?[。！!]?$/u)
+  const runs = text.match(/^(?:再|还要再?)\s*打\s*(\d+|[一二两三四五六七八九十])\s*(?:把|局|次)\s*(?:就|后)?\s*(?:停(?:止)?|结束)[。！!]?$/u)
   if (runs) return { action: 'stop_after_runs', count: parseSmallNumber(runs[1]) }
   const boss = text.match(/^(?:在)?第(\d+|[一二两三四五六七八九十])层\s*(?:Boss|BOSS|boss|首领)(?:战)?\s*前停(?:止)?[。！!]?$/u)
   if (boss) return { action: 'stop_before_boss', floor: parseSmallNumber(boss[1]) }
+  if (/^(?:这次|下次|下一次|下一个)?\s*(?:Boss|BOSS|boss|首领)\s*(?:关|战|节点)?\s*前停(?:止)?[。！!]?$/u.test(text)) return { action: 'stop_before_next_boss' }
   if (/^(?:取消|撤销)(?:刚才的|之前的|尚未触发的)?停止(?:要求|条件|指令)?[。！!]?$/u.test(text)) return { action: 'cancel_stop' }
   if (/^(?:现在)?(?:打|运行|进行)?到哪里了[？?]?$/u.test(text) || /^(?:查询|查看)?(?:实时)?进度[？?]?$/u.test(text)) return { action: 'status' }
   const recruit = text.match(/^(?:接下来|之后|后面)(?:请)?优先(?:招募|招|抓|拿|选)\s*(.{1,20}?)[。！!]?$/u)
   if (recruit) return { action: 'prefer_recruit', operator: recruit[1].trim() }
-  throw new Error('无法可靠识别该运行时指令；请使用“现在停止”“这把肉鸽打完就停”“第五层 Boss 前停止”“再打两局就停”“取消刚才的停止要求”或“现在打到哪里了”。')
+  throw new Error('无法可靠识别该运行时指令；请使用“现在停止”“这把肉鸽打完就停”“这次 Boss 关前停止”“第五层 Boss 前停止”“再打两局就停”“取消刚才的停止要求”或“现在打到哪里了”。')
 }
 
 export async function applyRuntimeInstruction(runId, request, options = {}) {
@@ -43,7 +44,7 @@ export async function applyRuntimeInstruction(runId, request, options = {}) {
     const instruction = await addRunInstruction(runId, { type: action, status: 'unsupported', params: { operator }, message }, options)
     return { status: 'unsupported', instruction, message }
   }
-  if (['stop_after_current', 'stop_after_runs', 'stop_before_boss'].includes(action) && !run.taskTypes?.includes('Roguelike')) {
+  if (['stop_after_current', 'stop_after_runs', 'stop_before_boss', 'stop_before_next_boss'].includes(action) && !run.taskTypes?.includes('Roguelike')) {
     const message = '该条件只适用于正在执行的肉鸽任务；当前任务不是肉鸽，未应用。'
     const instruction = await addRunInstruction(runId, { type: action, status: 'unsupported', params: {}, message }, options)
     return { status: 'unsupported', instruction, message }
@@ -53,7 +54,7 @@ export async function applyRuntimeInstruction(runId, request, options = {}) {
   if (action === 'stop_after_current') params.targetCompleted = Number(run.progress?.explorationsCompleted ?? 0) + 1
   if (action === 'stop_after_runs') {
     const count = Number(request.count)
-    if (!Number.isInteger(count) || count < 1 || count > 99) throw new Error('剩余局数必须在 1–99 之间。')
+    if (!Number.isInteger(count) || count < 1 || count > 9999) throw new Error('剩余局数必须在 1–9999 之间。')
     params.count = count
     params.targetCompleted = Number(run.progress?.explorationsCompleted ?? 0) + count
   }
@@ -122,10 +123,13 @@ export async function processMaaCallback(runId, callback, options = {}) {
   }
   if (callback.event === 'SubTaskStart' && typeof details.task === 'string') {
     trigger = pending.find(item => item.type === 'stop_before_boss' && details.task === `StageDreadfulFoe-${item.params?.floor}`) ?? trigger
+    trigger = pending.find(item => item.type === 'stop_before_next_boss' && isBossEntryTask(details.task)) ?? trigger
   }
   if (!trigger) return { progress: refreshed?.progress ?? null, triggered: null }
-  const message = trigger.type === 'stop_before_boss'
-    ? `已从 MAA 回调确认即将进入第 ${trigger.params.floor} 层 Boss 节点，停止条件已触发。`
+  const message = ['stop_before_boss', 'stop_before_next_boss'].includes(trigger.type)
+    ? trigger.type === 'stop_before_boss'
+      ? `已从 MAA 回调确认即将进入第 ${trigger.params.floor} 层 Boss 节点，停止条件已触发。`
+      : '已从 MAA 回调确认即将进入下一处 Boss 节点，停止条件已触发。'
     : `已从 MAA 结算回调确认完成 ${refreshed.progress.explorationsCompleted} 局探索，停止条件已触发。`
   const changed = await updateRunInstruction(runId, trigger.id, { status: 'triggered', message }, { ...options, expectedStatuses: ['applied'] })
   if (!changed) return { progress: refreshed.progress, triggered: null }
@@ -207,7 +211,12 @@ function instructionMessage(action, params, applied) {
   if (action === 'stop_now') return '已接收立即停止要求。'
   if (action === 'stop_after_current') return `当前探索结算后停止：${suffix}`
   if (action === 'stop_after_runs') return `再完成 ${params.count} 局探索后停止：${suffix}`
+  if (action === 'stop_before_next_boss') return `下一处 Boss 节点前停止：${suffix}只有出现精确的 StageDreadfulFoe 节点回调才会触发。`
   return `在第 ${params.floor} 层 Boss 战前停止：${suffix}只有出现精确的 StageDreadfulFoe-${params.floor} 回调才会触发。`
+}
+
+function isBossEntryTask(task) {
+  return /(?:^|@)StageDreadfulFoe(?:-\d+)?$/u.test(task)
 }
 
 async function getInstruction(runId, instructionId, options) {
