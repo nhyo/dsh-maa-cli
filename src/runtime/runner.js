@@ -100,14 +100,7 @@ export async function runMaa(args, options = {}) {
   Object.assign(childEnv, options.envPatch ?? {})
 
   return await new Promise((resolve, reject) => {
-    // Passing /c as a separate spawn argument makes Node escape the quotes around
-    // a .cmd path. Let cmd.exe receive the already validated command as one unit.
-    const child = spawn(command, {
-      shell: commandProcessor,
-      windowsHide: true,
-      env: childEnv,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    const child = spawnMaaProcess(cliPath, args, command, commandProcessor, childEnv)
     const stdout = []
     const stderr = []
     let outputBytes = 0
@@ -116,7 +109,7 @@ export async function runMaa(args, options = {}) {
     const stop = nextState => {
       if (state !== 'running') return
       state = nextState
-      terminateProcessTree(child)
+      void terminateProcessTree(child)
     }
     const onAbort = () => stop('aborted')
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -183,25 +176,26 @@ export function startMaa(args, options = {}) {
   }
   Object.assign(childEnv, options.envPatch ?? {})
 
-  const child = spawn(command, {
-    shell: commandProcessor,
-    windowsHide: true,
-    env: childEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+  const child = spawnMaaProcess(cliPath, args, command, commandProcessor, childEnv)
   const stdout = []
   const stderr = []
   let outputBytes = 0
   let state = 'running'
+  let exited = false
+  let lastKill = null
 
+  // The first stop decides how the run is reported (aborted / timed out). A
+  // repeated stop re-issues the tree kill: if the first attempt could not
+  // terminate the tree, the user must be able to try again.
   const stop = nextState => {
-    if (state !== 'running') return
-    state = nextState
-    terminateProcessTree(child)
+    if (exited) return Promise.resolve({ ok: true, exited: true, detail: '进程已经退出。' })
+    if (state === 'running') state = nextState
+    lastKill = terminateProcessTree(child)
+    return lastKill
   }
-  const onAbort = () => stop('aborted')
+  const onAbort = () => { void stop('aborted') }
   signal?.addEventListener('abort', onAbort, { once: true })
-  const timer = setTimeout(() => stop('timed-out'), hardTimeoutMs)
+  const timer = setTimeout(() => { void stop('timed-out') }, hardTimeoutMs)
 
   const collect = destination => chunk => {
     outputBytes += chunk.length
@@ -221,6 +215,7 @@ export function startMaa(args, options = {}) {
       reject(error)
     })
     child.on('close', (code, terminationSignal) => {
+      exited = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
       if (state === 'aborted') return reject(abortError())
@@ -238,23 +233,69 @@ export function startMaa(args, options = {}) {
   // Keep the process handle alive until it exits even when nobody awaits it
   // immediately; `done` is awaited by the caller's settlement code.
   done.catch(() => {})
-  return { pid: child.pid ?? null, done, kill: () => stop('aborted') }
+  return {
+    pid: child.pid ?? null,
+    done,
+    kill: () => stop('aborted'),
+    get exited() { return exited },
+  }
 }
 
+function spawnMaaProcess(cliPath, args, command, commandProcessor, childEnv) {
+  if (process.platform === 'win32') {
+    // Passing /c as a separate spawn argument makes Node escape the quotes around
+    // a .cmd path. Let cmd.exe receive the already validated command as one unit.
+    return spawn(command, {
+      shell: commandProcessor,
+      windowsHide: true,
+      env: childEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  }
+  // POSIX (development / CI): no shell at all, and a dedicated process group so
+  // the whole tree can be terminated exactly like taskkill /T does on Windows.
+  return spawn(cliPath, args, {
+    env: childEnv,
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+}
+
+// Returns a promise that settles once the kill attempt itself has finished.
+// It does not wait for the child to exit; callers observe that through `close`.
 function terminateProcessTree(child) {
   if (process.platform === 'win32' && Number.isInteger(child.pid)) {
     // runMaa starts through cmd.exe so the actual maa executable is a child.
     // taskkill /T targets only this exact process tree; it does not touch the
     // emulator, game, MAA GUI, or another independently launched maa-cli.
-    const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
-      windowsHide: true,
-      stdio: 'ignore',
+    return new Promise(resolve => {
+      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      const errors = []
+      killer.stderr?.on('data', chunk => errors.push(chunk))
+      killer.on('error', error => {
+        try { child.kill() } catch {}
+        resolve({ ok: false, detail: `taskkill 无法启动：${error.message}` })
+      })
+      killer.on('close', code => {
+        // 128 = "process not found": the tree already exited, which is success.
+        if (code === 0 || code === 128) return resolve({ ok: true, detail: '' })
+        resolve({ ok: false, detail: `taskkill 退出码 ${code}：${Buffer.concat(errors).toString('utf8').trim()}`.trim() })
+      })
     })
-    killer.on('error', () => { child.kill() })
-    killer.unref()
-    return
   }
-  child.kill()
+  if (Number.isInteger(child.pid) && process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+      return Promise.resolve({ ok: true, detail: '' })
+    } catch (error) {
+      if (error?.code === 'ESRCH') return Promise.resolve({ ok: true, detail: '' })
+    }
+  }
+  try { child.kill('SIGKILL') } catch {}
+  return Promise.resolve({ ok: true, detail: '' })
 }
 
 function abortError() {

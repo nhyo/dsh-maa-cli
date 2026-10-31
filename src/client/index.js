@@ -4,10 +4,8 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const CLIENT_STARTED_AT = Date.now()
-    // Plans the user deleted from the confirmation panel stay hidden for the
-    // rest of this client instance. The code itself still works server-side
-    // until it expires (or is consumed), so the tool card drops its own
-    // confirm button as well to avoid a second, competing entry point.
+    // Plans cancelled through the confirmation panel stay hidden in every
+    // local view after the host has invalidated the one-shot code.
     const dismissedPlans = new Set()
 
     const CSS = [
@@ -69,6 +67,7 @@ window.__ModuleLoader__.load({
       '.maa-memory-meta{font-size:11px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}',
       '.maa-memory-actions{display:flex;gap:5px}',
       '.maa-run-dock{border-color:var(--dsw-alias-brand-primary)}',
+      '.maa-dock-body[hidden]{display:none!important}',
       '.maa-run-meta{font-size:11px;line-height:17px;color:var(--dsw-alias-label-secondary)}',
       '.maa-run-warn{font-size:11px;line-height:17px;color:var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary));margin-top:6px}',
       '.maa-run-result{width:100%;margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}',
@@ -177,6 +176,27 @@ window.__ModuleLoader__.load({
       return { params: nextParams, drafts: nextDrafts }
     }
 
+    // Unconfirmed panel edits survive a page refresh. Drafts are keyed by the
+    // one-shot code (so they die with it) and dropped when the capability
+    // signature changes, exactly like the in-memory variant drafts.
+    const PLAN_DRAFT_PREFIX = 'dsh.maa.draft:'
+    function writePlanDraft(code, draft) {
+      if (!code) return
+      try {
+        if (draft) globalThis.localStorage.setItem(PLAN_DRAFT_PREFIX + code, JSON.stringify(draft))
+        else globalThis.localStorage.removeItem(PLAN_DRAFT_PREFIX + code)
+      } catch (_) {}
+    }
+    function withRestoredDraft(next) {
+      if (!next || !next.code || next.params) return next
+      try {
+        const draft = JSON.parse(globalThis.localStorage.getItem(PLAN_DRAFT_PREFIX + next.code) || 'null')
+        if (!draft || !draft.params || typeof draft.params !== 'object') return next
+        if ((draft.signature || '') !== (next.capabilitySignature || '')) return next
+        return Object.assign({}, next, { params: draft.params })
+      } catch (_) { return next }
+    }
+
     function createPlanStore() {
       let value = null
       const listeners = new Set()
@@ -186,12 +206,12 @@ window.__ModuleLoader__.load({
         subscribe: function (listener) { listeners.add(listener); return function () { listeners.delete(listener) } },
         set: function (next) {
           if (value && next && value.code === next.code) return
-          value = next
+          value = next ? withRestoredDraft(next) : next
           publish()
         },
         sync: function (next) {
           if (!next || !next.code) return
-          if (!value || value.code !== next.code) { value = next; publish(); return }
+          if (!value || value.code !== next.code) { value = withRestoredDraft(next); publish(); return }
           const changed = value.capabilitySignature && next.capabilitySignature
             && value.capabilitySignature !== next.capabilitySignature
           value = Object.assign({}, value, next, {
@@ -202,7 +222,20 @@ window.__ModuleLoader__.load({
         },
         clear: function (code) {
           if (!value || (code && value.code !== code)) return
+          writePlanDraft(value.code, null)
           value = null
+          publish()
+        },
+        setError: function (code, error) {
+          if (!value || value.code !== code) return
+          value = Object.assign({}, value, { error: String(error || '') })
+          publish()
+        },
+        // Note-preview state belongs to the plan, not to a component: it must
+        // survive minimizing, remounting and switching conversations.
+        setPreview: function (code, preview) {
+          if (!value || value.code !== code) return
+          value = Object.assign({}, value, { preview: preview })
           publish()
         },
         // The roguelike panel appears both in the tool card and in the composer
@@ -214,6 +247,7 @@ window.__ModuleLoader__.load({
           const previous = value.params || (panel ? panel.values : null)
           const switched = switchPanelVariant(panel, previous, params, value.variantDrafts)
           value = Object.assign({}, value, { params: switched.params, variantDrafts: switched.drafts })
+          writePlanDraft(code, { params: switched.params, signature: value.capabilitySignature || '' })
           publish()
         },
         complete: function (code, result) {
@@ -231,83 +265,310 @@ window.__ModuleLoader__.load({
       if (!store) { store = createPlanStore(); stores.set(key, store) }
       return store
     }
+    const runStores = new Map()
+    function runStoreFor(sessionId) {
+      const key = String(sessionId)
+      let store = runStores.get(key)
+      if (!store) { store = createRunStore(key); runStores.set(key, store) }
+      return store
+    }
 
-    function useCommandButton(options) {
+    // ---------------------------------------------------------------------
+    // Run binding. One store per DSH session, created at module scope so it
+    // survives minimizing, slot remounts and switching conversations. It is the
+    // single place the UI learns "which run belongs to this panel"; the host's
+    // runs.json (read through /maa status) is the authority it reconciles with.
+    //
+    // phase: launching  – /maa confirm is in flight (no run id yet)
+    //        running    – the host reported (or returned) a live run
+    //        stopping   – a stop request is in flight or recorded on the host
+    //        finished   – the bound run has ended; `record` holds the result
+    //        observer   – another DSH session's run (read-only, never stopped here)
+    // ---------------------------------------------------------------------
+    const RUN_STORAGE_KEY = 'dsh.maa.run'
+    const LIVE_PHASES = ['launching', 'running', 'stopping']
+
+    function runStorageKey(sessionId) {
+      return RUN_STORAGE_KEY + ':' + String(sessionId == null ? '' : sessionId)
+    }
+
+    function readStoredRun(sessionId) {
+      try {
+        const parsed = JSON.parse(globalThis.localStorage.getItem(runStorageKey(sessionId)) || 'null')
+        if (!parsed || typeof parsed.startedAt !== 'number' || typeof parsed.phase !== 'string') return null
+        if (Date.now() - parsed.startedAt > 7 * 60 * 60_000) return null
+        // A restored binding is never "in flight": that request died with the
+        // page. The first status read decides what it really is.
+        return Object.assign({}, parsed, { inFlight: false, local: false })
+      } catch (_) { return null }
+    }
+
+    function writeStoredRun(sessionId, run) {
+      try {
+        if (run && run.phase !== 'observer') globalThis.localStorage.setItem(runStorageKey(sessionId), JSON.stringify(run))
+        else globalThis.localStorage.removeItem(runStorageKey(sessionId))
+      } catch (_) {}
+    }
+
+    function createRunStore(sessionId) {
+      let value = {
+        run: readStoredRun(sessionId),
+        runtime: { busy: false, message: '', input: '' },
+        collapsed: {},
+        loading: false,
+        historyHidden: false,
+      }
+      const listeners = new Set()
+      const commit = function (patch) {
+        value = Object.assign({}, value, patch)
+        if (Object.prototype.hasOwnProperty.call(patch, 'run')) writeStoredRun(sessionId, value.run)
+        listeners.forEach(function (listener) { listener() })
+      }
+      return {
+        sessionId: sessionId,
+        getSnapshot: function () { return value },
+        subscribe: function (listener) { listeners.add(listener); return function () { listeners.delete(listener) } },
+        replaceRun: function (run) { commit({ run: run }) },
+        updateRun: function (patch) { if (value.run) commit({ run: Object.assign({}, value.run, patch) }) },
+        setRuntime: function (patch) { commit({ runtime: Object.assign({}, value.runtime, patch) }) },
+        setLoading: function (loading) { commit({ loading: Boolean(loading) }) },
+        setHistoryHidden: function (hidden) { commit({ historyHidden: Boolean(hidden) }) },
+        isCollapsed: function (key) {
+          if (!key) return false
+          if (Object.prototype.hasOwnProperty.call(value.collapsed, key)) return value.collapsed[key]
+          return readPanelCollapsed(key)
+        },
+        setCollapsed: function (key, collapsed) {
+          if (!key) return
+          writePanelCollapsed(key, collapsed)
+          commit({ collapsed: Object.assign({}, value.collapsed, { [key]: Boolean(collapsed) }) })
+        },
+      }
+    }
+
+    function runViewKey(run) {
+      if (!run) return ''
+      return panelViewKey('run', run.code || run.runId)
+    }
+
+    function readRunRecord(execute) {
+      if (typeof execute !== 'function') return Promise.resolve(null)
+      return Promise.resolve(execute('/maa status')).then(function (outcome) {
+        if (!outcome || outcome.kind !== 'success' || typeof outcome.text !== 'string') return null
+        try { return JSON.parse(outcome.text) } catch (_) { return null }
+      }, function () { return null })
+    }
+
+    function recordLabel(record) {
+      return record ? (record.planSummary || record.purpose || '') : ''
+    }
+
+    function startedAtOf(record, fallback) {
+      const parsed = record && record.startedAt ? Date.parse(record.startedAt) : NaN
+      return Number.isFinite(parsed) ? parsed : (fallback || Date.now())
+    }
+
+    // Reconcile the local binding with the host snapshot. The host wins on
+    // facts (is it running, did it stop); the local binding only fills the gap
+    // while a request this tab issued is still in flight.
+    function applyRunSnapshot(runs, snapshot) {
+      if (!snapshot || typeof snapshot !== 'object') return
+      const current = runs.getSnapshot().run
+      const running = snapshot.running
+      if (running) {
+        const owner = running.owner || 'self'
+        if (owner === 'other' || owner === 'foreign') {
+          if (current && LIVE_PHASES.indexOf(current.phase) >= 0 && (current.inFlight || current.local)) return
+          runs.replaceRun({
+            phase: 'observer', code: running.confirmationCode || '', runId: running.id, owner: owner,
+            summary: recordLabel(running), startedAt: startedAtOf(running), record: running, message: '', error: '',
+          })
+          return
+        }
+        const same = current && (current.runId === running.id || (current.code && current.code === running.confirmationCode))
+        const stopping = Boolean(running.stopping) || Boolean(same && current.phase === 'stopping' && current.inFlight)
+        runs.replaceRun({
+          phase: stopping ? 'stopping' : 'running',
+          code: running.confirmationCode || (same ? current.code : ''),
+          runId: running.id, owner: owner,
+          summary: recordLabel(running) || (same ? current.summary : ''),
+          startedAt: startedAtOf(running, same ? current.startedAt : 0),
+          record: running,
+          inFlight: Boolean(same && current.inFlight),
+          message: same ? current.message || '' : '',
+          // A failed stop is persisted on the host; show it until the next try.
+          error: (same && current.error) || (running.stopError ? '上次停止失败：' + running.stopError : ''),
+        })
+        return
+      }
+      const launching = snapshot.launching
+      if (launching && launching.code) {
+        if (current && current.code === launching.code && LIVE_PHASES.indexOf(current.phase) >= 0) return
+        runs.replaceRun({ phase: 'launching', code: launching.code, runId: launching.runId || '', summary: current && current.code === launching.code ? current.summary : '', startedAt: Date.now(), record: null, message: '', error: '' })
+        return
+      }
+      if (!current) return
+      if (current.phase === 'launching' && current.local) return
+      if (current.phase === 'observer') { runs.replaceRun(null); return }
+      const records = [snapshot.interrupted].concat(Array.isArray(snapshot.recent) ? snapshot.recent : []).filter(Boolean)
+      const record = records.find(function (item) {
+        return (current.runId && item.id === current.runId) || (current.code && item.confirmationCode === current.code)
+      })
+      if (current.phase === 'finished') {
+        // Refresh the result shown for an already-finished binding.
+        if (record) runs.updateRun({ runId: record.id, record: record })
+        return
+      }
+      if (record) {
+        runs.replaceRun(Object.assign({}, current, { phase: 'finished', runId: record.id, record: record, inFlight: false, local: false, error: '' }))
+        return
+      }
+      // Nothing on the host: the confirmation failed before a run existed (or
+      // its record aged out). Do not keep a stop button for a ghost.
+      runs.replaceRun(null)
+    }
+
+    function loadRunStatus(runs, plans, execute) {
+      if (typeof execute !== 'function') return Promise.resolve(null)
+      runs.setLoading(true)
+      return readRunRecord(execute).then(function (snapshot) {
+        runs.setLoading(false)
+        if (!snapshot) return null
+        applyRunSnapshot(runs, snapshot)
+        restorePendingPlan(plans, execute, snapshot.pending)
+        return snapshot
+      })
+    }
+
+    // After a page refresh the plan dock comes back from the host, not from a
+    // replayed transcript card.
+    function restorePendingPlan(plans, execute, pending) {
+      if (!plans || !pending || !pending.code || dismissedPlans.has(pending.code)) return
+      const current = plans.getSnapshot()
+      if (current && current.code === pending.code) return
+      Promise.resolve(execute('/maa peek ' + pending.code)).then(function (outcome) {
+        if (!outcome || outcome.kind !== 'success') return
+        let payload = null
+        try { payload = JSON.parse(outcome.text) } catch (_) { return }
+        if (!payload || payload.code !== pending.code || !payload.panel) return
+        plans.sync({
+          code: payload.code, summary: payload.summary || pending.summary || 'MAA 计划', execute: execute,
+          theme: typeof payload.theme === 'string' ? payload.theme : '',
+          taskPanel: payload.panel, capabilitySignature: payload.capabilitySignature || '', params: null,
+          goal: payload.goal || null, workflow: payload.workflow || null,
+        })
+      }, function () {})
+    }
+
+    // One confirmation for both the transcript card and the composer dock.
+    // A successful `/maa confirm` means the run has STARTED (it runs in the
+    // background); it is never treated as the run being over.
+    function startConfirmation(options) {
+      const runs = options.runs
+      const plans = options.plans
       const execute = options.execute
-      const line = options.line
-      const onSuccess = options.onSuccess
-      const onStart = options.onStart
-      const statePair = React.useState('ready')
-      const state = statePair[0]
-      const setState = statePair[1]
-      const errorPair = React.useState('')
-      const error = errorPair[0]
-      const setError = errorPair[1]
-      const resultPair = React.useState('')
-      const result = resultPair[0]
-      const setResult = resultPair[1]
-      const stopRequested = React.useRef(false)
-      const run = React.useCallback(function () {
-        if (!line || state !== 'ready') return
-        setState('running')
-        setError('')
-        setResult('')
-        stopRequested.current = false
-        if (onStart) onStart(line)
-        Promise.resolve(execute(line)).then(function (outcome) {
-          if (stopRequested.current) {
-            setState('stopped')
-            return
+      const code = options.code
+      const current = runs.getSnapshot().run
+      if (!code || !options.line || typeof execute !== 'function') return Promise.resolve(null)
+      if (current && LIVE_PHASES.indexOf(current.phase) >= 0 && current.phase !== 'observer') return Promise.resolve(null)
+      plans.setError(code, '')
+      runs.replaceRun({
+        phase: 'launching', code: code, runId: '', summary: options.summary || '', startedAt: Date.now(),
+        record: null, message: '', error: '', inFlight: false, local: true,
+      })
+      try { globalThis.localStorage.setItem('dsh.maa.history', '1') } catch (_) {}
+      const settle = function (outcome) {
+        const run = runs.getSnapshot().run
+        const bound = Boolean(run && run.code === code)
+        const text = outcome && typeof outcome.text === 'string' ? outcome.text : ''
+        const runId = (text.match(/RUN-[A-F0-9]{8}/) || [])[0] || ''
+        if (outcome && outcome.kind === 'success') {
+          dismissedPlans.add(code)
+          plans.clear(code)
+          if (bound && run.phase !== 'finished') {
+            runs.updateRun({ phase: run.phase === 'stopping' ? 'stopping' : 'running', runId: runId || run.runId, local: false, message: '' })
           }
-          if (!outcome || outcome.kind !== 'success') {
-            setState('ready')
-            setError(outcome && outcome.text ? outcome.text : '本地命令执行失败。')
-            return
-          }
-          setState('done')
-          setResult(outcome.text || '执行完成。')
-          if (onSuccess) onSuccess(outcome)
-        }, function (reason) {
-          if (stopRequested.current) {
-            setState('stopped')
-            return
-          }
-          setState('ready')
-          setError(reason instanceof Error ? reason.message : String(reason))
-        })
-      }, [execute, line, state, onSuccess, onStart])
-      const stop = React.useCallback(function () {
-        if (state !== 'running') return
-        stopRequested.current = true
-        setState('stopping')
-        setError('')
-        Promise.resolve(execute('/maa stop')).then(function (outcome) {
-          if (!outcome || outcome.kind !== 'success') {
-            stopRequested.current = false
-            setState('running')
-            setError(outcome && outcome.text ? outcome.text : '停止任务失败。')
-            return
-          }
-          setState('stopped')
-          setResult(outcome.text || '任务已停止。')
-          if (onSuccess) onSuccess(outcome)
-        }, function (reason) {
-          stopRequested.current = false
-          setState('running')
-          setError(reason instanceof Error ? reason.message : String(reason))
-        })
-      }, [execute, state, onSuccess])
-      return { state, error, result, run, stop }
+          return outcome
+        }
+        if (/已在开始执行前取消|在启动阶段被停止/.test(text)) {
+          dismissedPlans.add(code)
+          plans.clear(code)
+          if (bound) runs.updateRun({ phase: 'finished', runId: runId || run.runId, local: false, message: text })
+          return outcome
+        }
+        if (bound && run.phase === 'launching') runs.replaceRun(null)
+        if (/已永久失效/.test(text)) {
+          dismissedPlans.add(code)
+          plans.clear(code)
+        } else {
+          plans.setError(code, text || '本地命令执行失败。')
+        }
+        return outcome
+      }
+      return Promise.resolve(execute(options.line)).then(settle, function (reason) {
+        // The transport failed: the host may still have started the run.
+        // Ask once instead of guessing.
+        const run = runs.getSnapshot().run
+        if (run && run.code === code) runs.updateRun({ local: false })
+        plans.setError(code, reason instanceof Error ? reason.message : String(reason))
+        return loadRunStatus(runs, plans, execute)
+      })
+    }
+
+    // Stop exactly the bound run (or the launching confirmation). Resolves after
+    // the host confirmed the process tree exited — or keeps the controls with
+    // the reason when it could not.
+    function requestRunStop(runs, plans, execute, askFirst) {
+      const run = runs.getSnapshot().run
+      if (!run || LIVE_PHASES.indexOf(run.phase) < 0 || run.inFlight || typeof execute !== 'function') return Promise.resolve(null)
+      if (askFirst && typeof globalThis.confirm === 'function'
+        && !globalThis.confirm('关闭运行面板会停止当前 MAA 任务（终止进程，不能暂停后继续）。确定停止？')) return Promise.resolve(null)
+      const target = run.runId || run.code || ''
+      runs.updateRun({ phase: 'stopping', inFlight: true, error: '', message: '正在停止任务并等待 MAA 进程退出…' })
+      const fail = function (text) {
+        const latest = runs.getSnapshot().run
+        if (latest && latest.inFlight) runs.updateRun({ phase: latest.runId || latest.code ? 'running' : latest.phase, inFlight: false, message: '', error: text || '停止任务失败。' })
+      }
+      return Promise.resolve(execute(target ? '/maa stop ' + target : '/maa stop')).then(function (outcome) {
+        if (!outcome || outcome.kind !== 'success') {
+          fail(outcome && outcome.text)
+          return loadRunStatus(runs, plans, execute)
+        }
+        runs.updateRun({ phase: 'finished', inFlight: false, local: false, error: '', message: outcome.text || '任务已停止。' })
+        return loadRunStatus(runs, plans, execute)
+      }, function (reason) {
+        fail(reason instanceof Error ? reason.message : String(reason))
+      })
+    }
+
+    function sendRuntimeInstruction(runs, plans, execute, command) {
+      const state = runs.getSnapshot()
+      if (typeof execute !== 'function' || state.runtime.busy || !command) return
+      runs.setRuntime({ busy: true, message: '', input: '' })
+      Promise.resolve(execute('/maa ' + command)).then(function (outcome) {
+        runs.setRuntime({ busy: false, message: outcome && outcome.text ? outcome.text : '运行时指令没有返回结果。' })
+        loadRunStatus(runs, plans, execute)
+      }, function (reason) {
+        runs.setRuntime({ busy: false, message: reason instanceof Error ? reason.message : String(reason) })
+      })
     }
 
     function ConfirmButton(props) {
+      const plans = props.plans
+      const runs = props.runs
+      const plan = React.useSyncExternalStore(plans.subscribe, plans.getSnapshot, plans.getSnapshot)
+      const runState = React.useSyncExternalStore(runs.subscribe, runs.getSnapshot, runs.getSnapshot)
+      const run = runState.run
+      const code = props.code
+      const own = plan && plan.code === code ? plan : null
       const note = typeof props.note === 'string' ? props.note.trim() : ''
-      const previewPair = React.useState({ state: 'idle', note: '', line: '', data: null, error: '' })
-      const preview = previewPair[0]
-      const setPreview = previewPair[1]
+      const idlePreview = { state: 'idle', note: '', line: '', data: null, error: '' }
+      const preview = own && own.preview ? own.preview : idlePreview
+      const setPreview = function (next) { plans.setPreview(code, next) }
       const previewReady = note === '' || (preview.state === 'ready' && preview.note === note && preview.line === props.previewLine)
-      const action = useCommandButton({ execute: props.execute, line: previewReady ? props.line : '', onSuccess: props.onSuccess, onStart: props.onStart })
-      const runPreview = React.useCallback(function () {
+      const bound = Boolean(run && run.code === code && LIVE_PHASES.indexOf(run.phase) >= 0)
+      const busyElsewhere = Boolean(run && LIVE_PHASES.indexOf(run.phase) >= 0 && run.code !== code)
+      const runPreview = function () {
         if (!note || !props.previewLine || preview.state === 'running') return
         setPreview({ state: 'running', note: note, line: props.previewLine, data: null, error: '' })
         Promise.resolve(props.execute(props.previewLine)).then(function (outcome) {
@@ -329,40 +590,40 @@ window.__ModuleLoader__.load({
         }).catch(function (reason) {
           setPreview({ state: 'error', note: note, line: props.previewLine, data: null, error: reason instanceof Error ? reason.message : String(reason) })
         })
-      }, [note, props.previewLine, props.execute, props.inputActions, preview.state])
+      }
       React.useEffect(function () {
-        if (preview.note && (preview.note !== note || preview.line !== props.previewLine)) {
-          setPreview({ state: 'idle', note: '', line: '', data: null, error: '' })
-        }
+        if (preview.note && (preview.note !== note || preview.line !== props.previewLine)) setPreview(idlePreview)
       }, [note, props.previewLine, preview.note, preview.line])
       const cancelNote = function () {
         if (props.onNoteChange) props.onNoteChange('')
-        setPreview({ state: 'idle', note: '', line: '', data: null, error: '' })
+        setPreview(idlePreview)
+      }
+      const confirm = function () {
+        if (!props.line || !previewReady || bound || busyElsewhere) return
+        startConfirmation({ runs: runs, plans: plans, execute: props.execute, code: code, line: props.line, summary: props.summary })
       }
       const data = preview.data
+      const locked = bound || busyElsewhere
       return h(React.Fragment, null,
         h('button', {
-          className: 'maa-plan-button', type: 'button',
-          disabled: !props.line || !previewReady || action.state !== 'ready', onClick: action.run,
-        }, action.state === 'running' ? '正在执行…'
-          : action.state === 'stopping' ? '正在停止…'
-          : action.state === 'stopped' ? '任务已停止'
-          : action.state === 'done' ? '执行完成' : '确认并执行 MAA'),
-        action.state === 'running' || action.state === 'stopping'
+          className: 'maa-plan-button', type: 'button', 'data-maa-action': 'confirm',
+          disabled: !props.line || !previewReady || locked, onClick: confirm,
+        }, bound ? (run.phase === 'stopping' ? '正在停止…' : '正在执行…') : '确认并执行 MAA'),
+        bound
           ? h('button', {
-              className: 'maa-stop-button', type: 'button',
-              disabled: action.state === 'stopping', onClick: action.stop,
-            }, action.state === 'stopping' ? '正在停止…' : '停止任务')
+              className: 'maa-stop-button', type: 'button', 'data-maa-action': 'stop',
+              disabled: Boolean(run.inFlight), onClick: function () { requestRunStop(runs, plans, props.execute, false) },
+            }, run.inFlight ? '正在停止…' : '停止任务')
           : null,
         h('span', { className: 'maa-plan-state' },
-          action.state === 'stopped' ? '不会自动继续剩余任务'
-          : action.state === 'done' ? '执行结果见下方' : note && !previewReady ? '请先预览备注策略' : '30 分钟内有效'),
+          busyElsewhere ? '已有任务在执行，完成或停止后才能确认'
+          : note && !previewReady ? '请先预览备注策略' : '30 分钟内有效'),
         h('input', {
           className: 'maa-note-input', type: 'text', maxLength: 120,
           placeholder: '备注：如“优先招募维什戴尔，不买不灭的火炬”',
           title: '备注会先编译成 MAA 策略并显示预览；不会直接执行',
           value: typeof props.note === 'string' ? props.note : '',
-          disabled: action.state !== 'ready',
+          disabled: locked,
           onChange: function (event) {
             if (props.onNoteChange) props.onNoteChange(event.target.value)
           },
@@ -377,10 +638,10 @@ window.__ModuleLoader__.load({
         }),
         note ? h('button', {
           'data-maa-note-preview': 'true',
-          className: 'maa-secondary-button', type: 'button', disabled: preview.state === 'running' || action.state !== 'ready',
+          className: 'maa-secondary-button', type: 'button', disabled: preview.state === 'running' || locked,
           onClick: runPreview,
         }, preview.state === 'running' ? '解析中…' : previewReady ? '重新预览' : '解析并预览备注') : null,
-        note ? h('button', { className: 'maa-secondary-button', type: 'button', disabled: action.state !== 'ready', onClick: cancelNote }, '取消备注策略') : null,
+        note ? h('button', { className: 'maa-secondary-button', type: 'button', disabled: locked, onClick: cancelNote }, '取消备注策略') : null,
         // Only acknowledge the note here. The compiled details (supported,
         // unsupported, memory deltas) stay in the command JSON for the model and
         // the server, never in the panel: the panel is for humans, not a log.
@@ -390,8 +651,7 @@ window.__ModuleLoader__.load({
         data && data.status === 'needs_model' ? h('div', { className: 'maa-note-preview', role: 'status' },
           h('div', { className: 'maa-note-preview-title' }, '已收到备注【' + (data.note || note) + '】，正在请模型识别')) : null,
         preview.error ? h('div', { className: 'maa-plan-error' }, preview.error) : null,
-        action.error ? h('div', { className: 'maa-plan-error' }, action.error) : null,
-        action.result ? h('div', { className: 'maa-plan-result', role: 'status' }, action.result) : null)
+        own && own.error ? h('div', { className: 'maa-plan-error', 'data-maa-error': 'confirm' }, own.error) : null)
     }
 
     // Generic MAA task settings. The host supplies the field definitions from
@@ -493,9 +753,12 @@ window.__ModuleLoader__.load({
       const code = match ? match[0].toUpperCase() : ''
       const summary = props.phase === 'preparing' ? '正在生成安全计划…' : planSummary(props.block)
       const plan = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot)
+      const runState = React.useSyncExternalStore(props.runs.subscribe, props.runs.getSnapshot, props.runs.getSnapshot)
+      const run = runState.run
       const current = plan && plan.code === code ? plan : null
       const effective = current ? (current.params || (current.taskPanel ? current.taskPanel.values : null)) : null
       const dismissed = Boolean(code) && dismissedPlans.has(code)
+      const boundRun = run && code && run.code === code && run.phase !== 'observer' ? run : null
       React.useEffect(function () {
         // Historical tool cards are replayed whenever DSH starts. Only a plan
         // produced while this client instance is alive may raise the composer
@@ -532,6 +795,7 @@ window.__ModuleLoader__.load({
         props.phase === 'result' && !props.block.isError && !dismissed && current && current.taskPanel
           ? h('div', { className: 'maa-plan-actions' },
               h(ConfirmButton, {
+                code: code, plans: props.store, runs: props.runs, summary: summary || current.summary || '',
                 execute: props.execute,
                 line: confirmLine(code, effective, current && current.taskPanel ? current.taskPanel.fields : undefined),
                 previewLine: notePreviewLine(code, effective, current && current.taskPanel ? current.taskPanel.fields : undefined),
@@ -540,20 +804,31 @@ window.__ModuleLoader__.load({
                 onNoteChange: function (next) {
                   props.store.setParams(code, Object.assign({}, effective, { note: next }))
                 },
-                onStart: function () {
-                  writeStoredRun({ startedAt: Date.now(), summary: summary || '', code: code })
-                  try { globalThis.localStorage.setItem('dsh.maa.history', '1') } catch (_) {}
-                },
-                onSuccess: function () { props.store.clear(code) },
               }))
-          : props.phase === 'result' && !props.block.isError && !dismissed
-            ? h('div', { className: 'maa-plan-loading' }, '正在读取当前 MAA 能力…')
-            : null,
+          : boundRun
+            // The plan was consumed; the card keeps its own stop control for as
+            // long as its run is live, in addition to the composer dock.
+            ? h('div', { className: 'maa-plan-actions' },
+                h('span', { className: 'maa-plan-state' }, RUN_PHASE_LABELS[boundRun.phase] || ''),
+                LIVE_PHASES.indexOf(boundRun.phase) >= 0
+                  ? h('button', {
+                      className: 'maa-stop-button', type: 'button', 'data-maa-action': 'stop',
+                      disabled: Boolean(boundRun.inFlight),
+                      onClick: function () { requestRunStop(props.runs, props.store, props.execute, false) },
+                    }, boundRun.inFlight ? '正在停止…' : '停止任务')
+                  : null,
+                boundRun.error ? h('div', { className: 'maa-plan-error' }, boundRun.error) : null)
+            : props.phase === 'result' && !props.block.isError && !dismissed
+              ? h('div', { className: 'maa-plan-loading' }, '正在读取当前 MAA 能力…')
+              : null,
       )
     }
 
     const RUN_STATUS_LABELS = {
       running: '执行中', succeeded: '已完成', failed: '失败', stopped: '已停止', finished: '已结束',
+    }
+    const RUN_PHASE_LABELS = {
+      launching: '正在启动 MAA…', running: 'MAA 任务执行中', stopping: 'MAA 任务正在停止', finished: 'MAA 任务已结束', observer: '另一个 DSH 会话的 MAA 任务执行中',
     }
 
     function formatRunClock(iso) {
@@ -565,33 +840,34 @@ window.__ModuleLoader__.load({
     }
 
     // Every `/maa …` line goes through the command plane and is echoed into the
-    // transcript, so the dock never polls: it remembers the run it started, and
-    // reads the host record only when the user explicitly asks (停止 / 查看记录).
-    const RUN_STORAGE_KEY = 'dsh.maa.run'
+    // transcript, so the dock never polls: it reads the host record once when it
+    // mounts (refresh, DSH restart, conversation switch), after each action the
+    // user takes, and when the user expands the panel or asks to refresh.
+    const PANEL_VIEW_STORAGE_KEY = 'dsh.maa.panel-view'
 
-    function readStoredRun() {
-      try {
-        const parsed = JSON.parse(globalThis.localStorage.getItem(RUN_STORAGE_KEY) || 'null')
-        if (!parsed || typeof parsed.startedAt !== 'number') return null
-        if (Date.now() - parsed.startedAt > 7 * 60 * 60_000) return null
-        return parsed
-      } catch (_) { return null }
+    function panelViewKey(kind, id) {
+      return kind && id ? String(kind) + ':' + String(id) : ''
     }
 
-    function writeStoredRun(run) {
+    function readPanelCollapsed(key) {
+      if (!key) return false
       try {
-        if (run) globalThis.localStorage.setItem(RUN_STORAGE_KEY, JSON.stringify(run))
-        else globalThis.localStorage.removeItem(RUN_STORAGE_KEY)
+        const value = JSON.parse(globalThis.localStorage.getItem(PANEL_VIEW_STORAGE_KEY) || '{}')
+        return value && value[key] === true
+      } catch (_) { return false }
+    }
+
+    function writePanelCollapsed(key, collapsed) {
+      if (!key) return
+      try {
+        const value = JSON.parse(globalThis.localStorage.getItem(PANEL_VIEW_STORAGE_KEY) || '{}')
+        const next = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+        if (collapsed) next[key] = true
+        else delete next[key]
+        globalThis.localStorage.setItem(PANEL_VIEW_STORAGE_KEY, JSON.stringify(next))
       } catch (_) {}
     }
-
-    function readRunRecord(execute) {
-      if (typeof execute !== 'function') return Promise.resolve(null)
-      return Promise.resolve(execute('/maa status')).then(function (outcome) {
-        if (!outcome || outcome.kind !== 'success' || typeof outcome.text !== 'string') return null
-        try { return JSON.parse(outcome.text) } catch (_) { return null }
-      }, function () { return null })
-    }
+    // end of panel view helpers
 
     function formatElapsed(ms) {
       const total = Math.max(0, Math.round(ms / 1000))
@@ -634,226 +910,176 @@ window.__ModuleLoader__.load({
       return parts.join(' · ')
     }
 
+    // One shell for every dock state. Minimizing only hides the body (the
+    // `hidden` attribute); it never unmounts it, so inputs, previews, buttons
+    // and in-flight state are exactly as they were when the panel is expanded
+    // again. The header — including the −/+ toggle — is always rendered.
+    function DockShell(props) {
+      return h('div', {
+        className: 'maa-confirm-dock' + (props.className ? ' ' + props.className : ''),
+        role: 'status', 'data-maa-dock': props.kind, 'data-collapsed': props.collapsed ? 'true' : 'false',
+      },
+      h('div', { className: 'maa-confirm-dock-head' },
+        h('div', { className: 'maa-confirm-dock-copy' },
+          h('div', { className: 'maa-confirm-dock-title' }, props.title),
+          props.summary ? h('div', { className: 'maa-confirm-dock-summary' }, props.summary) : null,
+          props.alert ? h('div', { className: 'maa-plan-error', 'data-maa-alert': 'true' }, props.alert) : null)),
+      h('div', { className: 'maa-dock-actions' },
+        h('button', {
+          key: 'collapse', className: 'maa-dock-icon', type: 'button', 'data-maa-action': 'toggle',
+          title: props.collapsed ? props.expandLabel : props.collapseLabel,
+          'aria-label': props.collapsed ? props.expandLabel : props.collapseLabel,
+          'aria-expanded': props.collapsed ? 'false' : 'true',
+          onClick: props.onToggle,
+        }, props.collapsed ? '+' : '\u2212'),
+        props.onClose ? h('button', {
+          key: 'close', className: 'maa-dock-icon', type: 'button', 'data-maa-action': 'close',
+          title: props.closeLabel, 'aria-label': props.closeLabel, disabled: Boolean(props.closeDisabled),
+          onClick: props.onClose,
+        }, '\u00d7') : null),
+      h('div', { className: 'maa-dock-body', hidden: Boolean(props.collapsed) }, props.children))
+    }
+
     function MaaConfirmDock(props) {
-      const plan = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot)
-      const collapsedPair = React.useState(false)
-      const collapsed = collapsedPair[0]
-      const setCollapsed = collapsedPair[1]
-      const code = plan ? plan.code : null
+      const plans = props.store
+      const runs = props.runs
+      const plan = React.useSyncExternalStore(plans.subscribe, plans.getSnapshot, plans.getSnapshot)
+      const runState = React.useSyncExternalStore(runs.subscribe, runs.getSnapshot, runs.getSnapshot)
+      const run = runState.run
       const execute = typeof props.execute === 'function' ? props.execute : (plan && plan.execute)
-      const localRunPair = React.useState(function () { return readStoredRun() })
-      const localRun = localRunPair[0]
-      const setLocalRun = localRunPair[1]
-      const snapshotPair = React.useState(null)
-      const snapshot = snapshotPair[0]
-      const setSnapshot = snapshotPair[1]
-      const loadingPair = React.useState(false)
-      const loadingRecord = loadingPair[0]
-      const setLoadingRecord = loadingPair[1]
-      const hiddenPair = React.useState(false)
-      const recordHidden = hiddenPair[0]
-      const setRecordHidden = hiddenPair[1]
-      const runtimePair = React.useState('')
-      const runtimeMessage = runtimePair[0]
-      const setRuntimeMessage = runtimePair[1]
-      const runtimeBusyPair = React.useState(false)
-      const runtimeBusy = runtimeBusyPair[0]
-      const setRuntimeBusy = runtimeBusyPair[1]
-      const runtimeInputPair = React.useState('')
-      const runtimeInput = runtimeInputPair[0]
-      const setRuntimeInput = runtimeInputPair[1]
+      const planActionPair = React.useState({ busy: false, error: '' })
+      const planAction = planActionPair[0]
+      const setPlanAction = planActionPair[1]
+      const live = Boolean(run && LIVE_PHASES.indexOf(run.phase) >= 0)
+      useRunClock(live)
+      // One read on mount/re-entry restores the binding after a refresh, a DSH
+      // restart or switching conversations. This is deliberately not polling.
+      const loadRecord = function () { return loadRunStatus(runs, plans, execute) }
+      React.useEffect(function () { loadRecord() }, [runs])
 
-      const runningRecord = snapshot && snapshot.running ? snapshot.running : null
-      const interruptedRecord = snapshot && snapshot.interrupted ? snapshot.interrupted : null
-      const recentRuns = snapshot && Array.isArray(snapshot.recent) ? snapshot.recent : []
-      const finishedRun = runningRecord ? null : (interruptedRecord || recentRuns[0] || null)
-      // The tab that clicked confirm remembers the run locally, so the control
-      // panel appears instantly — without a single `/maa status` round trip.
-      const liveRun = runningRecord || (localRun && !finishedRun ? {
-        id: 'local',
-        startedAt: new Date(localRun.startedAt).toISOString(),
-        startedAtMs: localRun.startedAt,
-        planSummary: localRun.summary || '',
-        purpose: '',
-        confirmationCode: localRun.code || '',
-        duration: '',
-      } : null)
-      useRunClock(Boolean(liveRun))
-      const liveStartedAt = liveRun
-        ? (liveRun.startedAtMs || Date.parse(liveRun.startedAt) || Date.now())
-        : 0
-      const liveElapsed = liveRun ? (liveRun.duration || formatElapsed(Date.now() - liveStartedAt)) : ''
+      const toggle = function (key) {
+        return function () {
+          const next = !runs.isCollapsed(key)
+          runs.setCollapsed(key, next)
+          // Expanding is an explicit gesture: refresh the authoritative status
+          // once so a run that ended meanwhile is shown as ended.
+          if (!next && key.indexOf('run:') === 0) loadRecord()
+        }
+      }
 
-      const rememberRun = function (summary, codeValue) {
-        const record = { startedAt: Date.now(), summary: summary || '', code: codeValue || '' }
-        writeStoredRun(record)
-        setLocalRun(record)
-        setSnapshot(null)
-        setRecordHidden(false)
-      }
-      const forgetRun = function () {
-        writeStoredRun(null)
-        setLocalRun(null)
-      }
-      const loadRecord = function () {
-        setLoadingRecord(true)
-        return readRunRecord(execute).then(function (data) {
-          setLoadingRecord(false)
-          if (data) setSnapshot(data)
-          return data
-        })
-      }
-      const runtimeCommand = function (command) {
-        if (typeof execute !== 'function' || runtimeBusy) return
-        setRuntimeBusy(true)
-        setRuntimeMessage('')
-        Promise.resolve(execute('/maa ' + command)).then(function (outcome) {
-          setRuntimeBusy(false)
-          setRuntimeMessage(outcome && outcome.text ? outcome.text : '运行时指令没有返回结果。')
-          loadRecord()
-        }, function (reason) {
-          setRuntimeBusy(false)
-          setRuntimeMessage(reason instanceof Error ? reason.message : String(reason))
-        })
-      }
-      const submitRuntimeInput = function (event) {
-        if (event && typeof event.preventDefault === 'function') event.preventDefault()
-        const command = runtimeInput.trim()
-        if (!command || runtimeBusy) return
-        setRuntimeInput('')
-        runtimeCommand(command)
-      }
-      // A fresh plan always opens expanded; collapsing is a per-plan choice.
-      React.useEffect(function () { setCollapsed(false) }, [code])
-      const finishedView = function (record) {
-        const label = RUN_STATUS_LABELS[record.status] || record.status || '已结束'
-        return h('div', { className: 'maa-confirm-dock', role: 'status' },
-          h('div', { className: 'maa-confirm-dock-head' },
-            h('div', { className: 'maa-confirm-dock-copy' },
-              h('div', { className: 'maa-confirm-dock-title' }, '最近一次 MAA 执行：' + label),
-              h('div', { className: 'maa-confirm-dock-summary' }, record.planSummary || record.purpose || '（没有任务摘要）')),
-            h('div', { className: 'maa-dock-actions' },
-              h('button', {
-                key: 'hide', className: 'maa-dock-icon', type: 'button',
-                title: '隐藏最近一次执行记录', 'aria-label': '隐藏执行记录',
-                onClick: function () { setRecordHidden(true) },
-              }, '\u00d7'))),
-          h('div', { className: 'maa-run-meta' },
-            (record.finishedAt ? '结束于 ' + formatRunClock(record.finishedAt) + ' · ' : '')
-              + '耗时 ' + record.duration
-              + (typeof record.exitCode === 'number' ? ' · exit ' + record.exitCode : '')
-              + (record.status === 'stopped' ? ' · 已停止' : '')),
-          h('div', { className: 'maa-run-result' }, record.summary || 'MAA 没有返回可读的执行摘要，可以查看日志排查。'),
-          record.recovery && record.recovery.diagnosis
-            ? h('div', { className: 'maa-run-result' },
-                (record.recovery.diagnosis.confidence === 'confirmed' ? '已确认故障：' : '推测故障：')
-                  + record.recovery.diagnosis.reason
-                  + (record.recovery.needsUser ? '（需要人工处理）' : ''))
-            : null)
-      }
-      if (liveRun && !recordHidden) {
-        return h('div', { className: 'maa-confirm-dock maa-run-dock', role: 'status' },
-          h('div', { className: 'maa-confirm-dock-head' },
-            h('div', { className: 'maa-confirm-dock-copy' },
-              h('div', { className: 'maa-confirm-dock-title' }, 'MAA 任务执行中'),
-              h('div', { className: 'maa-confirm-dock-summary' }, liveRun.planSummary || liveRun.purpose || '正在执行')),
-            h('div', { className: 'maa-dock-actions' },
-              h('button', {
-                key: 'hide', className: 'maa-dock-icon', type: 'button',
-                title: '隐藏这次执行的提示（任务继续在后台运行）', 'aria-label': '隐藏执行提示',
-                onClick: function () { setRecordHidden(true) },
-              }, '\u00d7'))),
-          h('div', { className: 'maa-run-meta' },
-            '已运行 ' + liveElapsed + ' · 开始于 ' + formatRunClock(liveRun.startedAt)
-              + (liveRun.confirmationCode ? ' · ' + liveRun.confirmationCode : '')),
-          runningRecord ? h('div', { className: 'maa-run-result' }, formatRuntimeProgress(runningRecord)) : null,
-          h('div', { className: 'maa-run-blocked' }, '执行完成前不接受新的计划或任务：这会抢占模拟器并覆盖临时资源，所以新计划会被明确拒绝。'),
-          h('form', { className: 'maa-plan-actions', onSubmit: submitRuntimeInput },
-            h('input', {
-              className: 'maa-note-input', type: 'text', maxLength: 120,
-              placeholder: '输入运行时要求，如“再打两局就停”或“这次 Boss 关前停止”',
-              value: runtimeInput, disabled: runtimeBusy,
-              onChange: function (event) { setRuntimeInput(event.target.value) },
-            }),
-            h('button', {
-              className: 'maa-secondary-button', type: 'submit',
-              disabled: runtimeBusy || runtimeInput.trim() === '',
-            }, runtimeBusy ? '正在分析…' : '发送')),
-          runtimeMessage ? h('div', { className: 'maa-run-result' }, runtimeMessage) : null)
-      }
-      if ((plan === null || plan === undefined || Boolean(plan.result)) && finishedRun && !recordHidden) {
-        return finishedView(finishedRun)
-      }
-      if (plan === null || plan === undefined) {
-        let hasHistory = false
-        try { hasHistory = globalThis.localStorage.getItem('dsh.maa.history') === '1' } catch (_) { hasHistory = false }
-        if (!hasHistory || recordHidden) return null
-        return h('div', { className: 'maa-confirm-dock', role: 'status' },
-          h('div', { className: 'maa-confirm-dock-head' },
-            h('div', { className: 'maa-confirm-dock-copy' },
-              h('div', { className: 'maa-confirm-dock-title' }, 'MAA 执行记录'),
-              h('div', { className: 'maa-confirm-dock-summary' }, '查看上一次执行的状态与结果（只读，不会调用模型）。')),
-            h('div', { className: 'maa-dock-actions' },
-              h('button', {
-                key: 'hide', className: 'maa-dock-icon', type: 'button',
-                title: '不再显示执行记录入口', 'aria-label': '不再显示执行记录入口',
-                onClick: function () {
-                  try { globalThis.localStorage.removeItem('dsh.maa.history') } catch (_) {}
-                  setRecordHidden(true)
-                },
-              }, '\u00d7'))),
+      if (run && run.phase !== 'finished') {
+        const key = runViewKey(run)
+        const collapsed = runs.isCollapsed(key)
+        const record = run.record || null
+        const startedAt = run.startedAt || startedAtOf(record)
+        const title = RUN_PHASE_LABELS[run.phase] || 'MAA 任务'
+        const summary = run.summary || recordLabel(record) || '正在执行'
+        if (run.phase === 'observer') {
+          return h(DockShell, {
+            kind: 'observer', className: 'maa-run-dock', title: title, summary: summary, collapsed: collapsed,
+            onToggle: toggle(key), collapseLabel: '最小化运行面板', expandLabel: '展开运行面板',
+            onClose: function () { runs.replaceRun(null) }, closeLabel: '隐藏（不会停止其他会话的任务）',
+          },
+          h('div', { className: 'maa-run-meta' }, '开始于 ' + formatRunClock(record && record.startedAt) + (run.code ? ' · ' + run.code : '')),
+          h('div', { className: 'maa-run-blocked' }, '这个任务由另一个 DSH 会话发起，只能在发起它的会话里停止；执行完成前不接受新的计划。'),
           h('div', { className: 'maa-plan-actions' },
-            h('button', { className: 'maa-secondary-button', type: 'button', disabled: loadingRecord, onClick: loadRecord },
-              loadingRecord ? '正在读取…' : '查看执行记录')))
+            h('button', { className: 'maa-secondary-button', type: 'button', disabled: runState.loading, onClick: loadRecord }, runState.loading ? '正在读取…' : '刷新状态')))
+        }
+        const stopBusy = Boolean(run.inFlight)
+        return h(DockShell, {
+          kind: 'run', className: 'maa-run-dock', title: title, summary: summary, collapsed: collapsed,
+          alert: run.error || '',
+          onToggle: toggle(key), collapseLabel: '最小化运行面板', expandLabel: '展开运行面板',
+          onClose: function () { requestRunStop(runs, plans, execute, true) },
+          closeDisabled: stopBusy, closeLabel: '停止任务并关闭运行面板',
+        },
+        h('div', { className: 'maa-run-meta' },
+          '已运行 ' + formatElapsed(Date.now() - startedAt) + ' · 开始于 ' + formatRunClock(new Date(startedAt).toISOString())
+            + (run.code ? ' · ' + run.code : '') + (run.runId ? ' · ' + run.runId : '')),
+        record && run.phase !== 'launching' ? h('div', { className: 'maa-run-result' }, formatRuntimeProgress(record)) : null,
+        h('div', { className: 'maa-run-blocked' }, '执行完成前不接受新的计划或任务：这会抢占模拟器并覆盖临时资源，所以新计划会被明确拒绝。'),
+        h('div', { className: 'maa-plan-actions' },
+          h('button', {
+            className: 'maa-stop-button', type: 'button', 'data-maa-action': 'stop', disabled: stopBusy,
+            onClick: function () { requestRunStop(runs, plans, execute, false) },
+          }, stopBusy ? '正在停止…' : '停止任务'),
+          h('span', { className: 'maa-plan-state' }, stopBusy ? '正在等待进程退出并清理运行资源' : '停止会终止任务，不是可恢复的暂停'),
+          h('button', { className: 'maa-secondary-button', type: 'button', disabled: runState.loading, onClick: loadRecord }, runState.loading ? '正在读取…' : '刷新状态')),
+        run.phase === 'launching' ? null : h('form', {
+          className: 'maa-plan-actions',
+          onSubmit: function (event) {
+            if (event && typeof event.preventDefault === 'function') event.preventDefault()
+            const command = String(runState.runtime.input || '').trim()
+            if (!command || runState.runtime.busy) return
+            sendRuntimeInstruction(runs, plans, execute, command)
+          },
+        },
+          h('input', {
+            className: 'maa-note-input', type: 'text', maxLength: 120,
+            placeholder: '输入运行时要求，如“再打两局就停”或“这次 Boss 关前停止”',
+            value: runState.runtime.input, disabled: runState.runtime.busy,
+            onChange: function (event) { runs.setRuntime({ input: event.target.value }) },
+          }),
+          h('button', {
+            className: 'maa-secondary-button', type: 'submit',
+            disabled: runState.runtime.busy || String(runState.runtime.input || '').trim() === '',
+          }, runState.runtime.busy ? '正在分析…' : '发送')),
+        run.message ? h('div', { className: 'maa-run-result' }, run.message) : null,
+        runState.runtime.message ? h('div', { className: 'maa-run-result' }, runState.runtime.message) : null)
       }
-      if (!plan) return null
-      const effective = plan.params || (plan.taskPanel ? plan.taskPanel.values : null) || null
-      // The hunk shows the plan MAA will run. If the panel's theme select no
-      // longer matches the plan's theme, say so instead of pretending.
-      const chosenTheme = effective && typeof effective.theme === 'string' ? effective.theme : ''
-      const themeNotice = plan.theme && chosenTheme && chosenTheme !== plan.theme
-        ? '\n当前选择：' + chosenTheme + '（确认后按此主题执行）'
-        : ''
-      const dockSummary = (plan.summary || '') + themeNotice
-      const dismiss = function () {
-        dismissedPlans.add(plan.code)
-        props.store.clear(plan.code)
-      }
-      const actions = h('div', { className: 'maa-dock-actions' },
-        h('button', {
-          key: 'collapse', className: 'maa-dock-icon', type: 'button',
-          title: collapsed ? '展开计划' : '最小化计划',
-          'aria-label': collapsed ? '展开计划' : '最小化计划',
-          onClick: function () { setCollapsed(!collapsed) },
-        }, collapsed ? '+' : '\u2212'),
-        h('button', {
-          key: 'dismiss', className: 'maa-dock-icon', type: 'button',
-          title: '删除当前计划（确认码仍有效，可用 /maa confirm 手动执行）',
-          'aria-label': '删除当前计划',
-          onClick: dismiss,
-        }, '\u00d7'))
-      if (plan.result) {
-        return h('div', { className: 'maa-confirm-dock', role: 'status' },
-          h('div', { className: 'maa-confirm-dock-head' },
-            h('div', { className: 'maa-confirm-dock-copy' },
-              h('div', { className: 'maa-confirm-dock-title' }, 'MAA 执行结果'),
-              h('div', { className: 'maa-confirm-dock-summary' }, plan.result))),
-          actions)
-      }
-      if (collapsed) {
-        return h('div', { className: 'maa-confirm-dock', role: 'status' },
-          h('div', { className: 'maa-confirm-dock-head' },
-            h('div', { className: 'maa-confirm-dock-copy' },
-              h('div', { className: 'maa-confirm-dock-title' }, 'MAA 计划等待你的确认'),
-              h('div', { className: 'maa-confirm-dock-summary' }, dockSummary))),
-          actions)
-      }
-      return h('div', { className: 'maa-confirm-dock', role: 'status' },
-        h('div', { className: 'maa-confirm-dock-head' },
-          h('div', { className: 'maa-confirm-dock-copy' },
-            h('div', { className: 'maa-confirm-dock-title' }, 'MAA 计划等待你的确认'),
-            h('div', { className: 'maa-confirm-dock-summary' }, dockSummary))),
-        actions,
+
+      if (plan && !dismissedPlans.has(plan.code)) {
+        const key = panelViewKey('plan', plan.code)
+        const collapsed = runs.isCollapsed(key)
+        const effective = plan.params || (plan.taskPanel ? plan.taskPanel.values : null) || null
+        // The hunk shows the plan MAA will run. If the panel's theme select no
+        // longer matches the plan's theme, say so instead of pretending.
+        const chosenTheme = effective && typeof effective.theme === 'string' ? effective.theme : ''
+        const themeNotice = plan.theme && chosenTheme && chosenTheme !== plan.theme
+          ? '\n当前选择：' + chosenTheme + '（确认后按此主题执行）'
+          : ''
+        const dismiss = function () {
+          if (planAction.busy) return
+          if (typeof globalThis.confirm === 'function' && !globalThis.confirm('取消并删除这个待确认计划？确认码将立即失效。')) return
+          const codeValue = plan.code
+          setPlanAction({ busy: true, error: '' })
+          Promise.resolve(execute('/maa cancel ' + codeValue)).then(function (outcome) {
+            const text = outcome && outcome.text ? outcome.text : ''
+            if (outcome && outcome.kind === 'success') {
+              setPlanAction({ busy: false, error: '' })
+              dismissedPlans.add(codeValue)
+              writePanelCollapsed(key, false)
+              plans.clear(codeValue)
+              return
+            }
+            if (/已经确认并/.test(text)) {
+              // Confirmation won the race: the code is now a run. Show the run
+              // panel (with its stop control) instead of a dead plan.
+              setPlanAction({ busy: false, error: '' })
+              dismissedPlans.add(codeValue)
+              plans.clear(codeValue)
+              return loadRecord()
+            }
+            if (/没有待确认/.test(text)) {
+              // Already gone on the host (expired, replaced, cancelled elsewhere):
+              // the code is unusable either way.
+              setPlanAction({ busy: false, error: '' })
+              dismissedPlans.add(codeValue)
+              plans.clear(codeValue)
+              return loadRecord()
+            }
+            setPlanAction({ busy: false, error: text || '取消计划失败。' })
+          }, function (reason) {
+            setPlanAction({ busy: false, error: reason instanceof Error ? reason.message : String(reason) })
+          })
+        }
+        return h(DockShell, {
+          kind: 'plan', title: 'MAA 计划等待你的确认', summary: (plan.summary || '') + themeNotice, collapsed: collapsed,
+          alert: planAction.error || (collapsed ? plan.error || '' : ''),
+          onToggle: toggle(key), collapseLabel: '最小化计划', expandLabel: '展开计划',
+          onClose: dismiss, closeDisabled: planAction.busy, closeLabel: '取消并删除当前计划',
+        },
+        h('div', { className: 'maa-run-meta' }, '确认码 ' + plan.code + ' · 30 分钟内有效 · 关闭（×）会删除计划并让确认码永久失效'),
         plan.goal
           ? h('div', { className: 'maa-run-result' },
               '目标：' + (plan.goal.title || plan.goal.id || '未命名')
@@ -867,36 +1093,75 @@ window.__ModuleLoader__.load({
               panel: plan.taskPanel,
               value: effective,
               disabled: false,
-              onChange: function (next) { props.store.setParams(plan.code, next) },
+              onChange: function (next) { plans.setParams(plan.code, next) },
             })
           : null,
         h('div', { className: 'maa-plan-actions' },
           h(ConfirmButton, {
-            code: plan.code,
-            execute: plan.execute,
+            code: plan.code, plans: plans, runs: runs, summary: plan.summary || '',
+            execute: plan.execute || execute,
             line: confirmLine(plan.code, effective, plan.taskPanel ? plan.taskPanel.fields : undefined),
             previewLine: notePreviewLine(plan.code, effective, plan.taskPanel ? plan.taskPanel.fields : undefined),
             inputActions: props.inputActions,
             note: effective && typeof effective.note === 'string' ? effective.note : '',
             onNoteChange: function (next) {
-              props.store.setParams(plan.code, Object.assign({}, effective, { note: next }))
-            },
-            // The plan is consumed on the host; the dock must keep showing the
-            // run instead of disappearing. The local record is written when the
-            // confirm command starts, so no polling is needed to notice it.
-            onStart: function () {
-              rememberRun(plan.summary, plan.code)
-            },
-            onSuccess: function (outcome) {
-              // The run is over: drop the optimistic local record and read the
-              // authoritative one exactly once, so the dock shows duration and
-              // exit code without ever polling while the task was running.
-              forgetRun()
-              props.store.complete(plan.code, outcome.text)
-              try { globalThis.localStorage.setItem('dsh.maa.history', '1') } catch (_) {}
-              loadRecord()
+              plans.setParams(plan.code, Object.assign({}, effective, { note: next }))
             },
           })))
+      }
+
+      if (run && run.phase === 'finished') {
+        const key = runViewKey(run)
+        const record = run.record || null
+        const label = record ? (RUN_STATUS_LABELS[record.status] || record.status || '已结束') : '已结束'
+        return h(DockShell, {
+          kind: 'finished', title: '最近一次 MAA 执行：' + label, summary: run.summary || recordLabel(record) || '（没有任务摘要）',
+          collapsed: runs.isCollapsed(key), onToggle: toggle(key), collapseLabel: '最小化执行记录', expandLabel: '展开执行记录',
+          onClose: function () { runs.replaceRun(null) }, closeLabel: '关闭执行记录（任务已经结束）',
+        },
+        record ? h('div', { className: 'maa-run-meta' },
+          (record.finishedAt ? '结束于 ' + formatRunClock(record.finishedAt) + ' · ' : '')
+            + '耗时 ' + record.duration
+            + (typeof record.exitCode === 'number' ? ' · exit ' + record.exitCode : '')
+            + (record.status === 'stopped' ? ' · 已停止' : '')) : null,
+        h('div', { className: 'maa-run-result' }, (record && record.summary) || run.message || 'MAA 没有返回可读的执行摘要，可以查看日志排查。'),
+        record && record.recovery && record.recovery.diagnosis
+          ? h('div', { className: 'maa-run-result' },
+              (record.recovery.diagnosis.confidence === 'confirmed' ? '已确认故障：' : '推测故障：')
+                + record.recovery.diagnosis.reason
+                + (record.recovery.needsUser ? '（需要人工处理）' : ''))
+          : null)
+      }
+
+      let hasHistory = false
+      try { hasHistory = globalThis.localStorage.getItem('dsh.maa.history') === '1' } catch (_) { hasHistory = false }
+      if (!hasHistory || runState.historyHidden) return null
+      return h('div', { className: 'maa-confirm-dock', role: 'status', 'data-maa-dock': 'history' },
+        h('div', { className: 'maa-confirm-dock-head' },
+          h('div', { className: 'maa-confirm-dock-copy' },
+            h('div', { className: 'maa-confirm-dock-title' }, 'MAA 执行记录'),
+            h('div', { className: 'maa-confirm-dock-summary' }, '查看上一次执行的状态与结果（只读，不会调用模型）。'))),
+        h('div', { className: 'maa-dock-actions' },
+          h('button', {
+            key: 'hide', className: 'maa-dock-icon', type: 'button',
+            title: '不再显示执行记录入口', 'aria-label': '不再显示执行记录入口',
+            onClick: function () {
+              try { globalThis.localStorage.removeItem('dsh.maa.history') } catch (_) {}
+              runs.setHistoryHidden(true)
+            },
+          }, '\u00d7')),
+        h('div', { className: 'maa-plan-actions' },
+          h('button', {
+            className: 'maa-secondary-button', type: 'button', disabled: runState.loading,
+            onClick: function () {
+              loadRecord().then(function (snapshot) {
+                const latest = snapshot && Array.isArray(snapshot.recent) ? snapshot.recent[0] : null
+                if (latest && !runs.getSnapshot().run) {
+                  runs.replaceRun({ phase: 'finished', code: latest.confirmationCode || '', runId: latest.id, summary: recordLabel(latest), startedAt: startedAtOf(latest), record: latest, message: '', error: '' })
+                }
+              })
+            },
+          }, runState.loading ? '正在读取…' : '查看执行记录')))
     }
 
     function MaaStrategyMemory(props) {
@@ -1029,6 +1294,7 @@ window.__ModuleLoader__.load({
               return {
                 execute: commandRunner(ctx, sessionId),
                 store: storeFor(sessionId),
+                runs: runStoreFor(sessionId),
               }
             },
           }, MaaPlanCard)
@@ -1038,7 +1304,7 @@ window.__ModuleLoader__.load({
         return ctx.slots.register({
           name: 'conversation.input.dock', id: 'maa-confirm', order: 5,
           inject: function (sessionId) {
-            return { store: storeFor(sessionId), execute: commandRunner(ctx, sessionId) }
+            return { store: storeFor(sessionId), runs: runStoreFor(sessionId), execute: commandRunner(ctx, sessionId) }
           },
         }, MaaConfirmDock)
       })

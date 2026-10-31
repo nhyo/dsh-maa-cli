@@ -2,9 +2,9 @@ import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runM
 import path from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './commands/planner.js'
-import { consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, updatePendingPlan } from './commands/confirmation.js'
+import { assertPlanCodeOpen, cancelPendingPlan, consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, recordPlanRun, updatePendingPlan } from './commands/confirmation.js'
 import { parseLocalMaaCommand } from './commands/local-command.js'
-import { activeRun, addRunCheckpoint, beginRun, describeRunState, finishRun, getRun, reapGeneratedTaskProcesses, stopRun, updateRunRecovery } from './commands/run-state.js'
+import { activeRun, addRunCheckpoint, beginRun, clearRunStopping, describeRunState, finishRun, getRun, isProcessAlive, markRunStopping, readRunState, reapGeneratedTaskProcesses, setRunProcess, stopRun, updateRunRecovery } from './commands/run-state.js'
 import { applyRuntimeInstruction, completeTriggeredInstructions, parseMaaCallbackLine, processMaaCallback, startLogTail } from './commands/runtime-instructions.js'
 import { callbackCheckpoint, decideRecovery, diagnoseExecutionFailure, isExecutionFailure, MAX_RECOVERY_RETRIES } from './agent/recovery-manager.js'
 import { createGoal, getGoal, listGoals, planGoal, updateGoal } from './agent/goal-manager.js'
@@ -439,6 +439,12 @@ export function classifyMaaExecution(result, strategyApplied = false) {
 const activeExecutions = new Map()
 const activeRuns = new Map()
 const activeWorkflows = new Map()
+const stopRequests = new Map()
+// `/maa confirm` calls that are still between "clicked" and "run started",
+// keyed by DSH session. A stop/close during that window aborts the launch.
+const launches = new Map()
+let launchQueue = Promise.resolve()
+const STOP_WAIT_MS = 30_000
 let activeStrategyExecution = false
 let restartRecoveryPromise = null
 
@@ -447,9 +453,40 @@ function agentKey(agent) {
   return String(agent.id)
 }
 
-async function executeRuntimeInstruction(request) {
+// Which DSH session may control a run record:
+//   self    – this plugin process owns the child and the caller's session started it
+//   other   – this plugin process owns it, but another DSH session started it
+//   foreign – another live plugin host process owns it (second DSH instance)
+//   orphan  – nobody owns it any more (DSH restarted while maa-cli kept running)
+function runOwnership(run, key) {
+  if (!run) return 'none'
+  if (activeRuns.has(run.id)) return run.sessionId === key ? 'self' : 'other'
+  const ownerPid = Number(run.ownerPid)
+  if (Number.isInteger(ownerPid) && ownerPid !== process.pid && isProcessAlive(ownerPid)) return 'foreign'
+  return 'orphan'
+}
+
+function ownershipRefusal(run, ownership) {
+  const label = run.purpose || run.confirmationCode || run.id
+  if (ownership === 'other') return `正在执行的 MAA 任务（${label}）属于另一个 DSH 会话；为避免误停，请在发起它的会话里停止。`
+  if (ownership === 'foreign') return `正在执行的 MAA 任务（${label}）由另一个仍在运行的 DSH 进程持有，本会话不会终止它。`
+  return ''
+}
+
+async function executeRuntimeInstruction(request, agent = null) {
   const running = await activeRun()
   if (!running) return { status: 'not_running', message: '当前没有正在执行的 MAA 任务。', run: null }
+  if (request.action === 'stop_now') {
+    if (!agent) return { status: 'not_owned', message: '立即停止需要明确的 DSH 会话。', run: running }
+    const stopped = await stopExecution(agent, running.id)
+    return { ...stopped, message: stopped.message ?? formatStopOutcome(stopped).text }
+  }
+  // Read-only progress is shared; anything that changes the run stays with
+  // the session that owns it.
+  if (agent && request.action !== 'status') {
+    const ownership = runOwnership(running, agentKey(agent))
+    if (ownership === 'other' || ownership === 'foreign') return { status: 'not_owned', message: ownershipRefusal(running, ownership), run: running }
+  }
   const active = activeRuns.get(running.id)
   const result = await applyRuntimeInstruction(running.id, request, {
     monitorAvailable: Boolean(active?.monitor),
@@ -459,12 +496,177 @@ async function executeRuntimeInstruction(request) {
       active.controller.abort()
     },
   })
-  if (request.action === 'stop_now' && !active) {
-    await stopRun(running.id)
-    await completeTriggeredInstructions(running.id)
-  }
   const latest = await getRun(running.id)
   return { ...result, run: latest }
+}
+
+function settleWithin(promise, ms) {
+  let timer
+  return Promise.race([
+    Promise.resolve(promise).then(value => ({ settled: true, value }), error => ({ settled: true, error })),
+    new Promise(resolve => { timer = setTimeout(() => resolve({ settled: false }), ms) }),
+  ]).finally(() => clearTimeout(timer))
+}
+
+function stopWaitMs() {
+  const configured = Number(process.env.DSH_MAA_STOP_TIMEOUT_MS)
+  return Number.isFinite(configured) && configured > 0 ? configured : STOP_WAIT_MS
+}
+
+// Stop exactly one run (or a confirmation that is still launching) on behalf
+// of one DSH session. `target` may be a RUN-…, a MAA-… confirmation code or a
+// workflow id; without a target the caller's own current task is stopped.
+// Resolves only after the process tree has exited and the record, temporary
+// resources and instructions have been settled — or reports why it could not.
+async function stopExecution(agent, target = '') {
+  const key = agentKey(agent)
+  const wanted = String(target ?? '').trim().toUpperCase()
+  const matches = (...ids) => wanted === '' || ids.some(id => id && String(id).toUpperCase() === wanted)
+
+  // 1. A `/maa confirm` of this session that has not produced a run yet.
+  const launch = launches.get(key)
+  let launchCode = ''
+  if (launch && matches(launch.code, launch.runId)) {
+    launchCode = launch.code
+    launch.controller.abort()
+    const waited = await settleWithin(launch.settled, stopWaitMs())
+    if (!waited.settled) {
+      return { status: 'stop_failed', run: null, code: launch.code, message: `停止请求已发出，但确认流程在 ${Math.round(stopWaitMs() / 1000)} 秒内没有结束；请稍后重试停止。` }
+    }
+  }
+
+  // 2. Goal workflows started from this session.
+  const workflows = [...activeWorkflows.values()].filter(item => item.sessionKey === key && matches(item.executionId, item.confirmationCode, item.runId))
+  for (const workflow of workflows) workflow.controller.abort()
+
+  // 3. The run record itself.
+  const state = await readRunState()
+  const lookup = wanted || launchCode
+  let run = lookup
+    ? state.runs.find(item => item.id.toUpperCase() === lookup || (item.confirmationCode && item.confirmationCode.toUpperCase() === lookup)) ?? null
+    : null
+  if (!run && workflows.length) run = state.runs.find(item => item.status === 'running' && item.sessionId === key) ?? null
+  if (!run && !lookup) {
+    // The caller's own task first; then whatever is live (ownership decides
+    // whether this session may touch it); finally an interrupted leftover.
+    run = state.runs.find(item => item.status === 'running' && item.sessionId === key)
+      ?? await activeRun()
+      ?? state.runs.find(item => item.status === 'running')
+      ?? null
+  }
+  if (!run) {
+    if (workflows.length) {
+      await settleWithin(Promise.all(workflows.map(item => item.done)), stopWaitMs())
+      return { status: 'stopped', run: null, message: '目标工作流已停止。' }
+    }
+    if (launchCode) return { status: 'cancelled_launch', run: null, code: launchCode, message: `已在开始执行前取消（${launchCode}）；没有启动 MAA，确认码已失效。` }
+    return { status: 'not_running', run: null }
+  }
+  if (run.status !== 'running') return { status: 'already_finished', run: summarizeForStop(run) }
+  const ownership = runOwnership(run, key)
+  if (ownership === 'other' || ownership === 'foreign') return { status: 'not_owned', run: summarizeForStop(run), message: ownershipRefusal(run, ownership) }
+
+  const existing = stopRequests.get(run.id)
+  if (existing) return await existing
+  const request = (async () => {
+    if (ownership === 'orphan') {
+      try {
+        const stopped = await stopRun(run.id, { summary: '已停止（终止了 DSH 不再持有的残留进程树）。' })
+        await completeTriggeredInstructions(run.id).catch(() => {})
+        return { status: 'stopped', run: summarizeForStop(stopped) }
+      } catch (error) {
+        return { status: 'stop_failed', run: summarizeForStop(await getRun(run.id)), message: error instanceof Error ? error.message : String(error) }
+      }
+    }
+    const active = activeRuns.get(run.id)
+    if (!active) {
+      // It settled between the lookup and now.
+      const settled = await getRun(run.id)
+      return settled?.status === 'running'
+        ? { status: 'stop_failed', run: summarizeForStop(settled), message: '任务状态正在切换，请重试停止。' }
+        : { status: 'already_finished', run: summarizeForStop(settled) }
+    }
+    await markRunStopping(run.id)
+    await applyRuntimeInstruction(run.id, { action: 'stop_now' }, {
+      monitorAvailable: Boolean(active?.monitor),
+      stop: instructionId => { active.triggerInstructionId = instructionId },
+    }).catch(() => {})
+    active.controller.abort()
+    // Re-issue the tree kill on every attempt: a previous attempt may have
+    // failed (access denied, taskkill missing) and the user is retrying.
+    const kill = typeof active.kill === 'function' ? await active.kill().catch(error => ({ ok: false, detail: error.message })) : { ok: true }
+    const waited = await settleWithin(active.completion, stopWaitMs())
+    if (!waited.settled) {
+      const reason = `MAA 进程在 ${Math.round(stopWaitMs() / 1000)} 秒内没有退出${kill && kill.ok === false ? `（${kill.detail}）` : ''}。`
+      await clearRunStopping(run.id, reason).catch(() => {})
+      return { status: 'stop_failed', run: summarizeForStop(await getRun(run.id)), message: `停止失败：${reason}任务仍在执行，停止按钮保持可用，可以重试。` }
+    }
+    await settleWithin(Promise.all(workflows.map(item => item.done)), stopWaitMs())
+    return { status: 'stopped', run: summarizeForStop(await getRun(run.id)) }
+  })()
+  stopRequests.set(run.id, request)
+  try { return await request } finally { if (stopRequests.get(run.id) === request) stopRequests.delete(run.id) }
+}
+
+// What the composer dock of ONE session needs after a refresh, a DSH restart
+// or a conversation switch: the live run with its ownership, a confirmation
+// that is still launching, and the session's own pending plan (code only).
+async function sessionRunStatus(agent) {
+  const key = agentKey(agent)
+  const snapshot = await describeRunState()
+  const raw = await readRunState()
+  const annotate = item => {
+    if (!item) return null
+    const record = raw.runs.find(run => run.id === item.id)
+    return { ...item, owner: runOwnership(record, key) }
+  }
+  const launch = launches.get(key)
+  let pending = null
+  try {
+    const plan = await peekPendingPlan(agent)
+    if (Date.now() - Number(plan.preparedAt) <= 30 * 60_000) pending = { code: plan.confirmationCode, summary: plan.planSummary ?? '' }
+  } catch {}
+  return {
+    ...snapshot,
+    running: annotate(snapshot.running),
+    interrupted: annotate(snapshot.interrupted),
+    launching: launch ? { code: launch.code, runId: launch.runId || '' } : null,
+    pending,
+  }
+}
+
+async function cancelPendingWorkflow(executionId, goalId = '') {
+  await updateWorkflowExecution(executionId, value => {
+    if (value.status === 'pending_confirmation') {
+      value.status = 'cancelled'
+      value.needsUser = ''
+    }
+    return value
+  })
+  if (goalId) {
+    const goal = await getGoal(goalId)
+    if (goal?.status === 'pending_confirmation' && goal.workflowExecutionId === executionId) await updateGoal(goalId, { status: 'cancelled', needsUser: '' })
+  }
+}
+
+function summarizeForStop(run) {
+  if (!run) return null
+  return { id: run.id, status: run.status, purpose: run.purpose, confirmationCode: run.confirmationCode, summary: run.summary, exitCode: run.exitCode, stopError: run.stopError ?? '' }
+}
+
+function formatStopOutcome(outcome) {
+  const run = outcome.run
+  if (outcome.status === 'stopped' && run) {
+    return { kind: 'success', text: `MAA 任务已${run.status === 'stopped' ? '停止' : '结束'}（${run.id}）；进程已退出，运行记录与临时资源已完成结算。` }
+  }
+  if (outcome.status === 'stopped') return { kind: 'success', text: outcome.message || '任务已停止。' }
+  if (outcome.status === 'cancelled_launch') return { kind: 'success', text: outcome.message }
+  if (outcome.status === 'already_finished' && run) {
+    const label = { succeeded: '已完成', failed: '已失败', stopped: '已停止' }[run.status] ?? '已结束'
+    return { kind: 'success', text: `MAA 任务${label}（${run.id}），无需再次停止。` }
+  }
+  if (outcome.status === 'not_running') return { kind: 'error', text: '当前没有正在执行的 MAA 任务。' }
+  return { kind: 'error', text: outcome.message || '已发送停止请求，但尚未确认 MAA 进程退出，请查看运行状态。' }
 }
 
 function formatRuntimeInstructionResult(result) {
@@ -482,6 +684,10 @@ async function runWithRecovery({ runArguments, runOptions, document, run, active
     try {
       const handle = startMaa(runArguments, { ...runOptions, hardTimeoutMs: 6 * 60 * 60_000 })
       active.pid = handle.pid
+      active.kill = handle.kill
+      // Persist the exact process tree so a stop after a DSH restart targets
+      // it, and never another DSH instance's or the user's own MAA.
+      await setRunProcess(run.id, handle.pid).catch(() => {})
       result = await handle.done
       if (!isExecutionFailure(result)) {
         if (attempt > 0) await updateRunRecovery(run.id, { status: 'recovered', needsUser: false, historyEntry: { at: Date.now(), action: 'recovered', detail: `第 ${attempt} 次重试后任务恢复。` } })
@@ -542,6 +748,9 @@ async function assertNoActiveRun() {
 async function executeDocument(agent, signal, document, planSummary, options = {}) {
   const key = agentKey(agent)
   if (activeExecutions.has(key)) throw new Error('当前 DSH 会话已有一个 MAA 任务正在执行。')
+  // A stop/close that arrived while the confirmation was still launching wins:
+  // no run record, no process.
+  if (options.abortSignal?.aborted) throw Object.assign(new Error('已在开始执行前取消。'), { name: 'AbortError' })
   // Persist the lifecycle before doing any work: the composer control panel and
   // a DSH restart both read this record, not a component's local state.
   const run = await beginRun({
@@ -558,9 +767,19 @@ async function executeDocument(agent, signal, document, planSummary, options = {
   const executionSignal = backgroundWanted
     ? controller.signal
     : (signal ? AbortSignal.any([signal, controller.signal]) : controller.signal)
-  const active = { controller, planSummary, runId: run.id, monitor: null, triggerInstructionId: '', failureCallbacks: [], pid: null }
+  let resolveCompletion
+  const completion = new Promise(resolve => { resolveCompletion = resolve })
+  const active = { controller, planSummary, runId: run.id, sessionKey: key, monitor: null, triggerInstructionId: '', failureCallbacks: [], pid: null, kill: null, completion }
   activeExecutions.set(key, active)
   activeRuns.set(run.id, active)
+  if (typeof options.onRunStarted === 'function') {
+    try { options.onRunStarted(run) } catch {}
+  }
+  const linkedAbort = () => controller.abort()
+  if (options.abortSignal) {
+    if (options.abortSignal.aborted) controller.abort()
+    else options.abortSignal.addEventListener('abort', linkedAbort, { once: true })
+  }
   let strategyExecution = null
   let strategyReserved = false
   let recorded = { status: 'failed', exitCode: null, summary: 'MAA 执行没有返回结果。' }
@@ -577,9 +796,11 @@ async function executeDocument(agent, signal, document, planSummary, options = {
     try {
       if (strategyExecution) await strategyExecution.restore()
     } finally {
+      options.abortSignal?.removeEventListener('abort', linkedAbort)
       if (strategyReserved) activeStrategyExecution = false
       if (activeExecutions.get(key) === active) activeExecutions.delete(key)
       if (activeRuns.get(run.id) === active) activeRuns.delete(run.id)
+      resolveCompletion(await getRun(run.id).catch(() => null))
     }
   }
 
@@ -784,7 +1005,7 @@ function workflowSummary(execution) {
   return `${execution.name}：${completed}/${execution.steps.length} 步，状态 ${execution.status}${execution.needsUser ? `；${execution.needsUser}` : ''}`
 }
 
-async function startWorkflowExecution(agent, executionId, goalId = '') {
+async function startWorkflowExecution(agent, executionId, goalId = '', confirmationCode = '') {
   if (activeWorkflows.has(executionId)) throw new Error('该工作流已经在执行。')
   const execution = await getWorkflowExecution(executionId)
   if (!execution) throw new Error('找不到待执行工作流。')
@@ -797,7 +1018,9 @@ async function startWorkflowExecution(agent, executionId, goalId = '') {
     }
   }
   const controller = new AbortController()
-  const active = { controller, executionId, goalId: effectiveGoalId }
+  let resolveDone
+  const done = new Promise(resolve => { resolveDone = resolve })
+  const active = { controller, executionId, goalId: effectiveGoalId, sessionKey: agentKey(agent), confirmationCode, done }
   activeWorkflows.set(executionId, active)
   await updateWorkflowExecution(executionId, current => { current.status = 'running'; current.needsUser = ''; return current })
   if (active.goalId) await updateGoal(active.goalId, { status: 'running' })
@@ -830,7 +1053,7 @@ async function startWorkflowExecution(agent, executionId, goalId = '') {
           return value
         })
         const result = await executeDocument(agent, controller.signal, { tasks: [step.maa] }, `${current.name}｜${step.title}`, {
-          background: false, purpose: `工作流：${current.name}`,
+          background: false, purpose: `工作流：${current.name}`, confirmationCode,
         })
         const verified = result.executionFeedback?.status === 'verified' && !result.operatorBoxError && !result.depotError
         if (!verified) {
@@ -865,6 +1088,7 @@ async function startWorkflowExecution(agent, executionId, goalId = '') {
       if (active.goalId) await updateGoal(active.goalId, { status: stopped ? 'stopped' : 'needs_user', needsUser: stopped ? '' : '工作流异常中断，需要检查。' }).catch(() => {})
     } finally {
       activeWorkflows.delete(executionId)
+      resolveDone()
     }
   })()
   return await getWorkflowExecution(executionId)
@@ -872,12 +1096,16 @@ async function startWorkflowExecution(agent, executionId, goalId = '') {
 
 async function recoverAfterRestart() {
   const interrupted = await auditInterruptedWorkflows()
-  const snapshot = await describeRunState()
-  const orphan = snapshot.running ?? snapshot.interrupted
+  const state = await readRunState()
   let reaped = { killed: 0 }
-  if (orphan && activeRuns.size === 0) {
-    reaped = await reapGeneratedTaskProcesses().catch(() => ({ killed: 0 }))
-    await stopRun(orphan.id, { reap: false }).catch(() => {})
+  // Every record still marked running was started by an earlier plugin process
+  // (this one has not started anything yet). Leave records that a different,
+  // still-alive DSH process owns; terminate only the recorded process tree of
+  // genuine orphans and settle their record.
+  for (const orphan of state.runs.filter(run => run.status === 'running' && !activeRuns.has(run.id))) {
+    if (runOwnership(orphan, '') === 'foreign') continue
+    const stopped = await stopRun(orphan.id, { summary: 'DSH 重启后已终止残留任务并结算记录。' }).catch(() => null)
+    if (stopped) reaped = { killed: reaped.killed + 1 }
   }
   let overlay = null
   try {
@@ -886,6 +1114,115 @@ async function recoverAfterRestart() {
     if (result.exitCode === 0 && configDir) overlay = await recoverStrategyOverlay(configDir)
   } catch {}
   return { interrupted, reaped: reaped.killed, overlay }
+}
+
+// The human-gesture confirmation. `launch.controller` is aborted by a stop or
+// close that arrives before the run exists; every await below re-checks it so
+// an aborted confirmation never consumes the code or starts MAA afterwards.
+async function confirmPlan(agent, parsed, signal, launch) {
+  const launchSignal = launch.controller.signal
+  let consumed = false
+  try {
+    return await confirmPlanSteps(agent, parsed, signal, launch, () => { consumed = true })
+  } catch (error) {
+    // Aborted before the code was consumed: also invalidate the code so the
+    // stopped confirmation can never be replayed later.
+    if (launchSignal.aborted && !consumed) {
+      await cancelPendingPlan(agent, parsed.confirmationCode).catch(() => {})
+      throw Object.assign(new Error('已在开始执行前取消。'), { name: 'AbortError' })
+    }
+    throw error
+  }
+}
+
+async function confirmPlanSteps(agent, parsed, signal, launch, markConsumed) {
+  const launchSignal = launch.controller.signal
+  const waitSignal = signal ? AbortSignal.any([signal, launchSignal]) : launchSignal
+  const checkpoint = () => {
+    if (launchSignal.aborted) throw Object.assign(new Error('已在开始执行前取消。'), { name: 'AbortError' })
+  }
+  // The slash command or the button that invokes it is the explicit
+  // human authorization; the pending plan remains scoped and one-shot.
+  checkpoint()
+  await assertPlanCodeOpen(agent, parsed.confirmationCode)
+  await assertNoActiveRun()
+  const pendingPreview = await peekPendingPlan(agent)
+  checkpoint()
+  if (pendingPreview.workflowExecutionId) {
+    if (Object.keys(parsed.overrides ?? {}).length > 0) throw new Error('目标工作流不接受任务面板参数覆盖；请编辑目标或工作流后重新生成。')
+    const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
+    markConsumed()
+    const execution = await startWorkflowExecution(agent, pending.workflowExecutionId, pending.goalId, pending.confirmationCode)
+    return { kind: 'success', text: `目标工作流已开始（${execution.id}）。${workflowSummary(execution)}\n每一步只在 MAA 明确验证完成后继续；遇到人工决策、未知状态或预算风险会自动暂停。` }
+  }
+  await ensureMaaCli(waitSignal)
+  checkpoint()
+  const emulator = await checkEmulator({ runMaa, signal: waitSignal })
+  checkpoint()
+  if (!emulator.ok) throw new Error(emulatorErrorMessage(emulator))
+  // Validate confirmation-time parameter overrides against the pending
+  // document before consuming it, so a bad value never burns the code.
+  const overrides = { ...(parsed.overrides ?? {}) }
+  let note = ''
+  if (overrides.note !== undefined) {
+    note = decodeConfirmationNote(overrides.note)
+    delete overrides.note
+  }
+  const hasOverrides = Object.keys(overrides).length > 0
+  const peeked = hasOverrides || note ? await peekPendingPlan(agent) : null
+  let confirmationDocument = peeked?.document
+  let confirmationStrategy = peeked?.strategy
+  let noteSummary = ''
+  if (note) {
+    const preview = peeked?.notePreview
+    if (!preview || preview.status !== 'ready' || preview.note !== note) {
+      throw new Error('备注尚未完成策略预览，或预览后又被修改。请先点击“解析并预览备注”。')
+    }
+    if (JSON.stringify(preview.overrides ?? {}) !== JSON.stringify(overrides)) {
+      throw new Error('任务参数在备注预览后发生变化，请重新点击“解析并预览备注”。')
+    }
+    confirmationDocument = preview.document
+    confirmationStrategy = preview.strategy
+    noteSummary = `｜备注策略：${preview.supported.join('、')}${preview.unsupported.length ? `｜未执行：${preview.unsupported.map(item => item.request).join('、')}` : ''}`
+    if (preview.adjustments?.length) noteSummary += `｜确认时调整：${preview.adjustments.join('、')}`
+    try {
+      const environment = await strategyEnvironment(signal)
+      const committed = await applyStrategyMemory(confirmationStrategy, { ...environment, includeStored: false })
+      confirmationStrategy = committed.strategy
+      noteSummary += memorySummary(committed.memory)
+    } catch (error) {
+      noteSummary += `｜策略记忆未更新：${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+  const confirmationEnvironment = hasOverrides && !note ? await strategyEnvironment(signal) : null
+  const patched = hasOverrides && !note ? applyTaskPanelOverrides(confirmationDocument, overrides, confirmationEnvironment.capabilities) : null
+  const adjustments = patched && patched.applied.length > 0 ? `｜确认时调整：${patched.applied.join('、')}` : ''
+  checkpoint()
+  const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
+  markConsumed()
+  const planSummary = `${pending.planSummary}${adjustments}${noteSummary}`
+  const finalDocument = patched ? patched.document : (confirmationDocument ?? pending.document)
+  // Remember what the human actually confirmed, so the next panel opens
+  // with the same theme/difficulty/squad instead of MAA's defaults.
+  await rememberConfirmedPanel(finalDocument, confirmationEnvironment).catch(() => {})
+  // Keep the run label honest: the panel may have switched the theme at
+  // confirm time, and the dock must not claim the old theme.
+  const finalTheme = roguelikeThemeOf(finalDocument)
+  const baseTheme = roguelikeThemeOf(pending.document)
+  const purpose = finalTheme !== '' && baseTheme !== '' && finalTheme !== baseTheme
+    ? `肉鸽 ${finalTheme}（确认时从 ${baseTheme} 切换）`
+    : pending.purpose
+  const result = await executeDocument(agent, signal, finalDocument, planSummary, {
+    background: true, emulatorChecked: true, strategy: confirmationStrategy ?? pending.strategy, purpose, confirmationCode: pending.confirmationCode,
+    abortSignal: launchSignal,
+    onRunStarted: run => {
+      launch.runId = run.id
+      void recordPlanRun(agent, pending.confirmationCode, run.id).catch(() => {})
+    },
+  })
+  if (result.background) return { kind: 'success', text: formatBackgroundResult(result) }
+  const text = formatCommandResult(result)
+  return { kind: result.executionFeedback?.status !== 'failed' && !result.operatorBoxError ? 'success' : 'error', text }
 }
 
 function formatBackgroundResult(result) {
@@ -927,26 +1264,40 @@ export function apply(ctx) {
           // Read-only snapshot for the composer control panel. The client reads
           // this on demand (never polls): command-plane calls are echoed into
           // the transcript, so polling here would spam the conversation.
-          return { kind: 'success', text: JSON.stringify(await describeRunState()) }
+          return { kind: 'success', text: JSON.stringify(await sessionRunStatus(agent)) }
+        }
+        if (parsed.kind === 'cancel') {
+          try {
+            const cancelled = await cancelPendingPlan(agent, parsed.confirmationCode)
+            if (cancelled.workflowExecutionId) await cancelPendingWorkflow(cancelled.workflowExecutionId, cancelled.goalId).catch(() => {})
+            return {
+              kind: 'success',
+              text: cancelled.alreadyClosed
+                ? `待确认计划 ${parsed.confirmationCode} 已经失效（${cancelled.status === 'expired' ? '超过有效期' : cancelled.status === 'superseded' ? '已被新计划替换' : '此前已取消'}），无需再次取消。`
+                : `已取消待确认计划 ${cancelled.confirmationCode}；该确认码已失效。`,
+            }
+          } catch (error) {
+            if (error?.code === 'MAA_PLAN_CONFIRMED') {
+              // The plan already became a run (or is launching): point the panel
+              // at it instead of pretending the plan was cancelled.
+              const runId = error.closed?.runId || launches.get(agentKey(agent))?.runId || ''
+              return { kind: 'error', text: `计划 ${parsed.confirmationCode} 已经确认并${runId ? `开始执行（${runId}）` : '正在启动'}，不能再取消；如需终止请停止任务。` }
+            }
+            throw error
+          }
+        }
+        if (parsed.kind === 'runtime-instruction' && parsed.request.action === 'stop_now') {
+          return formatStopOutcome(await stopExecution(agent, ''))
         }
         if (parsed.kind === 'runtime-instruction') {
-          const result = await executeRuntimeInstruction(parsed.request)
-          return { kind: result.status === 'not_running' ? 'error' : 'success', text: formatRuntimeInstructionResult(result) }
+          const result = await executeRuntimeInstruction(parsed.request, agent)
+          return { kind: ['not_running', 'not_owned'].includes(result.status) ? 'error' : 'success', text: formatRuntimeInstructionResult(result) }
         }
         if (parsed.kind === 'stop') {
-          for (const active of activeWorkflows.values()) active.controller.abort()
-          const runtime = await executeRuntimeInstruction({ action: 'stop_now' })
-          if (runtime.status !== 'not_running') {
-            return { kind: 'success', text: formatRuntimeInstructionResult(runtime) }
-          }
-          // DSH may have restarted while maa-cli kept running. Finish the stray
-          // record and stop only the process tree that runs dsh-generated.
-          const snapshot = await describeRunState()
-          const stale = snapshot.running ?? snapshot.interrupted
-          if (stale) {
-            await stopRun(stale.id)
-            return { kind: 'success', text: `已结束残留的 MAA 执行记录（${stale.purpose || stale.id}，${stale.duration}），并清理了正在运行的 dsh-generated 进程。` }
-          }
+          const outcome = await stopExecution(agent, parsed.target ?? '')
+          if (outcome.status !== 'not_running' || parsed.target) return formatStopOutcome(outcome)
+          // Nothing recorded as running. A legacy maa-cli left behind by an
+          // older version (no recorded pid) can still be cleaned by name.
           const reaped = await reapGeneratedTaskProcesses()
           return {
             kind: reaped.killed > 0 ? 'success' : 'error',
@@ -1001,73 +1352,31 @@ export function apply(ctx) {
           return { kind: 'success', text: JSON.stringify(await deleteStrategyMemory(parsed.id)) }
         }
         if (parsed.kind === 'confirm') {
-          // The slash command or the button that invokes it is the explicit
-          // human authorization; the pending plan remains scoped and one-shot.
-          await assertNoActiveRun()
-          const pendingPreview = await peekPendingPlan(agent)
-          if (pendingPreview.workflowExecutionId) {
-            if (Object.keys(parsed.overrides ?? {}).length > 0) throw new Error('目标工作流不接受任务面板参数覆盖；请编辑目标或工作流后重新生成。')
-            const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
-            const execution = await startWorkflowExecution(agent, pending.workflowExecutionId, pending.goalId)
-            return { kind: 'success', text: `目标工作流已开始（${execution.id}）。${workflowSummary(execution)}\n每一步只在 MAA 明确验证完成后继续；遇到人工决策、未知状态或预算风险会自动暂停。` }
+          const key = agentKey(agent)
+          const current = launches.get(key)
+          if (current) {
+            throw new Error(current.code === parsed.confirmationCode
+              ? `计划 ${parsed.confirmationCode} 正在启动，请勿重复确认。`
+              : `本会话正在启动另一个计划（${current.code}），请等待它开始或停止后再确认。`)
           }
-          await ensureMaaCli(signal)
-          const emulator = await checkEmulator({ runMaa, signal })
-          if (!emulator.ok) throw new Error(emulatorErrorMessage(emulator))
-          // Validate confirmation-time parameter overrides against the pending
-          // document before consuming it, so a bad value never burns the code.
-          const overrides = { ...(parsed.overrides ?? {}) }
-          let note = ''
-          if (overrides.note !== undefined) {
-            note = decodeConfirmationNote(overrides.note)
-            delete overrides.note
+          const launch = { code: parsed.confirmationCode, controller: new AbortController(), runId: '', settled: null }
+          launches.set(key, launch)
+          // Launch phases are serialized across ALL sessions: two confirmations
+          // arriving together must not both pass the "no active run" check and
+          // then have the loser's code burned without anything running.
+          const confirmation = launchQueue.then(() => confirmPlan(agent, parsed, signal, launch))
+          launchQueue = confirmation.catch(() => {})
+          launch.settled = confirmation
+          try {
+            return await confirmation
+          } catch (error) {
+            if (error?.name === 'AbortError' && launch.controller.signal.aborted) {
+              return { kind: 'error', text: launch.runId ? `任务已在启动阶段被停止（${launch.runId}）。` : `已在开始执行前取消（${parsed.confirmationCode}）；没有启动 MAA。` }
+            }
+            throw error
+          } finally {
+            if (launches.get(key) === launch) launches.delete(key)
           }
-          const hasOverrides = Object.keys(overrides).length > 0
-          const peeked = hasOverrides || note ? await peekPendingPlan(agent) : null
-          let confirmationDocument = peeked?.document
-          let confirmationStrategy = peeked?.strategy
-          let noteSummary = ''
-          if (note) {
-            const preview = peeked?.notePreview
-            if (!preview || preview.status !== 'ready' || preview.note !== note) {
-              throw new Error('备注尚未完成策略预览，或预览后又被修改。请先点击“解析并预览备注”。')
-            }
-            if (JSON.stringify(preview.overrides ?? {}) !== JSON.stringify(overrides)) {
-              throw new Error('任务参数在备注预览后发生变化，请重新点击“解析并预览备注”。')
-            }
-            confirmationDocument = preview.document
-            confirmationStrategy = preview.strategy
-            noteSummary = `｜备注策略：${preview.supported.join('、')}${preview.unsupported.length ? `｜未执行：${preview.unsupported.map(item => item.request).join('、')}` : ''}`
-            if (preview.adjustments?.length) noteSummary += `｜确认时调整：${preview.adjustments.join('、')}`
-            try {
-              const environment = await strategyEnvironment(signal)
-              const committed = await applyStrategyMemory(confirmationStrategy, { ...environment, includeStored: false })
-              confirmationStrategy = committed.strategy
-              noteSummary += memorySummary(committed.memory)
-            } catch (error) {
-              noteSummary += `｜策略记忆未更新：${error instanceof Error ? error.message : String(error)}`
-            }
-          }
-          const confirmationEnvironment = hasOverrides && !note ? await strategyEnvironment(signal) : null
-          const patched = hasOverrides && !note ? applyTaskPanelOverrides(confirmationDocument, overrides, confirmationEnvironment.capabilities) : null
-          const adjustments = patched && patched.applied.length > 0 ? `｜确认时调整：${patched.applied.join('、')}` : ''
-          const pending = await consumePlanFromHumanGesture(agent, parsed.confirmationCode)
-          const planSummary = `${pending.planSummary}${adjustments}${noteSummary}`
-          const finalDocument = patched ? patched.document : (confirmationDocument ?? pending.document)
-          // Remember what the human actually confirmed, so the next panel opens
-          // with the same theme/difficulty/squad instead of MAA's defaults.
-          await rememberConfirmedPanel(finalDocument, confirmationEnvironment).catch(() => {})
-          // Keep the run label honest: the panel may have switched the theme at
-          // confirm time, and the dock must not claim the old theme.
-          const finalTheme = roguelikeThemeOf(finalDocument)
-          const baseTheme = roguelikeThemeOf(pending.document)
-          const purpose = finalTheme !== '' && baseTheme !== '' && finalTheme !== baseTheme
-            ? `肉鸽 ${finalTheme}（确认时从 ${baseTheme} 切换）`
-            : pending.purpose
-          const result = await executeDocument(agent, signal, finalDocument, planSummary, { background: true, emulatorChecked: true, strategy: confirmationStrategy ?? pending.strategy, purpose, confirmationCode: pending.confirmationCode })
-          if (result.background) return { kind: 'success', text: formatBackgroundResult(result) }
-          const text = formatCommandResult(result)
-          return { kind: result.executionFeedback?.status !== 'failed' && !result.operatorBoxError ? 'success' : 'error', text }
         }
         const environment = await strategyEnvironment(signal)
         let document = buildTaskDocument(parsed.steps, environment.capabilities)
@@ -1128,7 +1437,7 @@ export function apply(ctx) {
       schema: { type: 'object', additionalProperties: true, required: ['status'], properties: { status: { type: 'string' }, message: { type: 'string' } } },
       render: (_args, value) => [{ type: 'text', text: formatRuntimeInstructionResult(value) }],
     },
-    async execute(args) { return await executeRuntimeInstruction(args) },
+    async execute(args, exec) { return await executeRuntimeInstruction(args, exec?.agent ?? null) },
     presentCall: args => ({ card: 'terminal', title: `MAA 运行时指令：${args.action}` }),
   })
 

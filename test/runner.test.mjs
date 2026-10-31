@@ -7,7 +7,7 @@ import { actionArguments, DEFAULT_MAA_CLI_PATH, MAA_CLI_PATH, queryArguments, re
 import { runtimeLayout } from '../src/runtime/runtime.js'
 import { apply, classifyMaaExecution } from '../src/index.js'
 import { buildTaskDocument, generatedTaskPath, summarizePlan, writeGeneratedTask } from '../src/commands/planner.js'
-import { clearPendingPlansForTest, consumeConfirmedPlan, consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, updatePendingPlan } from '../src/commands/confirmation.js'
+import { cancelPendingPlan, clearPendingPlansForTest, consumeConfirmedPlan, consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, updatePendingPlan } from '../src/commands/confirmation.js'
 import { parseLocalMaaCommand } from '../src/commands/local-command.js'
 import { stateFilePath } from '../src/runtime/state.js'
 import { operatorBoxFilePath, saveOperatorBox } from '../src/operators/operator-box.js'
@@ -72,6 +72,22 @@ test('registered slash command prepares and exposes the fight settings panel wit
   assert.ok(payload.panel.fields.some(field => field.key === 'stage'))
   assert.ok(payload.panel.fields.some(field => field.key === 'medicine'))
   await clearPendingPlansForTest()
+})
+
+test('confirmation-panel cancellation invalidates the code on the host', async () => {
+  const commands = []
+  apply({ tools: { register: () => {} }, commands: { register: command => commands.push(command) } })
+  const maa = commands.find(command => command.name === 'maa')
+  const agent = { id: 'cancel-panel-test', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] } }
+  await clearPendingPlansForTest()
+  const prepared = await maa.handler({ agent, rawInput: 'fight', signal: AbortSignal.timeout(2_000) })
+  const code = prepared.text.match(/MAA-[A-F0-9]{6}/u)[0]
+  const cancelled = await maa.handler({ agent, rawInput: `cancel ${code}`, signal: AbortSignal.timeout(2_000) })
+  assert.equal(cancelled.kind, 'success')
+  assert.match(cancelled.text, /确认码已失效/u)
+  const confirm = await maa.handler({ agent, rawInput: `confirm ${code}`, signal: AbortSignal.timeout(2_000) })
+  assert.equal(confirm.kind, 'error')
+  assert.match(confirm.text, /没有待确认/u)
 })
 
 test('workflow confirmation exposes read-only steps and submits no task overrides', async () => {
@@ -152,6 +168,7 @@ test('parses common slash commands without a model', () => {
   assert.equal(parseLocalMaaCommand('启动游戏').steps[0].type, 'StartUp')
   assert.equal(parseLocalMaaCommand('基建换班').steps[0].drones, '_NotUse')
   assert.equal(parseLocalMaaCommand('confirm maa-a1b2c3').confirmationCode, 'MAA-A1B2C3')
+  assert.deepEqual(parseLocalMaaCommand('cancel maa-a1b2c3'), { kind: 'cancel', confirmationCode: 'MAA-A1B2C3' })
   assert.equal(parseLocalMaaCommand('停止任务').kind, 'stop')
   assert.deepEqual(parseLocalMaaCommand('这把肉鸽打完就停').request, { action: 'stop_after_current' })
   assert.deepEqual(parseLocalMaaCommand('第五层 Boss 前停止').request, { action: 'stop_before_boss', floor: 5 })
@@ -172,6 +189,30 @@ test('a human command-plane gesture consumes the pending plan once', async () =>
   await preparePendingPlan(agent, { document: {}, planSummary: 'gesture' }, { code: 'MAA-112233', now: 1_000 })
   assert.equal((await consumePlanFromHumanGesture(agent, 'MAA-112233', { now: 2_000 })).planSummary, 'gesture')
   await assert.rejects(consumePlanFromHumanGesture(agent, 'MAA-112233', { now: 2_000 }), /没有待确认/)
+})
+
+test('cancel is session-scoped and races atomically with confirmation', async () => {
+  await clearPendingPlansForTest()
+  const session = { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] }
+  const first = { id: 'cancel-session-a', session }
+  const other = { id: 'cancel-session-b', session }
+  await preparePendingPlan(first, { document: {}, planSummary: 'first' }, { code: 'MAA-CA1101' })
+  await preparePendingPlan(other, { document: {}, planSummary: 'other' }, { code: 'MAA-CA1102' })
+  await assert.rejects(cancelPendingPlan(first, 'MAA-CA1102'), /确认码不匹配/u)
+  assert.equal((await peekPendingPlan(other)).planSummary, 'other')
+  assert.equal((await cancelPendingPlan(first, 'MAA-CA1101')).planSummary, 'first')
+  await assert.rejects(consumePlanFromHumanGesture(first, 'MAA-CA1101'), /没有待确认/u)
+  assert.equal((await peekPendingPlan(other)).confirmationCode, 'MAA-CA1102')
+
+  const racing = { id: 'cancel-race', session }
+  await preparePendingPlan(racing, { document: {}, planSummary: 'race' }, { code: 'MAA-CA1103' })
+  const outcomes = await Promise.allSettled([
+    cancelPendingPlan(racing, 'MAA-CA1103'),
+    consumePlanFromHumanGesture(racing, 'MAA-CA1103'),
+  ])
+  assert.equal(outcomes.filter(item => item.status === 'fulfilled').length, 1)
+  assert.equal(outcomes.filter(item => item.status === 'rejected').length, 1)
+  await assert.rejects(peekPendingPlan(racing), /没有待确认/u)
 })
 
 test('requires a new explicit user turn and consumes a confirmation only once', async () => {

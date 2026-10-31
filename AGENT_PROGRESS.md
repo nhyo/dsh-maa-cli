@@ -98,3 +98,49 @@
 - 回归测试覆盖全部参数面板、命令隔离、并发写入、跨读取恢复、界园 → 萨米 → 界园、高级设置草稿、显式参数覆盖、字段级失效回退、v1 迁移、未确认不落盘和损坏文件回退。全量自动测试 `182/182` 通过；`git diff --check` 通过；`npm pack --dry-run --json` 通过（33 个文件，163,283 B，解包 559,515 B），未生成 tgz。
 - 本阶段未连接模拟器或执行真实游戏任务；持久化、参数传递和 UI 切换通过文件级/集成自动测试验证，不冒充实机验证。未执行 Git 提交、推送、打标签或 npm 发布，未修改版本号。
 
+
+## 阶段 13：确认面板 / 运行面板的停止、最小化、关闭与状态统一（已完成，未实机验证）
+
+> 2026-10-31。未修改版本号，未提交、未推送、未发布。本轮在云端 Linux 工作区完成（通过文件桥读写本机项目，**没有在本机 Windows 上运行任何命令**）。
+
+### 根因
+
+1. **停止按钮被禁用 / 看起来消失**：`summarizeRun` 用 `Number.isFinite(Number(run.stopRequestedAt))` 判断“停止中”。`stopRequestedAt` 初始为 `null`，`Number(null) === 0` 是有限数，所以**每条执行中记录都被报告为 `stopping: true`**；面板一读 `/maa status`，「停止任务」就变成禁用的「正在停止…」。`markRunStopping` 的同一判断导致停止时间从未写入。修复：`hasStopRequest()` 只认正的数字时间戳。
+2. **确认成功被当成运行结束**：后台执行后 `/maa confirm` 成功 = 任务已开始，但确认条的 `onSuccess` 仍按旧语义 `forgetRun()` + `store.complete()`，面板变成没有停止按钮的“执行结果”；从工具卡确认时确认条的本地运行记录只在挂载时从 localStorage 读一次，永远不会显示运行面板。运行状态分散在组件 state、全局 localStorage（不分会话）和计划 store 三处，互相覆盖（旧快照里的 `recent[0]` 会压过新的本地运行）。
+3. **最小化后恢复异常**：折叠时条件渲染卸载了 `ConfirmButton` 等子树，展开后本地状态（备注预览、执行中状态、停止按钮）丢失；执行结果视图的「×」会对已消费的确认码调用 `/maa cancel` 而报错。
+4. **关闭/停止不精确**：`/maa stop` 停“当前任何任务”（跨会话），并对所有工作流 `abort()`；兜底清理杀所有 `dsh-generated` 进程；停止期间若 `taskkill` 失败会无限等待；确认仍在启动阶段（尚未有运行记录）时无法停止。
+
+### 修改
+
+- `src/runtime/state.js` / `src/commands/confirmation.js`：`pending-plans.json` 新增 `closed`（确认码失效记录，24 小时、最多 500 条，按会话隔离），覆盖 cancelled / confirmed / superseded / expired。所有确认入口（`/maa confirm`、模型 `consumeConfirmedPlan`、`assertPlanCodeOpen`）对失效码给出确切原因；`cancelPendingPlan` 幂等，确认已胜出时抛 `MAA_PLAN_CONFIRMED`（带 `runId`）；`recordPlanRun` 把运行 id 写回失效记录。生成的新确认码不会与失效码碰撞。
+- `src/commands/run-state.js`：`hasStopRequest`、`setRunProcess`、`clearRunStopping`、`reapRunProcessTree(pid)`、`isProcessAlive`；记录新增 `ownerPid`（插件主机进程）、`pid`（cmd.exe 根进程）、`stopError`；`finishRun` 第一次终态为准；`stopRun` 只用于“非本进程持有”的记录，按 pid 定位进程树、要求命令行含 `dsh-generated`，失败时清除 stopping、写 `stopError` 并抛 `MAA_STOP_FAILED`；无 pid 的旧记录才回退到旧的名称匹配。
+- `src/runtime/runner.js`：`startMaa().kill()` 返回可等待结果（taskkill 退出码，128=已不存在视为成功），重复调用会重新下发终止；`exited` getter。非 Windows 改为直接 spawn + 独立进程组（只为开发/CI；Windows 路径不变）。
+- `src/index.js`：
+  - `stopExecution(agent, target)`：会话范围；`target` 可为 `RUN-…`、`MAA-…`、`WFR-…`；所有权 `self / other / foreign / orphan`（`runOwnership`）。本进程持有 → 记录 `stop_now` 指令、abort、再次 kill、最多等 `DSH_MAA_STOP_TIMEOUT_MS`（默认 30 秒）；超时 → `clearRunStopping` + `stop_failed`。孤儿 → `stopRun` 按 pid 清理。同一 run 的并发停止共享一个 Promise。
+  - `/maa confirm` 拆成 `confirmPlan` / `confirmPlanSteps`，在 `launches`（按会话）登记启动中的确认；各 await 之后检查 abort；启动阶段被停止且尚未消费 → 同时取消计划；已消费 → `executeDocument` 入口拒绝启动或通过 `abortSignal` 联动停止。**启动阶段在所有会话间串行**（`launchQueue`），避免两个会话同时通过“无运行”检查后输家确认码被白白消费。
+  - `/maa status` 改为会话视角：`running/interrupted` 带 `owner`，并返回 `launching`（本会话启动中的确认）与 `pending`（本会话待确认计划的确认码）。
+  - `/maa cancel`：已失效码幂等成功；已确认码返回“已经确认并开始执行（RUN-…）”；取消目标工作流计划时把工作流/目标置为 cancelled。
+  - 运行时指令：`stop_now` 走 `stopExecution`；其他修改型指令拒绝非所有者会话；`maa_runtime_instruction` 工具传入 `exec.agent`。
+  - 重启审计：遍历所有 `running` 记录，跳过 `foreign`，其余按 pid 清理并结算为“DSH 重启后已终止残留任务”。
+  - 工作流登记 `sessionKey`、`confirmationCode`、`done`；步骤运行记录带确认码。
+- `src/commands/local-command.js`：`/maa stop [RUN-…|MAA-…|WFR-…]`。
+- `src/client/index.js`：
+  - 每会话一个模块级 `createRunStore`（`dsh.maa.run:<sessionId>`），阶段 `launching / running / stopping / finished / observer`；`applyRunSnapshot` 用主机状态对账；`startConfirmation`（工具卡与确认条共用，成功=已开始）、`requestRunStop`（带目标、`inFlight` 防重复点击、失败保留按钮与原因）、`loadRunStatus`、`restorePendingPlan`。
+  - `DockShell`：所有确认条状态共用外壳，标题栏始终有「−/+」与「×」，主体用 `hidden` 隐藏而**不卸载**；折叠状态按确认码持久化。计划 store 增加 `setError`、`setPreview`（备注预览挂在计划上）和按确认码的参数草稿（`dsh.maa.draft:<code>`）。
+  - 运行面板：「停止任务」+「刷新状态」+ 运行时输入；「×」= 弹窗确认后停止；其他会话的运行显示为只读 observer（「×」只隐藏）；执行记录「×」只隐藏。工具卡在计划被消费后仍显示自己运行的停止按钮。
+  - 仍然**不轮询**：只在挂载、用户操作、展开运行面板、点“刷新状态”时读一次 `/maa status`。
+
+### 测试
+
+- 新增 `test/panel-lifecycle.test.mjs`（10 项）：子进程加载真实 `src/index.js` 作主机（`test/fixtures/dsh-host.mjs`），`test/fixtures/fake-maa.mjs` 作 maa-cli（`fast / slow / escape` 模式，产生真实子进程树），`test/helpers/mini-react.mjs`（遵循 React 挂载/卸载与 `useSyncExternalStore` 重新订阅规则的极简渲染器）渲染真实客户端并点击。覆盖：确认→运行面板→停止→进程树真实退出；确认/运行面板 3 轮折叠展开且 `ConfirmButton` 不重挂载、刷新后折叠状态和草稿恢复；取消后确认码永久失效（含主机重启后）；关闭运行面板真实停止；并发确认/取消、重复停止/关闭、启动中停止；刷新、其他会话只读不可停、主机 SIGKILL 重启后按 pid 回收；停止超时保留控制并可重试（POSIX）；运行时自然语言指令；工具卡确认后两处都能停止；两个会话同时确认。
+- 新增 `test/confirmation-lifecycle.test.mjs`（5 项），扩充 `test/run-state.test.mjs`（+4 项，含 `stopping` 回归）。
+- 当前 Linux 工作区：`node --test test/*.test.mjs` → 204 项，191 通过、3 跳过（Windows 专用）、10 失败。这 10 项在**未修改的原始代码**上同样失败，原因都是环境：Windows 路径断言（2）、需要本机私有 MAA 运行时（4）、`.cmd` 假程序/`cmd.exe`（4）。把 `DSH_MAA_CLI_PATH` 指向 fake-maa 后，`runner.test.mjs` 中的主机测试在新代码上通过（原始代码同条件下仍失败），剩下的只缺 MAA 资源文件 `item_index.json`。生命周期测试连续多次运行稳定。
+- **未在 Windows 上运行任何测试，未连接模拟器，未执行真实 MAA 任务。** `panel-lifecycle` 的 Windows 分支（`.cmd` 包装 fake-maa、`taskkill /T`、PowerShell pid 回收脚本）没有被执行过；第 7 项（进程逃逸）只在 POSIX 运行。
+
+### 遗留限制 / 下一步
+
+1. 请在 Windows 上先跑 `npm test`，重点看 `panel-lifecycle` 与 `run-state` 的 Windows 分支；`reapRunProcessTree` 的 PowerShell 脚本只做过代码审查。
+2. 实机：重启 DSH Desktop 后按 README/汇报里的步骤验收。
+3. 不轮询意味着任务自然结束后，运行面板要等用户展开/刷新/点停止才会显示“已结束”。若 DSH 将来提供服务端→客户端事件，可在任务结算时推送。
+4. 孤儿记录（本插件进程已不持有）任何会话都可以停止，因为它已经没有所有者；另一个仍存活的 DSH 进程持有的记录不会被碰。
+5. 工作流在两个步骤之间没有运行记录时，面板会短暂显示为结束；工作流本身的停止仍按确认码生效。

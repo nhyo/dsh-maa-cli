@@ -12,6 +12,7 @@ const MAX_RUNS = 8
 const STALE_MS = 7 * 60 * 60_000
 const INSTRUCTION_LIMIT = 30
 let stateMutation = Promise.resolve()
+const stopMutations = new Map()
 
 export { STALE_MS }
 
@@ -54,6 +55,14 @@ function mutateRunState(env, mutate) {
   return operation
 }
 
+// `stopRequestedAt` is null until a stop is requested. Number(null) is 0 and
+// therefore "finite", which used to make every running record look like it was
+// already stopping (the panel then disabled its stop button for good).
+export function hasStopRequest(run) {
+  const value = run?.stopRequestedAt
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
 export function isRunLive(run, now = Date.now()) {
   if (run?.status !== 'running') return false
   const startedAt = Number(run.startedAt)
@@ -90,8 +99,15 @@ export async function beginRun(payload, options = {}) {
       planSummary: String(payload.planSummary ?? '').slice(0, 4000),
       confirmationCode: String(payload.confirmationCode ?? ''),
       sessionId: String(payload.sessionId ?? ''),
+      // The plugin host that owns the child process, and the child's root pid.
+      // Stop and restart audits use both so they never touch a process that
+      // belongs to another DSH instance or to a user-launched MAA.
+      ownerPid: Number.isInteger(payload.ownerPid) ? payload.ownerPid : process.pid,
+      pid: null,
+      stopError: '',
       taskTypes: Array.isArray(payload.taskTypes) ? payload.taskTypes.map(String).slice(0, 20) : [],
       startedAt: now,
+      stopRequestedAt: null,
       finishedAt: null,
       exitCode: null,
       summary: '',
@@ -110,7 +126,11 @@ export async function finishRun(id, patch = {}, options = {}) {
   return await mutateRunState(env, state => {
     const run = state.runs.find(item => item.id === id)
     if (!run) return null
+    // The first terminal result wins: a late settlement must not turn a
+    // recorded "stopped" into "failed", or the other way round.
+    if (run.status !== 'running' && options.overwrite !== true) return run
     run.status = patch.status ?? 'finished'
+    run.stopError = ''
     run.finishedAt = options.now ?? Date.now()
     if (Number.isInteger(patch.exitCode)) run.exitCode = patch.exitCode
     if (patch.summary !== undefined) run.summary = String(patch.summary ?? '').slice(0, 2000)
@@ -118,15 +138,74 @@ export async function finishRun(id, patch = {}, options = {}) {
   })
 }
 
-// Marks a still-"running" record as interrupted, and optionally stops the
-// maa-cli process tree that is running the generated task.
-export async function stopRun(id, options = {}) {
+export async function setRunProcess(id, pid, options = {}) {
   const env = options.env ?? process.env
-  const run = (await readRunState(env)).runs.find(item => item.id === id)
-  if (!run) return null
-  const stopped = await finishRun(id, { status: 'stopped', summary: '已停止。' }, { env, now: options.now })
-  if (options.reap !== false) await reapGeneratedTaskProcesses()
-  return stopped
+  return await mutateRunState(env, state => {
+    const run = state.runs.find(item => item.id === id)
+    if (!run) return null
+    run.pid = Number.isInteger(pid) ? pid : null
+    return run
+  })
+}
+
+// A stop attempt that could not confirm process exit releases the "stopping"
+// flag again so the control stays usable, and records why it failed.
+export async function clearRunStopping(id, reason = '', options = {}) {
+  const env = options.env ?? process.env
+  return await mutateRunState(env, state => {
+    const run = state.runs.find(item => item.id === id)
+    if (!run || run.status !== 'running') return run ?? null
+    run.stopRequestedAt = null
+    run.stopError = String(reason ?? '').slice(0, 500)
+    return run
+  })
+}
+
+export async function markRunStopping(id, options = {}) {
+  const env = options.env ?? process.env
+  const now = options.now ?? Date.now()
+  return await mutateRunState(env, state => {
+    const run = state.runs.find(item => item.id === id)
+    if (!run || run.status !== 'running') return run ?? null
+    if (!hasStopRequest(run)) run.stopRequestedAt = now
+    run.stopError = ''
+    return run
+  })
+}
+
+// Marks a still-"running" record as stopped after its process tree has been
+// terminated. Used for records whose process is NOT owned by this plugin
+// process (DSH restarted while maa-cli kept running). The reaper only targets
+// the recorded process tree; a record without a pid (written by an older
+// version) falls back to the narrow "dsh-generated" command-line match.
+export async function stopRun(id, options = {}) {
+  const existing = stopMutations.get(id)
+  if (existing) return await existing
+  const operation = (async () => {
+    const env = options.env ?? process.env
+    const run = (await readRunState(env)).runs.find(item => item.id === id)
+    if (!run) return null
+    if (run.status !== 'running') return run
+    await markRunStopping(id, { env, now: options.now })
+    if (options.reap !== false) {
+      const reap = typeof options.reapProcess === 'function'
+        ? options.reapProcess
+        : () => Number.isInteger(run.pid) ? reapRunProcessTree(run.pid) : reapGeneratedTaskProcesses()
+      let outcome
+      try { outcome = await reap(run) } catch (error) { outcome = { ok: false, detail: error instanceof Error ? error.message : String(error) } }
+      if (outcome && outcome.ok === false) {
+        await clearRunStopping(id, outcome.detail || '无法确认 MAA 进程已退出。', { env })
+        const error = new Error(`停止失败：${outcome.detail || '无法确认 MAA 进程已退出。'}任务记录保持“执行中”，可以重试停止。`)
+        error.code = 'MAA_STOP_FAILED'
+        throw error
+      }
+    }
+    // Persist "stopped" only after the owned/recovered process has actually
+    // been terminated. This keeps the panel from claiming cleanup finished.
+    return await finishRun(id, { status: 'stopped', summary: options.summary ?? '已停止。' }, { env, now: options.now })
+  })()
+  stopMutations.set(id, operation)
+  try { return await operation } finally { if (stopMutations.get(id) === operation) stopMutations.delete(id) }
 }
 
 export async function addRunInstruction(id, instruction, options = {}) {
@@ -249,6 +328,9 @@ export function summarizeRun(run, now = Date.now()) {
     confirmationCode: run.confirmationCode,
     taskTypes: Array.isArray(run.taskTypes) ? run.taskTypes : [],
     startedAt: Number.isFinite(startedAt) ? new Date(startedAt).toISOString() : '',
+    sessionId: String(run.sessionId ?? ''),
+    stopError: String(run.stopError ?? ''),
+    stopping: run.status === 'running' && hasStopRequest(run),
     finishedAt: Number.isFinite(finishedAt) && finishedAt > 0 ? new Date(finishedAt).toISOString() : '',
     durationMs,
     duration: formatDuration(durationMs),
@@ -326,6 +408,71 @@ export async function reapGeneratedTaskProcesses() {
       resolve({ killed: pids.length, pids })
     })
   })
+}
+
+/**
+ * Terminate exactly one recorded process tree. On Windows the recorded pid is
+ * the cmd.exe wrapper; the tree is resolved from Win32_Process parent links and
+ * every member must still carry "dsh-generated" (or be the wrapper of such a
+ * process) before it is touched, so a recycled pid can never hit an unrelated
+ * program. Returns { ok, killed, pids, detail }.
+ */
+export async function reapRunProcessTree(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return { ok: true, killed: 0, pids: [], detail: '没有记录进程号。' }
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch (error) {
+      if (error?.code !== 'ESRCH') {
+        try { process.kill(pid, 'SIGKILL') } catch (inner) {
+          if (inner?.code !== 'ESRCH') return { ok: false, killed: 0, pids: [], detail: inner.message }
+        }
+      }
+    }
+    return { ok: true, killed: 1, pids: [pid], detail: '' }
+  }
+  // Collect the recorded tree through parent links (the wrapper may already be
+  // gone while its maa child lives on), then stop only members whose own
+  // command line names the generated task. A recycled pid that now belongs to
+  // an unrelated program therefore matches nothing and is left alone.
+  const script = [
+    `$root = ${pid}`,
+    '$all = @(Get-CimInstance Win32_Process)',
+    "$ids = New-Object 'System.Collections.Generic.HashSet[int]'",
+    '[void]$ids.Add($root)',
+    'do { $added = $false; foreach ($p in $all) { if ($ids.Contains([int]$p.ParentProcessId) -and $ids.Add([int]$p.ProcessId)) { $added = $true } } } while ($added)',
+    "$owned = @($all | Where-Object { $ids.Contains([int]$_.ProcessId) -and $_.CommandLine -and $_.CommandLine -like '*dsh-generated*' })",
+    "if ($owned.Count -eq 0) { 'NONE'; exit 0 }",
+    '$failed = 0',
+    "foreach ($p in $owned) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; 'KILLED ' + $p.ProcessId } catch { if (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue) { $failed++; 'FAILED ' + $p.ProcessId + ' ' + $_.Exception.Message } } }",
+    'if ($failed -gt 0) { exit 3 }',
+  ].join('\n')
+  return await new Promise(resolve => {
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const chunks = []
+    child.stdout.on('data', chunk => chunks.push(chunk))
+    child.on('error', error => resolve({ ok: false, killed: 0, pids: [], detail: `无法启动 PowerShell：${error.message}` }))
+    child.on('close', code => {
+      const lines = Buffer.concat(chunks).toString('utf8').split(/\r?\n/u).map(line => line.trim()).filter(Boolean)
+      const pids = lines.filter(line => line.startsWith('KILLED ')).map(line => Number(line.slice(7))).filter(Number.isInteger)
+      const failures = lines.filter(line => line.startsWith('FAILED '))
+      if (code === 0) return resolve({ ok: true, killed: pids.length, pids, detail: lines.includes('NONE') ? '记录的进程已经退出。' : '' })
+      resolve({ ok: false, killed: pids.length, pids, detail: failures.join('；') || `PowerShell 退出码 ${code}` })
+    })
+  })
+}
+
+export function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
 }
 
 export async function clearRunStateForTest(env = process.env) {

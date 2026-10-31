@@ -31,7 +31,7 @@ test('defaults to the DSH home and honours the override', () => {
 test('persists, reads back, and drops a single plan', async () => {
   const { root, env } = await makeEnv()
   try {
-    assert.deepEqual(await readState(env), { version: 1, plans: {} })
+    assert.deepEqual(await readState(env), { version: 1, plans: {}, closed: {} })
 
     await savePendingPlan('session-a', { confirmationCode: 'MAA-1', preparedAt: 1_000 }, { env })
     await savePendingPlan('session-b', { confirmationCode: 'MAA-2', preparedAt: 1_000 }, { env })
@@ -53,16 +53,16 @@ test('tolerates a missing, corrupt, or foreign store', async () => {
   const { root, env } = await makeEnv()
   try {
     await writeFile(stateFilePath(env), 'not json', 'utf8')
-    assert.deepEqual(await readState(env), { version: 1, plans: {} })
+    assert.deepEqual(await readState(env), { version: 1, plans: {}, closed: {} })
 
     await writeFile(stateFilePath(env), JSON.stringify({ version: 99, plans: { a: 1 } }), 'utf8')
-    assert.deepEqual(await readState(env), { version: 1, plans: {} })
+    assert.deepEqual(await readState(env), { version: 1, plans: {}, closed: {} })
 
     await writeState({ version: 1, plans: { 'session-c': { preparedAt: 5 } } }, env)
     assert.deepEqual(await loadPendingPlan('session-c', { env }), { preparedAt: 5 })
 
     await clearStateForTest(env)
-    assert.deepEqual(await readState(env), { version: 1, plans: {} })
+    assert.deepEqual(await readState(env), { version: 1, plans: {}, closed: {} })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

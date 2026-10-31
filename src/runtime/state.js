@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 const STORE_VERSION = 1
+let stateMutation = Promise.resolve()
 
 /**
  * Pending plans live in a small JSON file so a plan prepared in one DSH turn
@@ -23,7 +24,11 @@ export async function readState(env = process.env) {
     const parsed = JSON.parse(await readFile(stateFilePath(env), 'utf8'))
     if (parsed?.version !== STORE_VERSION) return emptyState()
     if (typeof parsed.plans !== 'object' || parsed.plans === null || Array.isArray(parsed.plans)) return emptyState()
-    return { version: STORE_VERSION, plans: parsed.plans }
+    // `closed` keeps a short tombstone for every code that was confirmed,
+    // cancelled, superseded or expired, so an old code can never be revived and
+    // late callers get an exact reason instead of a generic "not found".
+    const closed = typeof parsed.closed === 'object' && parsed.closed !== null && !Array.isArray(parsed.closed) ? parsed.closed : {}
+    return { version: STORE_VERSION, plans: parsed.plans, closed }
   } catch {
     return emptyState()
   }
@@ -32,7 +37,7 @@ export async function readState(env = process.env) {
 export async function writeState(state, env = process.env) {
   const file = stateFilePath(env)
   await mkdir(path.dirname(file), { recursive: true })
-  const payload = `${JSON.stringify({ version: STORE_VERSION, plans: state.plans }, null, 2)}\n`
+  const payload = `${JSON.stringify({ version: STORE_VERSION, plans: state.plans, closed: state.closed ?? {} }, null, 2)}\n`
   const temporary = `${file}.${process.pid}.tmp`
   try {
     await writeFile(temporary, payload, 'utf8')
@@ -43,6 +48,21 @@ export async function writeState(state, env = process.env) {
     await writeFile(file, payload, 'utf8').catch(() => {})
     await rm(temporary, { force: true }).catch(() => {})
   }
+}
+
+// Pending-plan writes share one queue so confirmation, cancellation, preview
+// updates and plan creation cannot overwrite one another after reading the
+// same older snapshot.
+export function mutateState(env = process.env, mutate) {
+  if (typeof mutate !== 'function') throw new TypeError('state mutator must be a function')
+  const operation = stateMutation.then(async () => {
+    const state = await readState(env)
+    const value = await mutate(state)
+    await writeState(state, env)
+    return value
+  })
+  stateMutation = operation.catch(() => {})
+  return operation
 }
 
 export function prunedPlans(plans, ttlMs, now) {
@@ -58,9 +78,7 @@ export function prunedPlans(plans, ttlMs, now) {
 
 export async function savePendingPlan(sessionKey, plan, options = {}) {
   const env = options.env ?? process.env
-  const state = await readState(env)
-  state.plans[sessionKey] = plan
-  await writeState(state, env)
+  return await mutateState(env, state => { state.plans[sessionKey] = plan })
 }
 
 export async function loadPendingPlan(sessionKey, options = {}) {
@@ -71,19 +89,15 @@ export async function loadPendingPlan(sessionKey, options = {}) {
 
 export async function dropPendingPlan(sessionKey, options = {}) {
   const env = options.env ?? process.env
-  const state = await readState(env)
-  if (state.plans[sessionKey] === undefined) return
-  delete state.plans[sessionKey]
-  await writeState(state, env)
+  return await mutateState(env, state => { delete state.plans[sessionKey] })
 }
 
 export async function prunePendingPlans(ttlMs, now, options = {}) {
   const env = options.env ?? process.env
-  const state = await readState(env)
-  const kept = prunedPlans(state.plans, ttlMs, now)
-  if (Object.keys(kept).length === Object.keys(state.plans).length) return state.plans
-  await writeState({ version: STORE_VERSION, plans: kept }, env)
-  return kept
+  return await mutateState(env, state => {
+    state.plans = prunedPlans(state.plans, ttlMs, now)
+    return state.plans
+  })
 }
 
 export async function clearStateForTest(env = process.env) {
@@ -91,5 +105,5 @@ export async function clearStateForTest(env = process.env) {
 }
 
 function emptyState() {
-  return { version: STORE_VERSION, plans: {} }
+  return { version: STORE_VERSION, plans: {}, closed: {} }
 }

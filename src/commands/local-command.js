@@ -15,11 +15,12 @@ const HELP = [
   '/maa closedown    关闭游戏',
   '',
   '兼容旧写法：/maa fight 1-7 2、/maa rouge 萨米 3；它们也只会预填面板，不会直接执行。',
-  '/maa stop         或  /maa 停止任务（也会清理 DSH 重启后残留的 maa-cli 进程）',
+  '/maa stop [RUN-XXXXXXXX | MAA-XXXXXX]  停止本会话的任务（等待进程退出后才返回；只终止记录的进程树）',
   '/maa status       查看当前执行中的任务与最近几次执行记录（面板内部使用）',
   '/maa 这把肉鸽打完就停 / 这次 Boss 关前停止 / 第五层 Boss 前停止 / 再打两局就停',
   '/maa 取消刚才的停止要求 / 现在打到哪里了',
   '/maa confirm MAA-XXXXXX  确认并执行待确认计划（参数由面板自动附加）',
+  '/maa cancel MAA-XXXXXX   取消并删除当前会话的待确认计划（面板内部使用）',
   '                  末尾也可加 note=<URL 编码的备注>，备注必须先在面板完成策略预览',
   '/maa peek MAA-XXXXXX     只读查看待确认计划的摘要与参数（面板内部使用，不会执行）',
   '/maa note-preview MAA-XXXXXX note=<URL 编码>  编译备注并更新预览，不执行',
@@ -71,9 +72,12 @@ export function parseLocalMaaCommand(rawInput) {
   if (strategyAction) return { kind: strategyAction[1].toLowerCase(), id: strategyAction[2].toLowerCase() }
   const confirm = input.match(/^confirm\s+(MAA-[A-F0-9]{6})(?:\s+(.+))?$/iu)
   if (confirm) return { kind: 'confirm', confirmationCode: confirm[1].toUpperCase(), overrides: parseOverrides(confirm[2]) }
+  const cancel = input.match(/^(?:cancel|取消计划)\s+(MAA-[A-F0-9]{6})$/iu)
+  if (cancel) return { kind: 'cancel', confirmationCode: cancel[1].toUpperCase() }
   const peek = input.match(/^(?:peek|查看计划)\s*(MAA-[A-F0-9]{6})?$/iu)
   if (peek) return { kind: 'peek', confirmationCode: peek[1] ? peek[1].toUpperCase() : '' }
-  if (/^(?:stop|停止|停止任务|终止任务)$/iu.test(input)) return { kind: 'stop' }
+  const stop = input.match(/^(?:stop|停止|停止任务|终止任务)(?:\s+((?:RUN-[A-F0-9]{8})|(?:MAA-[A-F0-9]{6})|(?:WFR-[A-Za-z0-9-]{1,64})))?$/iu)
+  if (stop) return stop[1] ? { kind: 'stop', target: stop[1].toUpperCase() } : { kind: 'stop' }
   if (/^(?:status|状态|任务状态|执行状态)$/iu.test(input)) return { kind: 'status' }
   try { return { kind: 'runtime-instruction', request: parseRuntimeInstruction(input) } } catch {}
   if (/^(?:setup|安装运行时|初始化)$/iu.test(input)) return { kind: 'setup' }
