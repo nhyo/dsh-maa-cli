@@ -3,9 +3,10 @@ import path from 'node:path'
 import { stateDirectory, writeJsonAtomically } from '../runtime/state.js'
 import { fetchJson } from './http.js'
 
-// v2 adds skill/mastery/module costs, workshop formulas and weekly stage
-// schedules. A v1 cache fails validation and is downloaded again.
-const VERSION = 2
+// v2 added skill/mastery/module costs, workshop formulas and weekly stage
+// schedules; v3 takes stage zones from the game's own stage_table (Penguin
+// files every chip stage under one zone). Older caches are downloaded again.
+const VERSION = 3
 const UPDATE_INTERVAL_MS = 24 * 60 * 60_000
 const SERVER_DIRECTORY = { CN: 'cn', US: 'en', JP: 'jp', KR: 'kr' }
 // Daily reset happens at 04:00 server time.
@@ -13,8 +14,8 @@ const SERVER_UTC_OFFSET_HOURS = { CN: 8, US: -7, JP: 9, KR: 9 }
 const BASE = 'https://raw.githubusercontent.com/ArknightsAssets/ArknightsGamedata/master'
 const MATRIX = 'https://penguin-stats.io/PenguinStats/api/v2/result/matrix'
 // MAA's stages.json has stageId/code but no zoneId, so the weekly zone of each
-// stage comes from Penguin Statistics' stage list.
-const PENGUIN_STAGES = 'https://penguin-stats.io/PenguinStats/api/v2/stages'
+// stage comes from the game's stage_table.json (about 26 MB, hence its own cap).
+const STAGE_TABLE_MAX_BYTES = 96 * 1024 * 1024
 const ARKPLANNER = 'https://planner.penguin-stats.io/plan'
 const RECORD_EXP = { 2001: 200, 2002: 400, 2003: 1000, 2004: 2000 }
 const LMD = '4001'
@@ -53,7 +54,7 @@ export async function refreshPlanningData(options = {}) {
     zones: `${excel}/zone_table.json`,
     modules: `${excel}/uniequip_table.json`,
     building: `${excel}/building_data.json`,
-    stageZones: `${PENGUIN_STAGES}?server=${server}`,
+    stageZones: `${excel}/stage_table.json`,
     ...(options.urls ?? {}),
   }
   try {
@@ -70,7 +71,7 @@ export async function refreshPlanningData(options = {}) {
       optionalSource(urls.zones, options, compactWeeklyZones),
       optionalSource(urls.modules, options, compactModules),
       optionalSource(urls.building, options, compactFormulas),
-      optionalSource(urls.stageZones, options, compactStageZones),
+      optionalSource(urls.stageZones, { ...options, maxBytes: STAGE_TABLE_MAX_BYTES }, compactStageZones),
     ])
     const sameServer = previous?.server === server ? previous : null
     const keys = ['weekly', 'modules', 'formulas', 'stageZones']
@@ -395,7 +396,9 @@ function compactMatrix(raw) {
 function compactWeeklyZones(raw) {
   const zones = raw?.zones
   if (!zones || typeof zones !== 'object') throw new Error('zone_table.json 格式无效。')
-  const additions = raw.weeklyAdditionInfos && typeof raw.weeklyAdditionInfos === 'object' ? raw.weeklyAdditionInfos : {}
+  // The game table calls it weeklyAdditionInfo: { weekly_1: { daysOfWeek: [1, 4, 5, 7], type: 'EVOLVE' } }.
+  const source = raw.weeklyAdditionInfo ?? raw.weeklyAdditionInfos
+  const additions = source && typeof source === 'object' ? source : {}
   const result = {}
   for (const [zoneId, zone] of Object.entries(zones)) {
     if (zone?.type !== 'WEEKLY') continue
@@ -408,16 +411,18 @@ function compactWeeklyZones(raw) {
     }
   }
   if (Object.keys(result).length === 0) throw new Error('zone_table.json 中没有周常关卡区。')
+  if (Object.values(result).every(zone => zone.daysOfWeek === null)) throw new Error('zone_table.json 中没有周常开放日（weeklyAdditionInfo）。')
   return { zones: result }
 }
 
 function compactStageZones(raw) {
-  if (!Array.isArray(raw)) throw new Error('企鹅物流关卡列表格式无效。')
+  const stages = raw?.stages
+  if (!stages || typeof stages !== 'object' || Array.isArray(stages)) throw new Error('stage_table.json 格式无效。')
   const result = {}
-  for (const stage of raw) {
-    if (typeof stage?.stageId === 'string' && typeof stage.zoneId === 'string' && stage.zoneId.startsWith('weekly')) result[stage.stageId] = stage.zoneId
+  for (const [stageId, stage] of Object.entries(stages)) {
+    if (typeof stage?.zoneId === 'string' && stage.zoneId.startsWith('weekly')) result[stageId] = stage.zoneId
   }
-  if (Object.keys(result).length === 0) throw new Error('企鹅物流关卡列表中没有周常关卡。')
+  if (Object.keys(result).length === 0) throw new Error('stage_table.json 中没有周常关卡。')
   return result
 }
 

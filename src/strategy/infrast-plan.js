@@ -31,7 +31,7 @@ const MAX_SAVED = 20
 
 export function infrastPlanFilePath(env = process.env) { return path.join(stateDirectory(env), 'infrast-plans.json') }
 
-export function compileInfrastPlan(input, operators) {
+export function compileInfrastPlan(input, operators, options = {}) {
   if (!plain(input) || !Array.isArray(input.plans) || input.plans.length === 0) throw new TypeError('排班至少需要一个 plans 方案。')
   if (input.plans.length > MAX_PLANS) throw new TypeError(`排班最多 ${MAX_PLANS} 个方案。`)
   if (!(operators instanceof Map)) throw new Error('缺少 MAA 的 battle_data.json，无法确认干员名称，已停止生成排班。')
@@ -82,7 +82,8 @@ export function compileInfrastPlan(input, operators) {
   const document = { title: text(input.title, 60) || 'DSH 自定义排班', plans }
   const description = text(input.description, 200)
   if (description) document.description = description
-  return { document, facilities, supported, unsupported, notes: [...new Set(notes)] }
+  const warnings = ownershipWarnings(document, options.box)
+  return { document, facilities, supported, unsupported, notes: [...new Set(notes)], warnings }
 }
 
 export function describeInfrastPlan(document) {
@@ -112,6 +113,19 @@ export async function deleteInfrastPlan(name, options = {}) {
   if (kept.length === plans.length) return false
   await writeJsonAtomically(infrastPlanFilePath(options.env ?? process.env), { version: 1, plans: kept })
   return true
+}
+
+// Names MAA knows but the player does not own cannot be placed. With a Box
+// cache this is reported before confirmation; without one nothing is claimed.
+export function ownershipWarnings(document, box) {
+  if (!box || !Array.isArray(box.operators)) return []
+  const owned = new Set(box.operators.map(operator => operator.name))
+  const missing = new Set()
+  for (const plan of document.plans ?? []) {
+    for (const rooms of Object.values(plan.rooms ?? {})) for (const room of rooms) for (const name of [...(room.operators ?? []), ...(room.candidates ?? [])]) if (!owned.has(name)) missing.add(name)
+    if (plan.Fiammetta?.target && !owned.has(plan.Fiammetta.target)) missing.add(plan.Fiammetta.target)
+  }
+  return missing.size ? [`按 ${box.scannedAt} 的 Box 缓存，你还没有：${[...missing].join('、')}；MAA 会跳过这些干员，相应房间可能空位或改用补位`] : []
 }
 
 function compileRoom(room, definition, label, operators, seen, supported, unsupported, notes) {

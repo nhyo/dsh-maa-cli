@@ -102,6 +102,12 @@ export function generatedFileMarker(name) {
   return `__DSH_GENERATED_${key}__`
 }
 
+// A marker left in a plan has no file behind it: never hand it to MaaCore.
+export function assertNoGeneratedMarkers(document) {
+  const unresolved = (JSON.stringify(document ?? {}).match(/__DSH_GENERATED_[A-Z0-9_]+__/gu) ?? []).find(marker => marker !== COPILOT_MARKER)
+  if (unresolved) throw new Error(`计划引用了插件生成的临时文件 ${unresolved}，但这份文件已经不存在（通常是沿用了上一次的自定义排班或作业）。请重新生成排班或作业后再确认。`)
+}
+
 export async function materializeGeneratedFiles(document, files, options) {
   const configDir = requireAbsolute(options.configDir, 'maa-cli config directory')
   if (!Array.isArray(files) || files.length === 0) return { document, restore: async () => {} }
@@ -123,11 +129,9 @@ export async function materializeGeneratedFiles(document, files, options) {
     return value
   }
   for (const task of clone.tasks ?? []) if (plain(task?.params)) task.params = swap(task.params)
-  // A marker left in the plan has no file behind it: refuse to start MAA. A
-  // generated file nobody references (the user replaced the path on the
+  // A generated file nobody references (the user replaced the path on the
   // panel) is harmless and simply removed after the run.
-  const unresolved = JSON.stringify(clone).match(/__DSH_GENERATED_[A-Z0-9_]+__/u)
-  if (unresolved && unresolved[0] !== COPILOT_MARKER) throw new Error(`计划引用了不存在的生成文件：${unresolved[0]}`)
+  assertNoGeneratedMarkers(clone)
   let restored = false
   return {
     document: clone,

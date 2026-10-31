@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -119,8 +119,9 @@ function v2Fixtures() {
       weekly_chips1: { zoneID: 'weekly_chips1', type: 'WEEKLY', zoneNameSecond: '医疗芯片' },
       main_0: { zoneID: 'main_0', type: 'MAINLINE' },
     },
-    weeklyAdditionInfos: {
-      weekly_1: { daysOfWeek: [1, 4, 5, 7], type: 'GOLD' },
+    // Same key and shape as the real cn zone_table.json.
+    weeklyAdditionInfo: {
+      weekly_1: { daysOfWeek: [1, 4, 5, 7], type: 'MATERIAL' },
       weekly_chips1: { daysOfWeek: [1, 4], type: 'EVOLVE' },
     },
   }
@@ -137,7 +138,8 @@ function v2Fixtures() {
     2: { itemId: '30014', count: 1, goldCost: 400, formulaType: 'F_EVOLVE', costs: [{ id: '30013', count: 2, type: 'MATERIAL' }] },
     3: { itemId: '3213', count: 1, goldCost: 0, formulaType: 'F_ASC', costs: [{ id: '3212', count: 2, type: 'MATERIAL' }] },
   } }
-  const stageZones = [{ stageId: 'wk_melee_6', zoneId: 'weekly_1', code: 'CE-6' }, { stageId: 'pro_a_1', zoneId: 'weekly_chips1', code: 'PR-A-1' }, { stageId: 'main_01-07', zoneId: 'main_1', code: '1-7' }]
+  // Same shape as the real stage_table.json.
+  const stageZones = { stages: { wk_melee_6: { zoneId: 'weekly_1', code: 'CE-6' }, pro_a_1: { zoneId: 'weekly_chips1', code: 'PR-A-1' }, 'main_01-07': { zoneId: 'main_1', code: '1-7' } } }
   return { ...base, zones, modules, building, stageZones }
 }
 
@@ -145,16 +147,16 @@ function v2Fetcher(values) {
   return async url => {
     const data = url.includes('character') ? values.characters : url.includes('const') ? values.constants
       : url.includes('zone') ? values.zones : url.includes('uniequip') ? values.modules : url.includes('building') ? values.building
-        : url.includes('stages') ? values.stageZones : values.matrix
+        : url.includes('stage_table') ? values.stageZones : values.matrix
     return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(data) }
   }
 }
-const V2_URLS = { characters: 'https://test/character', constants: 'https://test/const', matrix: 'https://test/matrix', zones: 'https://test/zone', modules: 'https://test/uniequip', building: 'https://test/building', stageZones: 'https://test/stages' }
+const V2_URLS = { characters: 'https://test/character', constants: 'https://test/const', matrix: 'https://test/matrix', zones: 'https://test/zone', modules: 'https://test/uniequip', building: 'https://test/building', stageZones: 'https://test/stage_table' }
 
 test('v2 data computes skill, mastery and module costs and never assumes unknown current levels', async t => {
   const env = await temporaryEnv(t)
   const data = await loadPlanningData({ env, now: 1_700_000_000_000, fetchImpl: v2Fetcher(v2Fixtures()), urls: V2_URLS })
-  assert.equal(data.version, 2)
+  assert.equal(data.version, 3)
   assert.equal(data.warning, '')
   const current = { id: 'char_0', elite: 2, level: 1 }
   const result = operatorUpgradeRequirements(data, {
@@ -218,4 +220,22 @@ test('ArkPlanner joint plan assigns stages and falls back when unavailable', asy
   const offline = await planWithArkPlanner({ requirements: [{ itemId: '30012', quantity: 30 }], itemIndex }, { fetchImpl: async () => { throw new Error('offline') } })
   assert.equal(offline.source, 'unavailable')
   assert.equal(offline.stages.length, 0)
+})
+
+test('real game tables: chip stages keep their own zones and open days', async t => {
+  const env = await temporaryEnv(t)
+  const real = JSON.parse(await readFile(new URL('./fixtures/weekly-stages.json', import.meta.url), 'utf8'))
+  const values = { ...v2Fixtures(), zones: real.zoneTable, stageZones: real.stageTable }
+  const data = await loadPlanningData({ env, now: 1_700_000_000_000, fetchImpl: v2Fetcher(values), urls: V2_URLS })
+  const monday = Date.parse('2026-11-02T04:00:00Z')
+  const schedule = weeklyStageSchedule(data, real.maaStages, { now: monday })
+  const open = Object.fromEntries(schedule.zones.map(zone => [zone.name, zone.openToday]))
+  // Monday: PR-A [1,4,5,7] and PR-B [1,2,5,6] open, PR-C [3,4,6,7] and PR-D [2,3,6,7] closed.
+  assert.deepEqual([open['固若金汤'], open['摧枯拉朽'], open['势不可挡'], open['身先士卒']], [true, true, false, false])
+  // Resource stages: AP [1,4,6,7] open, CA [2,3,5,7] closed, SK [1,3,5,6] open, CE [2,4,6,7] closed, LS every day.
+  assert.deepEqual([open['粉碎防御'], open['空中威胁'], open['资源保障'], open['货物运送'], open['战术演习']], [true, false, true, false, true])
+  const prB = schedule.zones.find(zone => zone.name === '摧枯拉朽')
+  assert.equal(prB.kind, 'chip')
+  assert.ok(prB.stages.includes('PR-B-2'))
+  assert.ok(schedule.zones.find(zone => zone.name === '货物运送').stages.includes('CE-6'))
 })

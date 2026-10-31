@@ -33,6 +33,7 @@ import { buildTrainingAdvice, fetchCommunityRanking, formatTrainingAdvice, loadO
 import {
   compileStrategyRequest,
   GENERATED_COPILOT_MARKER,
+  assertNoGeneratedMarkers,
   generatedFileMarker,
   loadOperatorNames,
   materializeGeneratedFiles,
@@ -46,7 +47,7 @@ import {
   rememberPlanStrategies, setStrategyMemoryEnabled,
 } from './strategy/memory.js'
 import { noteModelPrompt, parseStrategyNote } from './strategy/note.js'
-import { compileInfrastPlan, deleteInfrastPlan, describeInfrastPlan, listSavedInfrastPlans, saveInfrastPlan } from './strategy/infrast-plan.js'
+import { compileInfrastPlan, deleteInfrastPlan, describeInfrastPlan, listSavedInfrastPlans, ownershipWarnings, saveInfrastPlan } from './strategy/infrast-plan.js'
 import { formatCopilotCandidate, getCopilot, rankCopilots, searchCopilots } from './strategy/copilot-site.js'
 
 export const name = 'maa-cli-tools'
@@ -893,6 +894,7 @@ async function executeDocument(agent, signal, document, planSummary, options = {
       generatedExecution = await materializeGeneratedFiles(executionDocument, options.generatedFiles, { configDir })
       executionDocument = generatedExecution.document
     }
+    assertNoGeneratedMarkers(executionDocument)
     const written = await writeGeneratedTask(executionDocument, { configDir })
     const hasOperatorBox = executionDocument.tasks.some(task => task.type === 'OperBox')
     const hasDepot = executionDocument.tasks.some(task => task.type === 'Depot')
@@ -1760,7 +1762,7 @@ export function apply(ctx) {
 
   ctx.tools.register({
     name: 'maa_prepare_plan',
-    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100) unless drops is given; use drops for "刷到 N 个 X" requests and stage "Annihilation" for 剿灭 (the plugin cannot know whether this week's annihilation is already maxed, never claim it). For "today's resource/chip stage" call maa_stage_schedule first to learn which weekly stages are open. Recruit.times is how many recruitments to START (1-4); 0 only recognizes tags without recruiting, so when the user asks to 公招/招募 use 4 unless they give a number. Recruit confirm defaults to none; never add 5 or 6 to confirm unless the user explicitly asks, the run reports detected 5★/6★ tags afterwards. Custom base schedules use maa_prepare_infrast and copilot-site jobs use maa_copilot, not this tool; do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-99999; the confirmation panel starts at 9999). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings — theme, mode, difficulty, squad, role group, starting operator and MAA's advanced switches — pre-filled from MAA's recommended opening (marked 【推荐】 and freely editable), so the user may adjust there without re-preparing the plan; a 备注 field next to the validity hint is handed back to DSH as free-form guidance that DSH may act on but is not guaranteed to. Clicking confirm executes through the non-model command plane and does not create another model call.`,
+    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100) unless drops is given; use drops for "刷到 N 个 X" requests and stage "Annihilation" for 剿灭 (the plugin cannot know whether this week's annihilation is already maxed, never claim it). For "today's resource/chip stage" call maa_stage_schedule first to learn which weekly stages are open. Recruit.times is how many recruitments to START (1-4, default 4); 0 only recognizes tags. Recruit.confirm lists the star levels MAA actually starts (default [3,4] like the MAA GUI; an empty list means recognize only). Never add 5 or 6 to confirm unless the user explicitly asks: 5★/6★ slots are skipped for the player and reported after the run. Custom base schedules use maa_prepare_infrast and copilot-site jobs use maa_copilot, not this tool; do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-99999; the confirmation panel starts at 9999). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings — theme, mode, difficulty, squad, role group, starting operator and MAA's advanced switches — pre-filled from MAA's recommended opening (marked 【推荐】 and freely editable), so the user may adjust there without re-preparing the plan; a 备注 field next to the validity hint is handed back to DSH as free-form guidance that DSH may act on but is not guaranteed to. Clicking confirm executes through the non-model command plane and does not create another model call.`,
     parameters: {
       type: 'object', additionalProperties: false, required: ['purpose', 'steps'],
       properties: {
@@ -2054,9 +2056,9 @@ export function apply(ctx) {
       if (args.useSaved) {
         const saved = (await listSavedInfrastPlans()).find(item => item.name === args.useSaved)
         if (!saved) throw new Error(`没有名为“${args.useSaved}”的已保存排班。`)
-        compiled = { document: saved.document, facilities: saved.facilities, supported: describeInfrastPlan(saved.document), unsupported: [], notes: [] }
+        compiled = { document: saved.document, facilities: saved.facilities, supported: describeInfrastPlan(saved.document), unsupported: [], notes: [], warnings: ownershipWarnings(saved.document, await readOperatorBox()) }
       } else {
-        compiled = compileInfrastPlan(args, await loadOperatorNames(environment.resourceDir))
+        compiled = compileInfrastPlan(args, await loadOperatorNames(environment.resourceDir), { box: await readOperatorBox() })
       }
       const planIndex = args.planIndex ?? 0
       if (planIndex >= compiled.document.plans.length) throw new Error(`排班只有 ${compiled.document.plans.length} 个方案，planIndex 超出范围。`)
@@ -2067,6 +2069,7 @@ export function apply(ctx) {
       const purpose = args.purpose || args.title || '基建自定义排班'
       const parts = [`${purpose}｜执行方案 ${planIndex}：${describeInfrastPlan(compiled.document)[planIndex]}`]
       if (compiled.unsupported.length) parts.push(`未执行：${compiled.unsupported.map(item => `${item.request}（${item.reason}）`).join('、')}`)
+      if (compiled.warnings.length) parts.push(`⚠ ${compiled.warnings.join('；')}`)
       if (compiled.notes.length) parts.push(`注意：${compiled.notes.join('；')}`)
       if (saved) parts.push(`已保存为“${saved.name}”`)
       const planSummary = parts.join('｜')

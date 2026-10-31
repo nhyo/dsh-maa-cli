@@ -1,4 +1,4 @@
-import { applyRoguelikeOverrides, roguelikePanelFromDocument } from './planner.js'
+import { applyRoguelikeOverrides, recruitSummary, roguelikePanelFromDocument } from './planner.js'
 import { fallbackCapabilities, findRoguelikeTheme } from '../capabilities/discovery.js'
 
 const CLIENT_OPTIONS = [
@@ -113,10 +113,10 @@ const PANELS = {
       field('refresh', '刷新三星 Tags', 'boolean', 'refresh', { default: false }),
       field('select', '自动选择的 Tag 星级', 'multi', 'select', { default: [4, 5, 6], options: options(STAR_OPTIONS) }),
       field('confirm', '自动确认的 Tag 星级', 'multi', 'confirm', {
-        default: [], options: options(STAR_OPTIONS),
-        description: 'MAA 图形界面的 6 星自动确认通常只能通过配置文件开启；勾选后请确认你确实希望插件自动确认对应星级。',
+        default: [3, 4], options: options(STAR_OPTIONS),
+        description: 'MAA 只会对勾选的星级点“开始招募”；全部不勾选则只识别 Tag、不招募。默认与 MAA 图形界面一致只确认 3★/4★，出现 5★/6★ 组合时跳过该栏位，留给你手动处理。',
       }),
-      field('times', '招募次数（0＝仅计算）', 'integer', 'times', { default: 0, min: 0, max: 4 }),
+      field('times', '招募次数（0＝仅识别）', 'integer', 'times', { default: 4, min: 0, max: 4 }),
       field('setTime', '自动设置招募时限', 'boolean', 'set_time', { default: true }),
       field('expedite', '使用加急许可', 'boolean', 'expedite', {
         default: false,
@@ -272,7 +272,7 @@ export function readOnlyPlanPanel(document) {
 function stepDetail(task) {
   const params = isObject(task?.params) ? task.params : {}
   if (task?.type === 'Fight') return `：${params.stage || '当前关卡'} ×${params.times ?? '?'}${params.drops ? '，有掉落目标' : ''}${params.medicine ? `，理智药 ${params.medicine}` : ''}${params.stone ? `，源石 ${params.stone}` : ''}`
-  if (task?.type === 'Recruit') return `：${params.times ? `${params.times} 次` : '只识别不招募'}${Array.isArray(params.confirm) && params.confirm.length ? `，自动确认 ${params.confirm.join('/')}★` : ''}${params.expedite ? '，使用加急许可' : ''}`
+  if (task?.type === 'Recruit') return `：${recruitSummary(params.times ?? 0, Array.isArray(params.confirm) ? params.confirm : [], params.expedite === true).replace(/^公招/u, '')}`
   if (task?.type === 'Infrast') return params.mode === 10000 ? '：自定义排班' : params.mode === 20000 ? '：队列轮换' : ''
   if (task?.type === 'Copilot') return params.copilot_list?.[0]?.stage_name ? `：${params.copilot_list[0].stage_name}` : '：当前关卡'
   return ''

@@ -386,5 +386,5 @@ test('generated files replace plan markers, reject unknown markers and are remov
   assert.equal(document.tasks[0].params.copilot_list[0].filename, marker)
   await result.restore()
   await assert.rejects(readFile(target, 'utf8'), /ENOENT/u)
-  await assert.rejects(materializeGeneratedFiles({ tasks: [{ type: 'Infrast', params: { filename: '__DSH_GENERATED_INFRAST__' } }] }, [{ marker, content: {} }], { configDir }), /不存在的生成文件/u)
+  await assert.rejects(materializeGeneratedFiles({ tasks: [{ type: 'Infrast', params: { filename: '__DSH_GENERATED_INFRAST__' } }] }, [{ marker, content: {} }], { configDir }), /已经不存在/u)
 })

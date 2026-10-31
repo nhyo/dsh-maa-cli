@@ -39,13 +39,14 @@ export function evaluateCopilotOwnership(job, box) {
   for (const oper of job.opers) {
     const mine = owned.get(oper.name)
     if (!mine) { missing.push(oper.name); continue }
-    const need = oper.requirements ?? {}
-    if ((Number.isInteger(need.elite) && mine.elite < need.elite) || (Number.isInteger(need.elite) && mine.elite === need.elite && Number.isInteger(need.level) && mine.level < need.level)) {
-      weak.push(`${oper.name}（需要精${need.elite}${need.level ? ` ${need.level}级` : ''}，当前精${mine.elite} ${mine.level}级）`)
-    }
+    const reason = shortfall(oper, mine)
+    if (reason) weak.push(`${oper.name}（${reason}）`)
   }
   for (const group of job.groups) {
-    if (!group.opers.some(oper => owned.has(oper.name))) missing.push(`${group.name}组（${group.opers.map(oper => oper.name).join('/')}任一）`)
+    const usable = group.opers.some(oper => owned.has(oper.name) && !shortfall(oper, owned.get(oper.name)))
+    if (usable) continue
+    const ownedAny = group.opers.some(oper => owned.has(oper.name))
+    ;(ownedAny ? weak : missing).push(`${group.name}组（${group.opers.map(oper => oper.name).join('/')}任一${ownedAny ? '，已有的练度不够' : ''}）`)
   }
   return { status: missing.length === 0 && weak.length === 0 ? 'ok' : 'missing', missing, weak, reason: '' }
 }
@@ -61,6 +62,17 @@ export function formatCopilotCandidate(item, index) {
     : ownership?.status === 'missing' ? `缺 ${[...ownership.missing, ...ownership.weak].join('、')}`
       : '未判断干员'
   return `${index + 1}. maa://${item.id}｜${item.job.title || item.job.stageName}｜作者 ${item.uploader || '未知'}｜${item.views} 次浏览｜${item.job.opers.length + item.job.groups.length} 名干员｜${status}`
+}
+
+// Skill 2 unlocks at elite 1 and skill 3 at elite 2; explicit job
+// requirements (elite/level) are checked as well.
+function shortfall(oper, mine) {
+  const skillElite = oper.skill >= 3 ? 2 : oper.skill === 2 ? 1 : 0
+  const need = oper.requirements ?? {}
+  const elite = Math.max(skillElite, Number.isInteger(need.elite) ? need.elite : 0)
+  if (mine.elite < elite) return `需要精${elite}${oper.skill >= 2 ? `（${oper.skill} 技能）` : ''}，当前精${mine.elite}`
+  if (Number.isInteger(need.elite) && mine.elite === need.elite && Number.isInteger(need.level) && mine.level < need.level) return `需要精${need.elite} ${need.level}级，当前 ${mine.level}级`
+  return ''
 }
 
 function ownershipRank(ownership) { return ownership?.status === 'ok' ? 0 : ownership?.status === 'unknown' ? 1 : 2 + (ownership?.missing?.length ?? 0) }

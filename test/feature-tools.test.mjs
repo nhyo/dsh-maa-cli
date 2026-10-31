@@ -53,7 +53,7 @@ await writeFile(path.join(resourceDir, 'stages.json'), JSON.stringify([
 const today = serverWeekday(Date.now(), 'CN')
 const otherDays = [1, 2, 3, 4, 5, 6, 7].filter(day => day !== today)
 const planningData = {
-  version: 2, server: 'CN', updatedAt: new Date().toISOString(), stale: false, warning: '',
+  version: 3, server: 'CN', updatedAt: new Date().toISOString(), stale: false, warning: '',
   operators: [{
     id: 'char_2', name: '清流', rarity: 4,
     phases: [{ maxLevel: 50, evolveCost: [] }, { maxLevel: 70, evolveCost: [{ id: '30012', count: 5 }] }, { maxLevel: 80, evolveCost: [{ id: '30062', count: 3 }] }],
@@ -117,9 +117,10 @@ test('maa_prepare_infrast compiles a validated custom schedule into a generated 
   const context = exec('infrast')
   const result = await tool('maa_prepare_infrast').execute({
     action: 'prepare', purpose: '赤金排班', saveAs: '赤金班',
-    plans: [{ name: '白班', rooms: { manufacture: [{ count: 2, product: '赤金', autofill: true }], trading: [{ operators: ['红云', '不存在干员'] }] } }],
+    plans: [{ name: '白班', rooms: { manufacture: [{ count: 2, product: '赤金', autofill: true }], trading: [{ operators: ['红云', '不存在干员'] }], power: [{ operators: ['砾'] }] } }],
   }, context)
   assert.equal(result.status, 'pending_confirmation')
+  assert.match(result.summary, /你还没有：砾/u)
   assert.match(result.summary, /不存在干员（MAA 干员数据中没有该干员）/u)
   assert.match(result.summary, /不会切换制造站/u)
   const pending = await peekPendingPlan(context.agent)
@@ -128,6 +129,7 @@ test('maa_prepare_infrast compiles a validated custom schedule into a generated 
   const schedule = pending.generatedFiles[0].content
   assert.deepEqual(schedule.plans[0].rooms.manufacture, [{ autofill: true, product: 'Pure Gold' }, { autofill: true, product: 'Pure Gold' }])
   assert.deepEqual(schedule.plans[0].rooms.trading, [{ operators: ['红云'] }])
+  assert.deepEqual(schedule.plans[0].rooms.power, [{ operators: ['砾'] }])
   const listed = await tool('maa_prepare_infrast').execute({ action: 'list' }, exec('infrast-list'))
   assert.match(listed.summary, /赤金班/u)
   const reused = await tool('maa_prepare_infrast').execute({ action: 'prepare', useSaved: '赤金班' }, exec('infrast-reuse'))
@@ -140,7 +142,7 @@ test('maa_copilot search ranks jobs by Box ownership and prepare stores the job 
   globalThis.fetch = async url => {
     if (String(url).includes('/copilot/query')) {
       assert.match(String(url), /level_keyword=H8-4/u)
-      return jsonResponse({ status_code: 200, data: { has_next: false, data: [job(2, ['红云', '能天使']), job(1, ['红云', '清流'])] } })
+      return jsonResponse({ status_code: 200, data: { has_next: false, data: [job(2, ['红云', '能天使']), job(1, ['红云', '清流']), { ...job(3, []), content: JSON.stringify({ stage_name: 'H8-4', opers: [{ name: '清流', skill: 3 }], groups: [] }) }] } })
     }
     if (String(url).endsWith('/copilot/get/2')) return jsonResponse({ status_code: 200, data: job(2, ['红云', '能天使']) })
     throw new Error(`unexpected ${url}`)
@@ -148,7 +150,9 @@ test('maa_copilot search ranks jobs by Box ownership and prepare stores the job 
   try {
     const search = await tool('maa_copilot').execute({ action: 'search', stage: 'H8-4' }, exec('copilot-search'))
     const ranked = JSON.parse(search.data)
-    assert.deepEqual(ranked.map(item => [item.id, item.ownership.status]), [['1', 'ok'], ['2', 'missing']])
+    assert.deepEqual(ranked.map(item => [item.id, item.ownership.status]), [['1', 'ok'], ['3', 'missing'], ['2', 'missing']])
+    // 清流 is only elite 1, so a skill-3 requirement counts as under-levelled.
+    assert.match(ranked.find(item => item.id === '3').ownership.weak[0], /需要精2（3 技能），当前精1/u)
     assert.match(search.summary, /缺 能天使/u)
     await clearPendingPlansForTest()
     const context = exec('copilot-prepare')
@@ -188,10 +192,15 @@ test('goal estimate answers “is my depot enough” read-only and asks for unkn
 
 test('recruit high-star results are reported, never auto-confirmed', async () => {
   const { buildTaskDocument, summarizePlan } = await import('../src/commands/planner.js')
-  const document = buildTaskDocument([{ type: 'Recruit', times: 4 }])
-  assert.deepEqual(document.tasks[0].params.confirm, [])
-  assert.match(summarizePlan([{ type: 'Recruit', times: 4 }]), /5★\/6★ 不会自动确认/u)
-  assert.match(summarizePlan([{ type: 'Recruit', times: 4, confirm: [3, 6] }]), /⚠ 将自动确认 6★/u)
+  // An empty confirm list means "calculate only" in MaaCore, so the default
+  // must actually recruit 3★/4★ and leave 5★/6★ to the player.
+  const document = buildTaskDocument([{ type: 'Recruit' }])
+  assert.deepEqual(document.tasks[0].params.confirm, [3, 4])
+  assert.equal(document.tasks[0].params.times, 4)
+  assert.match(summarizePlan([{ type: 'Recruit' }]), /公招4次，自动确认 3\/4★；5★\/6★ 组合不确认/u)
+  assert.match(summarizePlan([{ type: 'Recruit', confirm: [3, 6] }]), /⚠ 6★ 也会自动确认/u)
+  assert.match(summarizePlan([{ type: 'Recruit', confirm: [] }]), /只会识别、不会招募/u)
+  assert.match(summarizePlan([{ type: 'Recruit', times: 0 }]), /只识别 Tag，不招募/u)
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
   assert.match(source, /公招提醒：/u)
 })
@@ -207,8 +216,45 @@ test('multi-step and Copilot plans get a read-only confirmation panel instead of
   assert.equal(payload.panel.type, 'Plan')
   assert.deepEqual(payload.panel.fields, [])
   assert.deepEqual(payload.panel.values, {})
-  assert.deepEqual(payload.panel.notes.map(item => item.text), ['1. 基建换班', '2. 自动公招：4 次'])
+  assert.equal(payload.panel.notes[0].text, '1. 基建换班')
+  assert.match(payload.panel.notes[1].text, /^2\. 自动公招：4次，自动确认 3\/4★/u)
   const single = await tool('maa_prepare_plan').execute({ purpose: '只刷 1-7', steps: [{ type: 'Fight', stage: '1-7', times: 2 }] }, exec('single-step'))
   const singlePeek = JSON.parse((await maa.handler({ agent: { id: 'single-step', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn } }] } }, rawInput: `peek ${single.confirmationCode}`, signal: AbortSignal.timeout(10_000) })).text)
   assert.equal(singlePeek.panel.type, 'Fight')
+})
+
+test('one-off panel values are never remembered and leftover generated files are refused', async () => {
+  const { taskPanelFromDocument } = await import('../src/commands/task-panel.js')
+  const { rememberPanelValues, applyRememberedConfig } = await import('../src/commands/panel-memory.js')
+  const { buildTaskDocument } = await import('../src/commands/planner.js')
+  const { assertNoGeneratedMarkers } = await import('../src/strategy/compiler.js')
+  await rememberPanelValues(taskPanelFromDocument(buildTaskDocument([{ type: 'Infrast', mode: 10000, filename: '__DSH_GENERATED_INFRAST__', facilities: ['Mfg'], drones: 'PureGold' }])))
+  const infrast = await applyRememberedConfig(taskPanelFromDocument(buildTaskDocument([{ type: 'Infrast' }])))
+  assert.equal(infrast.values.mode, 0)
+  assert.equal(infrast.values.filename, '')
+  assert.deepEqual(infrast.values.facilities, ['Mfg'])
+  const itemIndex = { byId: new Map([['30013', { id: '30013', name: '固源岩组' }]]), byName: new Map() }
+  await rememberPanelValues(taskPanelFromDocument(buildTaskDocument([{ type: 'Fight', stage: '1-7', times: 3, drops: { 30013: 3 } }]), undefined, { itemIndex }))
+  const fight = await applyRememberedConfig(taskPanelFromDocument(buildTaskDocument([{ type: 'Fight', times: 1 }]), undefined, { itemIndex }))
+  assert.equal(fight.values.stage, '1-7')
+  assert.equal(fight.values.drops, '')
+  assert.throws(() => assertNoGeneratedMarkers({ tasks: [{ type: 'Infrast', params: { filename: '__DSH_GENERATED_INFRAST__' } }] }), /已经不存在/u)
+  assert.doesNotThrow(() => assertNoGeneratedMarkers({ tasks: [{ type: 'Infrast', params: { mode: 0 } }] }))
+})
+
+test('memories written by the previous version with a generated schedule are ignored', async () => {
+  const { writeFile: write } = await import('node:fs/promises')
+  const { taskPanelFromDocument } = await import('../src/commands/task-panel.js')
+  const { applyRememberedConfig, panelMemoryFilePath } = await import('../src/commands/panel-memory.js')
+  const { buildTaskDocument } = await import('../src/commands/planner.js')
+  const fresh = taskPanelFromDocument(buildTaskDocument([{ type: 'Infrast' }]))
+  const file = panelMemoryFilePath()
+  const current = JSON.parse(await readFile(file, 'utf8'))
+  const key = 'Panel:Infrast'
+  current.entries[key] = { ...fresh.values, mode: 10000, filename: '__DSH_GENERATED_INFRAST__', planIndex: 0, threshold: 0.5 }
+  await write(file, JSON.stringify(current))
+  const restored = await applyRememberedConfig(fresh)
+  assert.equal(restored.values.mode, 0)
+  assert.equal(restored.values.filename, '')
+  assert.equal(restored.values.threshold, 0.5)
 })

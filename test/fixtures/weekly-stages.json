@@ -1,0 +1,424 @@
+{
+ "source": "excerpt of ArknightsGamedata cn zone_table.json / stage_table.json (2026-10-31) and MAA v6.18 resource/stages.json; weekly entries only",
+ "zoneTable": {
+  "zones": {
+   "weekly_1": {
+    "zoneID": "weekly_1",
+    "type": "WEEKLY",
+    "zoneNameSecond": "固若金汤"
+   },
+   "weekly_2": {
+    "zoneID": "weekly_2",
+    "type": "WEEKLY",
+    "zoneNameSecond": "摧枯拉朽"
+   },
+   "weekly_3": {
+    "zoneID": "weekly_3",
+    "type": "WEEKLY",
+    "zoneNameSecond": "势不可挡"
+   },
+   "weekly_4": {
+    "zoneID": "weekly_4",
+    "type": "WEEKLY",
+    "zoneNameSecond": "身先士卒"
+   },
+   "weekly_5": {
+    "zoneID": "weekly_5",
+    "type": "WEEKLY",
+    "zoneNameSecond": "粉碎防御"
+   },
+   "weekly_6": {
+    "zoneID": "weekly_6",
+    "type": "WEEKLY",
+    "zoneNameSecond": "空中威胁"
+   },
+   "weekly_7": {
+    "zoneID": "weekly_7",
+    "type": "WEEKLY",
+    "zoneNameSecond": "战术演习"
+   },
+   "weekly_8": {
+    "zoneID": "weekly_8",
+    "type": "WEEKLY",
+    "zoneNameSecond": "资源保障"
+   },
+   "weekly_9": {
+    "zoneID": "weekly_9",
+    "type": "WEEKLY",
+    "zoneNameSecond": "货物运送"
+   }
+  },
+  "weeklyAdditionInfo": {
+   "weekly_1": {
+    "daysOfWeek": [
+     1,
+     4,
+     5,
+     7
+    ],
+    "type": "EVOLVE"
+   },
+   "weekly_2": {
+    "daysOfWeek": [
+     1,
+     2,
+     5,
+     6
+    ],
+    "type": "EVOLVE"
+   },
+   "weekly_3": {
+    "daysOfWeek": [
+     3,
+     4,
+     6,
+     7
+    ],
+    "type": "EVOLVE"
+   },
+   "weekly_4": {
+    "daysOfWeek": [
+     2,
+     3,
+     6,
+     7
+    ],
+    "type": "EVOLVE"
+   },
+   "weekly_5": {
+    "daysOfWeek": [
+     1,
+     4,
+     6,
+     7
+    ],
+    "type": "MATERIAL"
+   },
+   "weekly_6": {
+    "daysOfWeek": [
+     2,
+     3,
+     5,
+     7
+    ],
+    "type": "MATERIAL"
+   },
+   "weekly_7": {
+    "daysOfWeek": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7
+    ],
+    "type": "SPECIAL"
+   },
+   "weekly_8": {
+    "daysOfWeek": [
+     1,
+     3,
+     5,
+     6
+    ],
+    "type": "MATERIAL"
+   },
+   "weekly_9": {
+    "daysOfWeek": [
+     2,
+     4,
+     6,
+     7
+    ],
+    "type": "MATERIAL"
+   }
+  }
+ },
+ "stageTable": {
+  "stages": {
+   "wk_melee_1": {
+    "zoneId": "weekly_9",
+    "code": "CE-1"
+   },
+   "wk_melee_2": {
+    "zoneId": "weekly_9",
+    "code": "CE-2"
+   },
+   "wk_melee_3": {
+    "zoneId": "weekly_9",
+    "code": "CE-3"
+   },
+   "wk_melee_4": {
+    "zoneId": "weekly_9",
+    "code": "CE-4"
+   },
+   "wk_melee_5": {
+    "zoneId": "weekly_9",
+    "code": "CE-5"
+   },
+   "wk_melee_6": {
+    "zoneId": "weekly_9",
+    "code": "CE-6"
+   },
+   "wk_armor_1": {
+    "zoneId": "weekly_8",
+    "code": "SK-1"
+   },
+   "wk_armor_2": {
+    "zoneId": "weekly_8",
+    "code": "SK-2"
+   },
+   "wk_armor_3": {
+    "zoneId": "weekly_8",
+    "code": "SK-3"
+   },
+   "wk_armor_4": {
+    "zoneId": "weekly_8",
+    "code": "SK-4"
+   },
+   "wk_armor_5": {
+    "zoneId": "weekly_8",
+    "code": "SK-5"
+   },
+   "wk_kc_1": {
+    "zoneId": "weekly_7",
+    "code": "LS-1"
+   },
+   "wk_kc_2": {
+    "zoneId": "weekly_7",
+    "code": "LS-2"
+   },
+   "wk_kc_3": {
+    "zoneId": "weekly_7",
+    "code": "LS-3"
+   },
+   "wk_kc_4": {
+    "zoneId": "weekly_7",
+    "code": "LS-4"
+   },
+   "wk_kc_5": {
+    "zoneId": "weekly_7",
+    "code": "LS-5"
+   },
+   "wk_kc_6": {
+    "zoneId": "weekly_7",
+    "code": "LS-6"
+   },
+   "wk_toxic_1": {
+    "zoneId": "weekly_5",
+    "code": "AP-1"
+   },
+   "wk_toxic_2": {
+    "zoneId": "weekly_5",
+    "code": "AP-2"
+   },
+   "wk_toxic_3": {
+    "zoneId": "weekly_5",
+    "code": "AP-3"
+   },
+   "wk_toxic_4": {
+    "zoneId": "weekly_5",
+    "code": "AP-4"
+   },
+   "wk_toxic_5": {
+    "zoneId": "weekly_5",
+    "code": "AP-5"
+   },
+   "wk_fly_1": {
+    "zoneId": "weekly_6",
+    "code": "CA-1"
+   },
+   "wk_fly_2": {
+    "zoneId": "weekly_6",
+    "code": "CA-2"
+   },
+   "wk_fly_3": {
+    "zoneId": "weekly_6",
+    "code": "CA-3"
+   },
+   "wk_fly_4": {
+    "zoneId": "weekly_6",
+    "code": "CA-4"
+   },
+   "wk_fly_5": {
+    "zoneId": "weekly_6",
+    "code": "CA-5"
+   },
+   "pro_a_1": {
+    "zoneId": "weekly_1",
+    "code": "PR-A-1"
+   },
+   "pro_a_2": {
+    "zoneId": "weekly_1",
+    "code": "PR-A-2"
+   },
+   "pro_b_1": {
+    "zoneId": "weekly_2",
+    "code": "PR-B-1"
+   },
+   "pro_b_2": {
+    "zoneId": "weekly_2",
+    "code": "PR-B-2"
+   },
+   "pro_c_1": {
+    "zoneId": "weekly_3",
+    "code": "PR-C-1"
+   },
+   "pro_c_2": {
+    "zoneId": "weekly_3",
+    "code": "PR-C-2"
+   },
+   "pro_d_1": {
+    "zoneId": "weekly_4",
+    "code": "PR-D-1"
+   },
+   "pro_d_2": {
+    "zoneId": "weekly_4",
+    "code": "PR-D-2"
+   }
+  }
+ },
+ "maaStages": [
+  {
+   "stageId": "pro_a_1",
+   "code": "PR-A-1"
+  },
+  {
+   "stageId": "pro_a_2",
+   "code": "PR-A-2"
+  },
+  {
+   "stageId": "pro_b_1",
+   "code": "PR-B-1"
+  },
+  {
+   "stageId": "pro_b_2",
+   "code": "PR-B-2"
+  },
+  {
+   "stageId": "pro_c_1",
+   "code": "PR-C-1"
+  },
+  {
+   "stageId": "pro_c_2",
+   "code": "PR-C-2"
+  },
+  {
+   "stageId": "pro_d_1",
+   "code": "PR-D-1"
+  },
+  {
+   "stageId": "pro_d_2",
+   "code": "PR-D-2"
+  },
+  {
+   "stageId": "wk_armor_1",
+   "code": "SK-1"
+  },
+  {
+   "stageId": "wk_armor_2",
+   "code": "SK-2"
+  },
+  {
+   "stageId": "wk_armor_3",
+   "code": "SK-3"
+  },
+  {
+   "stageId": "wk_armor_4",
+   "code": "SK-4"
+  },
+  {
+   "stageId": "wk_armor_5",
+   "code": "SK-5"
+  },
+  {
+   "stageId": "wk_fly_1",
+   "code": "CA-1"
+  },
+  {
+   "stageId": "wk_fly_2",
+   "code": "CA-2"
+  },
+  {
+   "stageId": "wk_fly_3",
+   "code": "CA-3"
+  },
+  {
+   "stageId": "wk_fly_4",
+   "code": "CA-4"
+  },
+  {
+   "stageId": "wk_fly_5",
+   "code": "CA-5"
+  },
+  {
+   "stageId": "wk_kc_1",
+   "code": "LS-1"
+  },
+  {
+   "stageId": "wk_kc_2",
+   "code": "LS-2"
+  },
+  {
+   "stageId": "wk_kc_3",
+   "code": "LS-3"
+  },
+  {
+   "stageId": "wk_kc_4",
+   "code": "LS-4"
+  },
+  {
+   "stageId": "wk_kc_5",
+   "code": "LS-5"
+  },
+  {
+   "stageId": "wk_kc_6",
+   "code": "LS-6"
+  },
+  {
+   "stageId": "wk_melee_1",
+   "code": "CE-1"
+  },
+  {
+   "stageId": "wk_melee_2",
+   "code": "CE-2"
+  },
+  {
+   "stageId": "wk_melee_3",
+   "code": "CE-3"
+  },
+  {
+   "stageId": "wk_melee_4",
+   "code": "CE-4"
+  },
+  {
+   "stageId": "wk_melee_5",
+   "code": "CE-5"
+  },
+  {
+   "stageId": "wk_melee_6",
+   "code": "CE-6"
+  },
+  {
+   "stageId": "wk_toxic_1",
+   "code": "AP-1"
+  },
+  {
+   "stageId": "wk_toxic_2",
+   "code": "AP-2"
+  },
+  {
+   "stageId": "wk_toxic_3",
+   "code": "AP-3"
+  },
+  {
+   "stageId": "wk_toxic_4",
+   "code": "AP-4"
+  },
+  {
+   "stageId": "wk_toxic_5",
+   "code": "AP-5"
+  }
+ ]
+}

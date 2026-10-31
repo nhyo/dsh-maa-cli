@@ -295,8 +295,11 @@ function buildStep(step, index, capabilities) {
       params = {
         refresh: optionalBoolean(step.refresh, false),
         select: starArray(step.select ?? [4, 5, 6], 'Recruit.select'),
-        confirm: starArray(step.confirm ?? [], 'Recruit.confirm'),
-        times: optionalInteger(step.times, 0, 4, 'Recruit.times', 0),
+        // MaaCore only presses "confirm" for the listed star levels; an empty
+        // list means calculate only. Default to MAA GUI's 3★/4★ so high-star
+        // combinations are left untouched for the player.
+        confirm: starArray(step.confirm ?? [3, 4], 'Recruit.confirm'),
+        times: optionalInteger(step.times, 0, 4, 'Recruit.times', 4),
         set_time: optionalBoolean(step.setTime, true),
         expedite: optionalBoolean(step.expedite, false),
         level3_recruitment_permit_reserve: optionalInteger(step.permitReserve, 0, 999, 'Recruit.permitReserve', 0),
@@ -408,11 +411,7 @@ function summarizeStep(step, capabilities, context = {}) {
       return `作战 ${label} ×${times}${step.drops && step.times === undefined ? '（上限）' : ''}，连战${times <= 10 ? times : '自动分组'}，理智药${step.medicine ?? 0}，临期药${step.expiringMedicine ?? 0}，源石${step.stone ?? 0}${drops}`
     }
     case 'Infrast': return step.mode === 10000 ? `基建自定义排班（方案 ${step.planIndex ?? 0}）` : `基建换班${step.drones && step.drones !== '_NotUse' ? `，无人机=${step.drones}` : ''}`
-    case 'Recruit': {
-      const confirm = Array.isArray(step.confirm) ? step.confirm : []
-      const high = confirm.filter(star => star >= 5)
-      return `公招${step.times ?? 0}次${step.expedite ? '，使用加急许可' : ''}${high.length ? `，⚠ 将自动确认 ${high.join('/')}★` : '，5★/6★ 不会自动确认'}`
-    }
+    case 'Recruit': return recruitSummary(step.times ?? 4, Array.isArray(step.confirm) ? step.confirm : [3, 4], step.expedite === true)
     case 'Copilot': return `自动战斗作业${step.stageName ? ` ${step.stageName}` : ''}${step.formation === false ? '' : '（自动编队）'}`
     case 'SSSCopilot': return `保全派驻作业 ×${step.loopTimes ?? 1}`
     case 'Mall': return `信用商店${step.shopping ? '并购物' : '仅收取/访问'}${step.forceShoppingIfCreditFull ? '，信用溢出时忽略黑名单' : ''}`
@@ -428,6 +427,14 @@ function summarizeStep(step, capabilities, context = {}) {
     case 'CloseDown': return '关闭游戏'
     default: return String(step.type)
   }
+}
+
+export function recruitSummary(times, confirm, expedite) {
+  if (times === 0) return '公招只识别 Tag，不招募'
+  if (confirm.length === 0) return `公招${times}次，⚠ 未选择任何自动确认星级，MAA 只会识别、不会招募`
+  const stars = [...confirm].sort((a, b) => a - b)
+  const high = stars.filter(star => star >= 5)
+  return `公招${times}次，自动确认 ${stars.join('/')}★${expedite ? '，使用加急许可' : ''}${high.length ? `，⚠ ${high.join('/')}★ 也会自动确认` : '；5★/6★ 组合不确认，留给你手动处理'}`
 }
 
 function fightStage(value) {

@@ -181,3 +181,10 @@
 - 根因（改动前就存在）：`taskPanelFromDocument` 只为单任务计划生成参数面板，多步骤计划和没有面板的任务类型（Copilot / SSSCopilot）返回 `null`；客户端拿到 `panel: null` 后不创建确认条。
 - 修复：`/maa peek` 在没有可编辑面板时返回只读的 `Plan` 面板（无字段，列出每一步），确认时不提交任何参数覆盖，执行的就是准备好的计划。新增测试覆盖。
 - 同时在 `maa_prepare_plan` 说明中写明 `Recruit.times=0` 只识别不招募，用户要求公招时默认 4 次。
+
+### 阶段 14 补充二：自检后修复（2026-10-31）
+- 公招：MaaCore 文档写明 `confirm` 为空数组表示只计算，原默认 `confirm: []`、`times: 0` 导致“公招”从不招募。改为默认 `times: 4`、`confirm: [3, 4]`，摘要按实际参数说明；面板默认值同步。
+- 周常开放日：直接下载 cn `zone_table.json` 核对，真实字段为 `weeklyAdditionInfo`（daysOfWeek + EVOLVE/MATERIAL/SPECIAL），原代码读错字段。企鹅物流 zones 接口把全部芯片本归为 `weekly_1`「芯片搜索」，与游戏 `weekly_1`「固若金汤」(PR-A) 冲突，改用 `stage_table.json`（约 26 MB，单独 96 MB 上限）。缓存 v3。`test/fixtures/weekly-stages.json` 为真实表与本机 MAA v6.18 `stages.json` 的周常摘录。
+- 面板记忆：不再保存插件生成文件（以及对应的 Infrast 自定义模式 / 方案序号）和掉落目标；读取旧记忆时也忽略这些值。执行前 `assertNoGeneratedMarkers` 拒绝残留占位。
+- 作业站：技能所需精英化纳入练度判断；排班：按 Box 缓存提示未拥有的干员（不阻止确认）。
+- Linux `npm test`：221 项，207 通过、3 跳过、11 失败（与改动前相同的环境性失败）。
