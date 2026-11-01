@@ -156,7 +156,7 @@ const V2_URLS = { characters: 'https://test/character', constants: 'https://test
 test('v2 data computes skill, mastery and module costs and never assumes unknown current levels', async t => {
   const env = await temporaryEnv(t)
   const data = await loadPlanningData({ env, now: 1_700_000_000_000, fetchImpl: v2Fetcher(v2Fixtures()), urls: V2_URLS })
-  assert.equal(data.version, 3)
+  assert.equal(data.version, 4)
   assert.equal(data.warning, '')
   const current = { id: 'char_0', elite: 2, level: 1 }
   const result = operatorUpgradeRequirements(data, {
@@ -178,14 +178,18 @@ test('v2 data computes skill, mastery and module costs and never assumes unknown
 test('workshop expansion deducts stock first and only expands material formulas', async t => {
   const env = await temporaryEnv(t)
   const data = await loadPlanningData({ env, now: 1_700_000_000_000, fetchImpl: v2Fetcher(v2Fixtures()), urls: V2_URLS })
-  const expanded = expandSynthesis([{ itemId: '30014', quantity: 2 }, { itemId: '3213', quantity: 1 }], data, { items: { 30014: 1, 30013: 1 } })
+  // MAA item_index rarity: 30012 green(1), 30013 blue(2), 30014 purple(3).
+  const itemIndex = { byId: new Map([['30012', { rarity: 1 }], ['30013', { rarity: 2 }], ['30014', { rarity: 3 }], ['3213', { rarity: 3 }]]) }
+  const expanded = expandSynthesis([{ itemId: '30014', quantity: 2 }, { itemId: '3213', quantity: 1 }], data, { items: { 30014: 1, 30013: 1 } }, { itemIndex })
   const quantity = id => expanded.requirements.find(item => item.itemId === id)?.quantity
-  // 1 more 30014 → 2 × 30013, 1 in stock → 1 crafted → 4 × 30012
+  // 1 more purple 30014 → 2 × blue 30013; blue is never expanded further.
   assert.equal(quantity('30014'), 1)
-  assert.equal(quantity('30013'), 1)
-  assert.equal(quantity('30012'), 4)
+  assert.equal(quantity('30013'), 2)
+  assert.equal(quantity('30012'), undefined)
   assert.equal(quantity('3213'), 1)
-  assert.equal(expanded.workshopLmd, 700)
+  assert.equal(expanded.workshopLmd, 400)
+  // Without rarity data nothing is expanded instead of guessing tiers.
+  assert.deepEqual(expandSynthesis([{ itemId: '30014', quantity: 2 }], data, { items: {} }).syntheses, [])
 })
 
 test('weekly schedule uses the 04:00 server-day boundary and MAA stage zones', async t => {
@@ -238,4 +242,38 @@ test('real game tables: chip stages keep their own zones and open days', async t
   assert.equal(prB.kind, 'chip')
   assert.ok(prB.stages.includes('PR-B-2'))
   assert.ok(schedule.zones.find(zone => zone.name === '货物运送').stages.includes('CE-6'))
+})
+
+test('unchanged game files answer 304 and their verified data is reused', async t => {
+  const env = await temporaryEnv(t)
+  const values = v2Fixtures()
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, conditional: init.headers['if-none-match'] ?? null })
+    if (init.headers['if-none-match'] === `"${url}"`) return { ok: false, status: 304, headers: { get: () => null }, text: async () => '' }
+    const response = await v2Fetcher(values)(url)
+    return { ...response, headers: { get: key => key === 'etag' ? `"${url}"` : null } }
+  }
+  const first = await loadPlanningData({ env, now: 1_700_000_000_000, fetchImpl, urls: V2_URLS })
+  assert.ok(seen.every(entry => entry.conditional === null))
+  seen.length = 0
+  const second = await loadPlanningData({ env, now: 1_700_100_000_000, force: true, fetchImpl, urls: V2_URLS })
+  assert.equal(seen.length, 7)
+  assert.ok(seen.every(entry => entry.conditional === `"${entry.url}"`))
+  assert.deepEqual(second.operators, first.operators)
+  assert.deepEqual(second.weekly, first.weekly)
+  assert.deepEqual(second.formulas, first.formulas)
+  assert.equal(second.updatedAt, new Date(1_700_100_000_000).toISOString())
+})
+
+test('module goals respect the unlock elite and level from the game data', async t => {
+  const env = await temporaryEnv(t)
+  const values = v2Fixtures()
+  values.modules.equipDict.uniequip_002.unlockEvolvePhase = 'PHASE_2'
+  values.modules.equipDict.uniequip_002.unlockLevel = 3
+  const data = await loadPlanningData({ env, now: 1_700_000_000_000, fetchImpl: v2Fetcher(values), urls: V2_URLS })
+  assert.throws(() => operatorUpgradeRequirements(data, { operator: '结城理', current: { id: 'char_0', elite: 2, level: 1 }, modules: [{ type: 'X', current: 0, target: 1 }] }), /精2 3 级才能解锁/u)
+  assert.ok(operatorUpgradeRequirements(data, { operator: '结城理', current: { id: 'char_0', elite: 2, level: 1 }, targetElite: 2, targetLevel: 3, modules: [{ type: 'X', current: 0, target: 1 }] }).requirements.length > 0)
+  // An already unlocked module can be upgraded regardless of the gate.
+  assert.ok(operatorUpgradeRequirements(data, { operator: '结城理', current: { id: 'char_0', elite: 2, level: 1 }, modules: [{ type: 'X', current: 1, target: 2 }] }).requirements.length > 0)
 })

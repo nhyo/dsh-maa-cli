@@ -25,7 +25,7 @@ test('operator training scans unknown state and does not schedule farming first'
 
 test('operator training derives promotion costs and one verified farming iteration from updated data', async () => {
   const planningData = {
-    version: 3, server: 'CN', updatedAt: '2026-10-30T00:00:00.000Z', stale: false, warning: '',
+    version: 4, server: 'CN', updatedAt: '2026-10-30T00:00:00.000Z', stale: false, warning: '',
     operators: [{ id: 'char_4217_makoto', name: '结城理', rarity: 6, phases: [
       { maxLevel: 2, evolveCost: [] }, { maxLevel: 2, evolveCost: [{ id: '30012', count: 2 }] }, { maxLevel: 3, evolveCost: [] },
     ] }],
@@ -81,4 +81,26 @@ test('unknown items are rejected instead of guessed', async () => {
     planGoal({ kind: 'materials', requirements: [{ name: '不存在材料', quantity: 1 }] }, { depot: { items: {} }, itemIndex, stages }),
     /找不到材料/u,
   )
+})
+
+test('ArkPlanner suggestions produce a plan instead of crashing the fact list', async () => {
+  const planningData = {
+    version: 4, server: 'CN', updatedAt: '2026-10-30T00:00:00.000Z', stale: false, warning: '',
+    operators: [{ id: 'c1', name: '清流', rarity: 4, phases: [{ maxLevel: 2, evolveCost: [] }, { maxLevel: 2, evolveCost: [{ id: '30012', count: 5 }] }, { maxLevel: 2, evolveCost: [] }] }],
+    leveling: { characterExpMap: [[0], [0], [0]], characterUpgradeCostMap: [[0], [0], [0]], evolveGoldCost: [[], [], [], [0, 0], [], []] },
+    matrix: [], sources: { gamedata: {}, penguin: {} },
+  }
+  let asked = null
+  const plan = await planGoal({ kind: 'operator_training', operator: '清流', targetElite: 1, targetLevel: 1 }, {
+    operatorBox: { operators: [{ id: 'c1', name: '清流', elite: 0, level: 1, potential: 1 }] },
+    depot: { items: { 30012: 0 } }, itemIndex: { byId: new Map([['30012', { id: '30012', name: '固源岩' }]]), byName: new Map() }, planningData,
+    stages: [{ stageId: 'main_01-07', code: '1-7', apCost: 6, dropInfos: [{ itemId: '30012', dropType: 'NORMAL_DROP' }] }],
+    jointPlanner: async requirements => { asked = requirements; return { source: 'arkplanner', cost: 60, stages: [{ stage: '1-7', count: 10, items: { 30012: 5.2 } }], syntheses: [] } },
+  })
+  assert.deepEqual(asked, [{ itemId: '30012', quantity: 5 }])
+  assert.equal(plan.status, 'ready')
+  assert.deepEqual(plan.steps.map(step => step.maa?.type ?? step.kind), ['Fight', 'Depot', 'decision'])
+  assert.equal(plan.steps[0].maa.params.times, 10)
+  assert.equal(plan.steps[0].maa.params.series, 0)
+  assert.match(plan.facts.join('\n'), /ArkPlanner 建议 1-7 共 10 次，预计获得约 5\.2 个/u)
 })

@@ -130,15 +130,18 @@ export function trainingRequirements(input, context) {
     facts.push(`${target.operator} 培养目标：${calculated.breakdown.join('、') || '无变化'}；需 ${calculated.totalExp} 经验、${calculated.totalLmd} 龙门币（不含加工站）。`)
     lists.push(calculated.requirements)
   }
-  let requirements = mergeRequirements(lists)
+  const base = mergeRequirements(lists)
+  let requirements = base
   let syntheses = []
+  let synthesisFact = ''
   if (input.expandSynthesis === true) {
-    const expanded = expandSynthesis(requirements, context.planningData, context.depot)
+    const expanded = expandSynthesis(base, context.planningData, context.depot, { itemIndex: context.itemIndex })
     requirements = expanded.requirements
     syntheses = expanded.syntheses
-    if (syntheses.length) facts.push(`按加工站配方展开 ${syntheses.length} 种高阶材料（加工站另需 ${expanded.workshopLmd} 龙门币）；展开前已扣除库存。`)
+    if (syntheses.length) synthesisFact = `按加工站配方把紫色及以上材料展开到蓝色材料：${syntheses.length} 种（加工站另需 ${expanded.workshopLmd} 龙门币）；展开前已扣除库存。`
   }
-  return { requirements, syntheses, facts, targets }
+  // baseRequirements go to ArkPlanner, which already plans crafting itself.
+  return { requirements, baseRequirements: base, syntheses, synthesisFact, facts, targets }
 }
 
 async function trainingPlan(input, context, constraints) {
@@ -166,15 +169,16 @@ async function trainingPlan(input, context, constraints) {
     if (calculated.needsUser) return needsInput(constraints, facts, calculated.needsUser)
     let requirements = null
     if (typeof context.jointPlanner === 'function' && context.depot) {
-      const joint = await context.jointPlanner(calculated.requirements)
+      const joint = await context.jointPlanner(calculated.baseRequirements)
       if (joint?.source === 'arkplanner' && joint.stages.length > 0) {
-        requirements = applyJointPlan(calculated.requirements, joint, context.depot)
-        facts.push(`企鹅物流 ArkPlanner 联合规划：${joint.stages.slice(0, 6).map(stage => `${stage.stage}×${stage.count}`).join('、')}，预计共 ${joint.cost} 理智（统计期望）。`)
+        requirements = applyJointPlan(calculated.baseRequirements, joint, context.depot)
+        facts.push(`企鹅物流 ArkPlanner 联合规划（已包含加工站合成）：${joint.stages.slice(0, 6).map(stage => `${stage.stage}×${stage.count}`).join('、')}，预计共 ${joint.cost} 理智（统计期望）。`)
       } else if (joint) {
         facts.push(`ArkPlanner 暂不可用（${joint.error || '未返回关卡'}），已按单材料最低期望理智选关，未联合优化。`)
       }
     }
     if (!requirements) {
+      if (calculated.synthesisFact) facts.push(calculated.synthesisFact)
       requirements = applyDropRates(calculated.requirements, context.planningData, context.depot, context.stages)
     }
     requirements.sort((a, b) => Number(Boolean(b.stage)) - Number(Boolean(a.stage)))
@@ -212,7 +216,7 @@ function materialPlan(input, context, constraints, initialSteps = [], initialFac
   let medicineRemaining = constraints.maxMedicine
   let expiringMedicineRemaining = constraints.maxExpiringMedicine
   let scheduledDynamicFight = false
-  facts.push(...resolved.map(item => `${item.name || item.itemId}：需要 ${item.required}，库存 ${item.owned}，缺口 ${item.gap}。${item.drop ? ` 建议 ${item.stage}，统计 ${item.drop.samples} 次、均值 ${item.drop.rate.toFixed(4)}/局。` : ''}`))
+  facts.push(...resolved.map(item => `${item.name || item.itemId}：需要 ${item.required}，库存 ${item.owned}，缺口 ${item.gap}。${dropFact(item)}`))
   for (const gap of gaps) {
     if (gap.stage && gap.runs) {
       const stage = context.stages?.find(item => item.code === gap.stage)
@@ -230,7 +234,7 @@ function materialPlan(input, context, constraints, initialSteps = [], initialFac
         continue
       }
       steps.push(maa(`farm-${gap.itemId}`, `刷取 ${gap.name || gap.itemId}`, {
-        type: 'Fight', params: { stage: gap.stage, times: gap.runs, medicine: medicineRemaining, expiring_medicine: expiringMedicineRemaining, stone: 0, series: gap.runs <= 10 ? gap.runs : 0 },
+        type: 'Fight', params: { stage: gap.stage, times: gap.runs, medicine: medicineRemaining, expiring_medicine: expiringMedicineRemaining, stone: 0, series: 0 },
       }))
       plannedSanity += sanityCost
       medicineRemaining = 0
@@ -256,6 +260,16 @@ function materialPlan(input, context, constraints, initialSteps = [], initialFac
     steps.push(decision('replan-after-farm', '掉率是统计期望，不保证单次结果。仓库重扫完成后请重新规划剩余缺口；确认新计划前不会继续消耗理智。'))
   }
   return { status: 'ready', constraints, completion: '重新扫描 Depot 后，所有已提供材料需求的库存均达到要求。', facts, gaps, steps, needsUser: '' }
+}
+
+// ArkPlanner suggestions carry an expected yield for the whole plan; Penguin
+// matrix suggestions carry a per-run rate and sample size.
+function dropFact(item) {
+  const drop = item.drop
+  if (!drop || !item.stage) return ''
+  if (drop.source === 'arkplanner') return ` ArkPlanner 建议 ${item.stage} 共 ${drop.plannedRuns} 次，预计获得约 ${Number(drop.expected).toFixed(1)} 个（本批次最多 ${item.runs} 次）。`
+  if (Number.isFinite(drop.rate)) return ` 建议 ${item.stage}，统计 ${drop.samples} 次、均值 ${drop.rate.toFixed(4)}/局。`
+  return ` 建议 ${item.stage}。`
 }
 
 function customPlan(input, constraints) {

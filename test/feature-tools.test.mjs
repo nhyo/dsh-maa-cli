@@ -53,7 +53,7 @@ await writeFile(path.join(resourceDir, 'stages.json'), JSON.stringify([
 const today = serverWeekday(Date.now(), 'CN')
 const otherDays = [1, 2, 3, 4, 5, 6, 7].filter(day => day !== today)
 const planningData = {
-  version: 3, server: 'CN', updatedAt: new Date().toISOString(), stale: false, warning: '',
+  version: 4, server: 'CN', updatedAt: new Date().toISOString(), stale: false, warning: '',
   operators: [{
     id: 'char_2', name: '清流', rarity: 4,
     phases: [{ maxLevel: 50, evolveCost: [] }, { maxLevel: 70, evolveCost: [{ id: '30012', count: 5 }] }, { maxLevel: 80, evolveCost: [{ id: '30062', count: 3 }] }],
@@ -257,4 +257,33 @@ test('memories written by the previous version with a generated schedule are ign
   assert.equal(restored.values.mode, 0)
   assert.equal(restored.values.filename, '')
   assert.equal(restored.values.threshold, 0.5)
+})
+
+test('a plan prepared from natural language shows exactly what was planned, not remembered panel values', async () => {
+  const { taskPanelFromDocument } = await import('../src/commands/task-panel.js')
+  const { rememberPanelValues, applyRememberedConfig } = await import('../src/commands/panel-memory.js')
+  const { buildTaskDocument } = await import('../src/commands/planner.js')
+  await rememberPanelValues(taskPanelFromDocument(buildTaskDocument([{ type: 'Fight', stage: 'CE-6', times: 5, medicine: 3 }])))
+  await clearPendingPlansForTest()
+  const context = exec('nl-plan')
+  const prepared = await tool('maa_prepare_plan').execute({ purpose: '刷 1-7', steps: [{ type: 'Fight', stage: '1-7', times: 20 }] }, context)
+  const maa = commands.find(command => command.name === 'maa')
+  const panel = JSON.parse((await maa.handler({ agent: context.agent, rawInput: `peek ${prepared.confirmationCode}`, signal: AbortSignal.timeout(10_000) })).text).panel
+  assert.deepEqual([panel.values.stage, panel.values.times, panel.values.medicine], ['1-7', 20, 0])
+  // The zero-model /maa fight panel still prefills from memory.
+  const local = await applyRememberedConfig(taskPanelFromDocument(buildTaskDocument([{ type: 'Fight', times: 1 }])))
+  assert.deepEqual([local.values.stage, local.values.times], ['CE-6', 5])
+})
+
+test('a remembered recognize-only recruit setting from the old defaults no longer disables recruiting', async () => {
+  const { taskPanelFromDocument } = await import('../src/commands/task-panel.js')
+  const { rememberPanelValues, applyRememberedConfig } = await import('../src/commands/panel-memory.js')
+  const { buildTaskDocument } = await import('../src/commands/planner.js')
+  await rememberPanelValues(taskPanelFromDocument({ tasks: [{ type: 'Recruit', params: { refresh: true, select: [4, 5, 6], confirm: [], times: 0, set_time: true, expedite: false } }] }))
+  const panel = await applyRememberedConfig(taskPanelFromDocument(buildTaskDocument([{ type: 'Recruit' }])))
+  assert.deepEqual([panel.values.times, panel.values.confirm, panel.values.refresh], [4, [3, 4], true])
+  // A deliberate choice (e.g. times 2, only 4★) is still remembered.
+  await rememberPanelValues(taskPanelFromDocument({ tasks: [{ type: 'Recruit', params: { refresh: false, select: [4, 5, 6], confirm: [4], times: 2 } }] }))
+  const chosen = await applyRememberedConfig(taskPanelFromDocument(buildTaskDocument([{ type: 'Recruit' }])))
+  assert.deepEqual([chosen.values.times, chosen.values.confirm], [2, [4]])
 })

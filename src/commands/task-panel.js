@@ -48,11 +48,9 @@ const PANELS = {
         default: '', maxLength: 32, placeholder: '留空＝当前/上次关卡',
         description: '支持大部分主线和资源关卡名，例如 4-10、AP-5、H10-1-Hard；关卡末尾可加 Normal/Hard 切换难度。',
       }),
-      field('times', '作战次数', 'integer', 'times', { default: 1, min: 1, max: 100 }),
-      field('series', '代理倍率', 'select', 'series', {
-        default: 1,
-        options: options([[-1, '不自动切换'], [0, '自动最大倍率'], [1, '1 倍'], [2, '2 倍'], [3, '3 倍'], [4, '4 倍'], [5, '5 倍'], [6, '6 倍'], [7, '7 倍'], [8, '8 倍'], [9, '9 倍'], [10, '10 倍']]),
-        description: '自动最大倍率会识别关卡上限，并避免使用理智药后理智溢出；指定倍率时，理智或剩余次数不足一整组会无法进入战斗；“不自动切换”保留游戏当前设置。',
+      field('times', '作战次数', 'integer', 'times', {
+        default: 1, min: 1, max: 100,
+        description: '只需填写总次数：插件让 MAA 自动选择代理倍率分组，理智不足一整组时自动减少，最后一组按剩余次数执行。',
       }),
       field('medicine', '理智药上限', 'integer', 'medicine', { default: 0, min: 0, max: 99 }),
       field('medicineExpireDays', '使用几天内过期理智药', 'integer', 'medicine_expire_days', {
@@ -400,6 +398,8 @@ export function applyTaskPanelOverrides(document, overrides, capabilities = fall
     applied.push(`${item.label}=${Array.isArray(value) ? value.join('、') : isObject(value) ? dropsText(value, context.itemIndex) || '无' : value}`)
   }
   validateCombination(panel.type, task.params)
+  // Battles are always grouped automatically; the panel has no series field.
+  if (panel.type === 'Fight') task.params.series = 0
   return { document: result, applied }
 }
 

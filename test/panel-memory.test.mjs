@@ -32,7 +32,7 @@ test('remembers every parameter kind for every parameterized command', async (t)
   const env = await tempEnv(t)
   const cases = [
     ['startup', { clientType: 'Bilibili', startGameEnabled: false, accountName: 'masked-account' }],
-    ['fight', { stage: 'AP-5', times: 7, series: 3, medicine: 2, medicineExpireDays: 4, stone: 0, drGrandet: true }],
+    ['fight', { stage: 'AP-5', times: 7, medicine: 2, medicineExpireDays: 4, stone: 0, drGrandet: true }],
     ['infrast', { facilities: ['Mfg', 'Trade'], drones: 'Money', threshold: 0.55, replenish: true, dormTrust: true }],
     ['recruit', { refresh: true, select: [3, 4, 5], confirm: [4, 5], times: 3, expedite: true, firstTags: '先锋干员;费用回复', preserveTags: '' }],
     ['mall', { visitFriends: false, shopping: true, buyFirst: '招聘许可;技巧概要·卷1', blacklist: '', onlyBuyDiscount: true }],

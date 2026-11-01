@@ -265,10 +265,10 @@ function buildStep(step, index, capabilities) {
         medicine: optionalInteger(step.medicine, 0, 99, 'Fight.medicine', 0),
         expiring_medicine: optionalInteger(step.expiringMedicine, 0, 99, 'Fight.expiringMedicine', 0),
         stone: optionalInteger(step.stone, 0, 20, 'Fight.stone', 0),
-        // One in-game multi-battle whenever possible. Current MaaCore accepts
-        // 1-10; for larger totals, AUTO (0) chooses the stage maximum and then
-        // reduces the final group so the requested total is still reached.
-        series: fightTimes <= 10 ? fightTimes : 0,
+        // The user only gives the total. MaaCore accepts -1..6 for series; 0
+        // (auto) picks the largest group sanity allows and shrinks the last
+        // group so exactly `times` battles are fought.
+        series: 0,
         drops: fightDrops,
       })
       break
@@ -408,7 +408,7 @@ function summarizeStep(step, capabilities, context = {}) {
       const times = step.times ?? (step.drops ? 100 : step.times)
       const label = stage === 'Annihilation' ? '剿灭作战' : stage ?? '当前关卡'
       const drops = step.drops && typeof step.drops === 'object' ? `，掉落目标 ${Object.entries(step.drops).map(([item, count]) => `${context.itemIndex?.byId?.get(item)?.name ?? item}×${count}`).join('、')}（任一达到即停）` : ''
-      return `作战 ${label} ×${times}${step.drops && step.times === undefined ? '（上限）' : ''}，连战${times <= 10 ? times : '自动分组'}，理智药${step.medicine ?? 0}，临期药${step.expiringMedicine ?? 0}，源石${step.stone ?? 0}${drops}`
+      return `作战 ${label} ×${times}${step.drops && step.times === undefined ? '（上限）' : ''}，代理倍率自动分组，理智药${step.medicine ?? 0}，临期药${step.expiringMedicine ?? 0}，源石${step.stone ?? 0}${drops}`
     }
     case 'Infrast': return step.mode === 10000 ? `基建自定义排班（方案 ${step.planIndex ?? 0}）` : `基建换班${step.drones && step.drones !== '_NotUse' ? `，无人机=${step.drones}` : ''}`
     case 'Recruit': return recruitSummary(step.times ?? 4, Array.isArray(step.confirm) ? step.confirm : [3, 4], step.expedite === true)

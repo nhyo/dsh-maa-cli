@@ -94,7 +94,7 @@ export async function loadItemIndex(resourceDir) {
   const byName = new Map()
   for (const [id, item] of Object.entries(parsed)) {
     if (!item || typeof item.name !== 'string' || item.name.trim() === '') continue
-    const value = { id, name: item.name.trim(), classifyType: String(item.classifyType ?? '') }
+    const value = { id, name: item.name.trim(), classifyType: String(item.classifyType ?? ''), rarity: Number.isInteger(item.rarity) ? item.rarity : null }
     byId.set(id, value)
     byName.set(value.name.toLocaleLowerCase('zh-CN'), value)
   }

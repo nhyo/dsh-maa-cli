@@ -160,9 +160,14 @@ function validStoredValues(panel, stored, theme, explicitKeys = new Set()) {
   const result = {}
   // Memories written by an older version may still hold a generated file.
   const stale = Object.values(stored).some(value => typeof value === 'string' && GENERATED_FILE.test(value))
+  // Older versions defaulted Recruit to times 0 + confirm [] ("recognize
+  // only"); a remembered copy of that pair would silently keep recruitment
+  // off, so it is ignored and the current defaults apply.
+  const legacyRecruit = panel.type === 'Recruit' && stored.times === 0 && Array.isArray(stored.confirm) && stored.confirm.length === 0
   for (const field of panel.fields ?? []) {
     if (field.key === 'note' || field.key === 'theme' || explicitKeys.has(field.key) || ONE_OFF_KEYS.has(field.key)) continue
     if (stale && panel.type === 'Infrast' && ['mode', 'filename', 'planIndex'].includes(field.key)) continue
+    if (legacyRecruit && ['times', 'confirm'].includes(field.key)) continue
     const candidate = stored[field.key]
     if (typeof candidate === 'string' && GENERATED_FILE.test(candidate)) continue
     if (!candidateApplies(field, theme, candidate)) continue

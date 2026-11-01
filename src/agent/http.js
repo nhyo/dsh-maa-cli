@@ -12,6 +12,9 @@ export async function fetchJson(url, options = {}) {
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 30_000)
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
   const init = { signal, headers: { accept: 'application/json', 'user-agent': 'dsh-maa-cli' } }
+  // Conditional request: an unchanged file answers 304 and nothing is downloaded.
+  if (options.etag) init.headers['if-none-match'] = options.etag
+  else if (options.lastModified) init.headers['if-modified-since'] = options.lastModified
   if (options.method && options.method !== 'GET') {
     init.method = options.method
     if (options.body !== undefined) {
@@ -20,6 +23,9 @@ export async function fetchJson(url, options = {}) {
     }
   }
   const response = await fetchImpl(url, init)
+  if (response.status === 304 && (options.etag || options.lastModified)) {
+    return { url, data: null, notModified: true, etag: options.etag ?? '', lastModified: options.lastModified ?? '', hash: options.hash ?? '' }
+  }
   if (!response.ok) throw new Error(`${url} 返回 HTTP ${response.status}`)
   const limit = options.maxBytes ?? MAX_RESPONSE_BYTES
   const declared = Number(response.headers?.get?.('content-length'))

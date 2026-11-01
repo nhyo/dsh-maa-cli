@@ -296,7 +296,7 @@ test('builds an ordered natural-language plan with resource-safe defaults', () =
     { type: 'CloseDown' },
   ])
   assert.deepEqual(document.tasks.map(task => task.type), ['StartUp', 'Fight', 'Infrast', 'Mall', 'Award', 'CloseDown'])
-  assert.deepEqual(document.tasks[1].params, { stage: '1-7', times: 3, medicine: 0, expiring_medicine: 0, stone: 0, series: 3 })
+  assert.deepEqual(document.tasks[1].params, { stage: '1-7', times: 3, medicine: 0, expiring_medicine: 0, stone: 0, series: 0 })
   assert.equal(document.tasks[3].params.shopping, false)
   assert.equal(document.tasks[3].params.force_shopping_if_credit_full, false)
   assert.equal(document.tasks[4].params.mail, false)
@@ -322,18 +322,20 @@ test('accepts clientType on Fight and promotes it to the whole plan', () => {
   assert.equal(document.tasks[0].params.client_type, 'Official')
   assert.equal('client_type' in document.tasks[1].params, false)
   assert.equal(document.tasks[1].params.times, 2)
-  assert.equal(document.tasks[1].params.series, 2)
+  assert.equal(document.tasks[1].params.series, 0)
   assert.throws(() => buildTaskDocument([
     { type: 'StartUp', clientType: 'Official' },
     { type: 'Fight', stage: '1-7', times: 1, clientType: 'Bilibili' },
   ]), /must match/)
 })
 
-test('uses one in-game consecutive battle instead of repeating single battles', () => {
-  assert.deepEqual(buildTaskDocument([{ type: 'Fight', stage: '1-7', times: 10 }]).tasks[0].params, {
-    stage: '1-7', times: 10, medicine: 0, expiring_medicine: 0, stone: 0, series: 10,
-  })
-  assert.equal(buildTaskDocument([{ type: 'Fight', stage: '1-7', times: 11 }]).tasks[0].params.series, 0)
+test('always lets MaaCore group battles automatically from the total times', () => {
+  // MaaCore accepts series -1..6; 0 = automatic grouping. The user only gives the total.
+  for (const times of [1, 6, 7, 10, 100]) {
+    assert.deepEqual(buildTaskDocument([{ type: 'Fight', stage: '1-7', times }]).tasks[0].params, {
+      stage: '1-7', times, medicine: 0, expiring_medicine: 0, stone: 0, series: 0,
+    })
+  }
   assert.throws(() => buildTaskDocument([{ type: 'Fight', stage: '1-7', times: 10, series: 1 }]), /not supported/)
 })
 

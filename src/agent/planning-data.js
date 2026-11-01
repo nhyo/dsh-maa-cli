@@ -6,7 +6,8 @@ import { fetchJson } from './http.js'
 // v2 added skill/mastery/module costs, workshop formulas and weekly stage
 // schedules; v3 takes stage zones from the game's own stage_table (Penguin
 // files every chip stage under one zone). Older caches are downloaded again.
-const VERSION = 3
+// v4 records module unlock requirements.
+const VERSION = 4
 const UPDATE_INTERVAL_MS = 24 * 60 * 60_000
 const SERVER_DIRECTORY = { CN: 'cn', US: 'en', JP: 'jp', KR: 'kr' }
 // Daily reset happens at 04:00 server time.
@@ -57,23 +58,38 @@ export async function refreshPlanningData(options = {}) {
     stageZones: `${excel}/stage_table.json`,
     ...(options.urls ?? {}),
   }
+  const sameServer = previous?.server === server ? previous : null
+  // Files that did not change since the last verified download answer 304 and
+  // their already-compacted data is reused (stage_table alone is ~26 MB).
+  const known = previousSources(sameServer)
+  const reuse = {
+    characters: sameServer?.operators, constants: sameServer?.leveling, matrix: sameServer?.matrix,
+    zones: sameServer?.weekly?.zones ? { zones: sameServer.weekly.zones } : null,
+    modules: sameServer?.modules, building: sameServer?.formulas, stageZones: sameServer?.weekly?.stageZones,
+  }
+  const load = async (key, compact, extra = {}) => {
+    const previousValue = reuse[key]
+    const meta = previousValue ? known.get(urls[key]) : null
+    const result = await fetchJson(urls[key], { ...options, ...extra, ...(meta ? { etag: meta.etag || undefined, lastModified: meta.etag ? undefined : meta.lastModified || undefined, hash: meta.hash } : {}) })
+    return { result, value: result.notModified ? previousValue : compact(result.data) }
+  }
   try {
     // Core sources are required; without them no requirement can be trusted.
-    const [charactersResult, constantsResult, matrixResult] = await Promise.all([
-      fetchJson(urls.characters, options), fetchJson(urls.constants, options), fetchJson(urls.matrix, options),
+    const [characters, constants, matrixEntry] = await Promise.all([
+      load('characters', compactOperators), load('constants', compactLeveling), load('matrix', compactMatrix),
     ])
-    const operators = compactOperators(charactersResult.data)
-    const leveling = compactLeveling(constantsResult.data)
-    const matrix = compactMatrix(matrixResult.data)
+    const [charactersResult, constantsResult, matrixResult] = [characters.result, constants.result, matrixEntry.result]
+    const operators = characters.value
+    const leveling = constants.value
+    const matrix = matrixEntry.value
     // Optional sources add features. A failure disables only that feature and
     // keeps the previous verified copy of it when one exists.
     const optional = await Promise.all([
-      optionalSource(urls.zones, options, compactWeeklyZones),
-      optionalSource(urls.modules, options, compactModules),
-      optionalSource(urls.building, options, compactFormulas),
-      optionalSource(urls.stageZones, { ...options, maxBytes: STAGE_TABLE_MAX_BYTES }, compactStageZones),
+      optionalSource(() => load('zones', compactWeeklyZones)),
+      optionalSource(() => load('modules', compactModules)),
+      optionalSource(() => load('building', compactFormulas)),
+      optionalSource(() => load('stageZones', compactStageZones, { maxBytes: STAGE_TABLE_MAX_BYTES })),
     ])
-    const sameServer = previous?.server === server ? previous : null
     const keys = ['weekly', 'modules', 'formulas', 'stageZones']
     const previousValue = key => key === 'stageZones' ? sameServer?.weekly?.stageZones ?? null : sameServer?.[key] ?? null
     const [weeklyZones, modules, formulas, stageZones] = optional.map((entry, index) => entry.value ?? previousValue(keys[index]))
@@ -132,6 +148,7 @@ export function operatorUpgradeRequirements(data, input) {
   if (wantsPromotion) breakdown.push(`精${currentElite} ${currentLevel}级 → 精${targetElite} ${targetLevel}级`)
 
   const finalElite = Math.max(currentElite, targetElite)
+  const goalLevel = targetElite === currentElite ? Math.max(currentLevel, targetLevel) : targetLevel
   if (input.skillLevel?.target !== undefined) {
     const target = integer(input.skillLevel.target, 1, 7, 'skillLevel.target')
     if (input.skillLevel.current === undefined) throw needsInput(`${operator.name} 当前技能等级未知（Box 扫描不含技能等级），请告诉我当前是几级。`)
@@ -160,7 +177,11 @@ export function operatorUpgradeRequirements(data, input) {
     const module = findModule(cache, operator, goal)
     if (goal.current === undefined) throw needsInput(`${operator.name} ${module.type || module.name} 模组当前等级未知（Box 扫描不含模组），请告诉我当前等级（未解锁为 0）。`)
     const from = integer(goal.current, 0, 3, `modules[${index}].current`)
-    if (finalElite < 2) throw new Error(`${operator.name} 需要精英二才能解锁模组，请同时把 targetElite 设为 2。`)
+    const unlockElite = Number.isInteger(module.unlockElite) ? module.unlockElite : 2
+    const unlockLevel = Number.isInteger(module.unlockLevel) ? module.unlockLevel : 0
+    if (from === 0 && (finalElite < unlockElite || (finalElite === unlockElite && goalLevel < unlockLevel))) {
+      throw new Error(`${operator.name} 的 ${module.type || module.name} 模组需要精${unlockElite}${unlockLevel ? ` ${unlockLevel} 级` : ''}才能解锁，当前目标是精${finalElite} ${goalLevel} 级；请把 targetElite / targetLevel 设为至少精${unlockElite}${unlockLevel ? ` ${unlockLevel} 级` : ''}。`)
+    }
     for (let step = from; step < target; step += 1) for (const cost of module.costs[step] ?? []) add(material, cost.id, cost.count)
     if (target > from) breakdown.push(`${module.type || module.name} 模组 ${from} → ${target} 级`)
   }
@@ -188,9 +209,12 @@ export function mergeRequirements(lists) {
 }
 
 // Expand higher-tier materials into their workshop ingredients after deducting
-// stock. Only material processing formulas (F_EVOLVE) are used; LMD for the
-// workshop is added to the result.
-export function expandSynthesis(requirements, data, depot) {
+// stock. Only material processing formulas (F_EVOLVE) are used, and only
+// purple and gold materials (MAA item_index rarity >= 3) are expanded, so the
+// plan stops at blue materials instead of asking for piles of 源岩. LMD for
+// the workshop is added to the result.
+const MIN_EXPAND_RARITY = 3
+export function expandSynthesis(requirements, data, depot, options = {}) {
   const cache = validateCache(data)
   if (!Array.isArray(cache.formulas)) throw new Error('培养数据中没有加工站配方，无法展开合成。')
   const formulas = new Map(cache.formulas.map(formula => [formula.itemId, formula]))
@@ -211,7 +235,7 @@ export function expandSynthesis(requirements, data, depot) {
   let lmd = 0
   // Highest tier first so each ingredient is expanded after all its consumers.
   for (let guard = 0; guard < 200; guard += 1) {
-    const pending = [...need.entries()].filter(([id, count]) => count > (stock.get(id) ?? 0) && formulas.has(id))
+    const pending = [...need.entries()].filter(([id, count]) => count > (stock.get(id) ?? 0) && formulas.has(id) && expandable(id, options.itemIndex))
       .sort((a, b) => depth(b[0]) - depth(a[0]))
     if (pending.length === 0) break
     const [id, count] = pending[0]
@@ -348,14 +372,22 @@ export function applyDropRates(requirements, data, depot, stages, options = {}) 
   })
 }
 
-async function optionalSource(url, options, compact) {
-  if (!url) return { value: null, result: null, error: '未配置数据源' }
+async function optionalSource(loader) {
   try {
-    const result = await fetchJson(url, options)
-    return { value: compact(result.data), result, error: '' }
+    const { result, value } = await loader()
+    return { value, result, error: '' }
   } catch (error) {
     return { value: null, result: null, error: message(error) }
   }
+}
+
+function previousSources(cache) {
+  const known = new Map()
+  for (const source of [cache?.sources?.gamedata, cache?.sources?.penguin]) {
+    if (!source || !Array.isArray(source.urls)) continue
+    source.urls.forEach((url, index) => known.set(url, { etag: source.etags?.[index] ?? '', lastModified: source.lastModified?.[index] ?? '', hash: source.sha256?.[index] ?? '' }))
+  }
+  return known
 }
 
 function compactOperators(raw) {
@@ -438,6 +470,9 @@ function compactModules(raw) {
     modules.push({
       id, operatorId: String(entry.charId), name: String(entry.uniEquipName ?? id),
       type: String(entry.typeName2 ?? entry.typeName1 ?? '').trim(), costs: stages,
+      // e.g. unlockEvolvePhase "PHASE_2" + unlockLevel 60 for 6★ modules.
+      unlockElite: Number(String(entry.unlockEvolvePhase ?? '').match(/\d+/u)?.[0] ?? 2),
+      unlockLevel: Number.isInteger(entry.unlockLevel) ? entry.unlockLevel : 0,
     })
   }
   return modules
@@ -455,6 +490,12 @@ function compactFormulas(raw) {
   }
   if (formulas.length === 0) throw new Error('building_data.json 中没有材料加工配方。')
   return formulas
+}
+
+function expandable(id, itemIndex) {
+  const rarity = itemIndex?.byId?.get(String(id))?.rarity
+  // Without rarity data expand nothing rather than guess the tier.
+  return Number.isInteger(rarity) && rarity >= MIN_EXPAND_RARITY
 }
 
 function costs(list) {

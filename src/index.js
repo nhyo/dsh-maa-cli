@@ -1041,9 +1041,11 @@ async function estimateTraining(args, signal) {
     lines.push('没有仓库缓存，以下为总需求（未扣除库存）：', ...calculated.requirements.map(item => `- ${nameOf(item.itemId)} ×${item.quantity}`))
     return agentResult({ status: 'partial', summary: lines.join('\n'), data: calculated })
   }
-  const joint = await context.jointPlanner(calculated.requirements).catch(() => null)
-  const rows = joint?.source === 'arkplanner' && joint.stages.length
-    ? applyJointPlan(calculated.requirements, joint, context.depot)
+  const joint = await context.jointPlanner(calculated.baseRequirements).catch(() => null)
+  const jointUsable = joint?.source === 'arkplanner' && joint.stages.length > 0
+  if (!jointUsable && calculated.synthesisFact) lines.push(calculated.synthesisFact)
+  const rows = jointUsable
+    ? applyJointPlan(calculated.baseRequirements, joint, context.depot)
     : applyDropRates(calculated.requirements, context.planningData, context.depot, context.stages)
   const short = rows.filter(row => row.gap > 0)
   lines.push(short.length === 0 ? '按当前仓库缓存，材料已经足够。' : `仍缺 ${short.length} 种材料：`)
@@ -1415,7 +1417,12 @@ export function apply(ctx) {
                 type: 'Workflow', title: '目标工作流', fields: [], values: {},
                 notes: workflow.steps.map((step, index) => ({ text: `${index + 1}. ${step.title}${step.kind === 'decision' ? '（到此暂停并请求人工决策）' : ''}` })),
               }
-            : await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities, panelContext(environment)), { explicitKeys: pending.panelExplicitKeys })
+            : (pending.panelMemory === false
+              // A plan prepared from the user's words is the authority: the
+              // panel shows exactly what the model planned. Remembered values
+              // only prefill the zero-model /maa panels.
+              ? taskPanelFromDocument(pending.document, environment.capabilities, panelContext(environment))
+              : await applyRememberedConfig(taskPanelFromDocument(pending.document, environment.capabilities, panelContext(environment)), { explicitKeys: pending.panelExplicitKeys }))
               ?? readOnlyPlanPanel(pending.document)
           return {
             kind: 'success',
@@ -1762,7 +1769,7 @@ export function apply(ctx) {
 
   ctx.tools.register({
     name: 'maa_prepare_plan',
-    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100) unless drops is given; use drops for "刷到 N 个 X" requests and stage "Annihilation" for 剿灭 (the plugin cannot know whether this week's annihilation is already maxed, never claim it). For "today's resource/chip stage" call maa_stage_schedule first to learn which weekly stages are open. Recruit.times is how many recruitments to START (1-4, default 4); 0 only recognizes tags. Recruit.confirm lists the star levels MAA actually starts (default [3,4] like the MAA GUI; an empty list means recognize only). Never add 5 or 6 to confirm unless the user explicitly asks: 5★/6★ slots are skipped for the player and reported after the run. Custom base schedules use maa_prepare_infrast and copilot-site jobs use maa_copilot, not this tool; do not provide a series field because the plugin automatically uses one in-game consecutive battle for totals up to 10 and automatic grouping above 10. Roguelike requires startsCount (1-99999; the confirmation panel starts at 9999). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings — theme, mode, difficulty, squad, role group, starting operator and MAA's advanced switches — pre-filled from MAA's recommended opening (marked 【推荐】 and freely editable), so the user may adjust there without re-preparing the plan; a 备注 field next to the validity hint is handed back to DSH as free-form guidance that DSH may act on but is not guaranteed to. Clicking confirm executes through the non-model command plane and does not create another model call.`,
+    description: `Prepare, validate, and preview an ordered MaaCore plan from the user's natural-language Arknights request, but DO NOT operate the game. Always use this tool first for a game action. Decompose the request into 1-20 steps. Supported steps: StartUp, Fight, Infrast, Recruit, Mall, Award, Roguelike, ReclamationAlgorithm, Depot, OperBox, Custom existing MaaCore task names, CloseDown. Fight requires finite times (1-100) unless drops is given; use drops for "刷到 N 个 X" requests and stage "Annihilation" for 剿灭 (the plugin cannot know whether this week's annihilation is already maxed, never claim it). For "today's resource/chip stage" call maa_stage_schedule first to learn which weekly stages are open. Recruit.times is how many recruitments to START (1-4, default 4); 0 only recognizes tags. Recruit.confirm lists the star levels MAA actually starts (default [3,4] like the MAA GUI; an empty list means recognize only). Never add 5 or 6 to confirm unless the user explicitly asks: 5★/6★ slots are skipped for the player and reported after the run. Custom base schedules use maa_prepare_infrast and copilot-site jobs use maa_copilot, not this tool; only give the total times: there is no series field, the plugin always lets MaaCore group battles automatically (series 0). Roguelike requires startsCount (1-99999; the confirmation panel starts at 9999). Never infer permission to spend resources: medicine, expiringMedicine, stone, Recruit expedite, Mall shopping, reward mail/freePull/event options, drones, or reclamation crafting remain disabled/default unless explicitly requested. If ambiguous, ask before preparing. This tool ends the current turn and returns a one-time local confirmation button; when the plan contains a Roguelike step the confirmation UI also shows MAA-style roguelike settings — theme, mode, difficulty, squad, role group, starting operator and MAA's advanced switches — pre-filled from MAA's recommended opening (marked 【推荐】 and freely editable), so the user may adjust there without re-preparing the plan; a 备注 field next to the validity hint is handed back to DSH as free-form guidance that DSH may act on but is not guaranteed to. Clicking confirm executes through the non-model command plane and does not create another model call.`,
     parameters: {
       type: 'object', additionalProperties: false, required: ['purpose', 'steps'],
       properties: {
@@ -1785,7 +1792,7 @@ export function apply(ctx) {
       const warnings = await weeklyStageWarnings(steps, environment.resourceDir).catch(() => [])
       const planSummary = `${summarizePlan(steps, environment.capabilities, panelContext(environment))}${warnings.length ? `｜⚠ ${warnings.join('；')}` : ''}${memorySummary(memory)}`
       const planJson = `${JSON.stringify(document, null, 2)}\n`
-      const confirmation = await preparePendingPlan(exec.agent, { purpose: args.purpose, document, planJson, planSummary })
+      const confirmation = await preparePendingPlan(exec.agent, { purpose: args.purpose, document, planJson, planSummary, panelMemory: false })
       exec.concludeTurn()
       return { purpose: args.purpose, planJson, planSummary, confirmationCode: confirmation.confirmationCode, confirmationPhrase: confirmation.confirmationPhrase, expiresAt: confirmation.expiresAt, memory }
     },
@@ -1872,7 +1879,7 @@ export function apply(ctx) {
       const fallback = preview.unsupported.length ? `｜安全回退：${preview.unsupported.map(item => item.request).join('、')}` : ''
       const planSummary = `${args.purpose}｜生效：${preview.supported.join('、')}${fallback}${memorySummary(memory)}`
       const planJson = `${JSON.stringify(document, null, 2)}\n`
-      const confirmation = await preparePendingPlan(exec.agent, { purpose: args.purpose, document, planJson, planSummary, strategy })
+      const confirmation = await preparePendingPlan(exec.agent, { purpose: args.purpose, document, planJson, planSummary, strategy, panelMemory: false })
       exec.concludeTurn()
       return {
         purpose: args.purpose, planJson, planSummary,
@@ -1948,7 +1955,7 @@ export function apply(ctx) {
         supported: preview.supported, unsupported: preview.unsupported, changes: preview.changes,
         memory, strategy: applied, document, overrides: {}, adjustments: [],
       }
-      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, strategy: applied, notePreview })
+      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, strategy: applied, notePreview, panelMemory: false })
       exec.concludeTurn()
       return {
         status: 'ready', note, purpose, planJson, planSummary,
@@ -2074,7 +2081,7 @@ export function apply(ctx) {
       if (saved) parts.push(`已保存为“${saved.name}”`)
       const planSummary = parts.join('｜')
       const planJson = `${JSON.stringify(document, null, 2)}\n`
-      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, generatedFiles: [{ marker, content: compiled.document }] })
+      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, generatedFiles: [{ marker, content: compiled.document }], panelMemory: false })
       exec.concludeTurn()
       return agentResult({ status: 'pending_confirmation', summary: planSummary, ...confirmation, data: { schedule: compiled.document, supported: compiled.supported, unsupported: compiled.unsupported } })
     },
@@ -2137,7 +2144,7 @@ export function apply(ctx) {
         step.useSanityPotion ? '允许使用理智药' : '',
       ].filter(Boolean).join('｜')
       const planJson = `${JSON.stringify(document, null, 2)}\n`
-      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, generatedFiles: [{ marker, content: item.content }] })
+      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, generatedFiles: [{ marker, content: item.content }], panelMemory: false })
       exec.concludeTurn()
       return agentResult({ status: 'pending_confirmation', summary: planSummary, ...confirmation, data: { id: item.id, job, ownership: item.ownership } })
     },

@@ -188,3 +188,21 @@
 - 面板记忆：不再保存插件生成文件（以及对应的 Infrast 自定义模式 / 方案序号）和掉落目标；读取旧记忆时也忽略这些值。执行前 `assertNoGeneratedMarkers` 拒绝残留占位。
 - 作业站：技能所需精英化纳入练度判断；排班：按 Box 缓存提示未拥有的干员（不阻止确认）。
 - Linux `npm test`：221 项，207 通过、3 跳过、11 失败（与改动前相同的环境性失败）。
+
+### 阶段 14 补充三：第二次自检后修复（2026-11-01）
+- 自然语言计划被面板记忆覆盖（改动前已存在）：`maa_prepare_plan` 等模型工具准备的计划不登记 `panelExplicitKeys`，`/maa peek` 把 `panel-memory.json` 叠加到计划上，确认时以记忆值执行（复现：记忆 CE-6×5，计划 1-7×20 → 面板显示并执行 CE-6×5）。现在这些计划带 `panelMemory: false`，peek 不套用记忆。
+- ArkPlanner 成功时 `materialPlan` 读取 `drop.rate.toFixed` 崩溃（本阶段引入）；新增 `dropFact` 与成功路径测试。
+- 旧版公招记忆（times 0 + confirm []）在读取时忽略。
+- 代理倍率：MaaCore 文档 series 为 -1～6；原逻辑次数 7～10 传 7～10。现在一律 `series: 0`，面板移除倍率字段，面板确认时强制 0；目标工作流同样。
+- 合成展开只展开 item_index rarity ≥ 3（紫/金）的材料；ArkPlanner 使用未展开的需求。真实数据：2×RMA70-24 → 蓝色材料，而非 60 源岩。
+- 模组：读取 `unlockEvolvePhase` / `unlockLevel`（真实数据银灰 X 模组 PHASE_2 / 60）。缓存 v4。
+- 条件下载：`fetchJson` 支持 If-None-Match / If-Modified-Since；raw.githubusercontent 已实测返回 304。
+- 验证：用真实 cn 游戏表（character / gamedata_const / uniequip / building / zone / stage）跑插件数据加载，无警告；1403 名干员、508 个模组、39 条加工配方、35 个周常关卡。
+- Linux `npm test`：226 项，213 通过、3 跳过、10 失败（均为改动前已有的环境性失败）。未实机运行。
+
+## 阶段 15：1.0.8 发布准备（2026-11-01）
+- `package.json` 版本 1.0.6 → 1.0.8（npm 上最新为 1.0.6，1.0.7 从未发布）。
+- CHANGELOG：把“未发布”整理为 `1.0.8 - 2026-11-01`。对照已发布的 1.0.6 包，原“未发布”中已随 1.0.5 / 1.0.6 发出的条目补记为 `1.0.5 / 1.0.6 - 2026-10-30`；1.0.6 包中没有的面板停止 / 最小化修复归入 1.0.8。同一版本内新功能的中间修复合并进功能描述。
+- `npm pack --dry-run`：36 个文件，211,351 B（解包 709,705 B），包含新增的 `src/agent/http.js`、`src/strategy/copilot-site.js`、`src/strategy/infrast-plan.js`，不含测试、交接文档和 `artifacts/`。实际打包到临时目录并从包内加载入口，15 个工具注册成功、客户端可解析；未生成仓库内 tgz。
+- 全量测试同阶段 14 补充三（Linux 226 项：213 通过、3 跳过、10 个既有环境性失败）。
+- 未执行 git 提交、打 tag、推送或 npm 发布，留给用户执行。

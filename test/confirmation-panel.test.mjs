@@ -430,11 +430,13 @@ test('applies MAA panel values to each core task with typed validation', () => {
   assert.equal(startup.account_name, 'doctor 123')
 
   const fight = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('fight').steps), {
-    stage: '1-7', times: '10', series: '10', medicine: '0', medicineExpireDays: '2', stone: '0', drGrandet: 'false',
+    stage: '1-7', times: '10', medicine: '0', medicineExpireDays: '2', stone: '0', drGrandet: 'false',
   }).document.tasks[0].params
   assert.equal(fight.stage, '1-7')
   assert.equal(fight.times, 10)
-  assert.equal(fight.series, 10)
+  // No series field: battles are always grouped automatically.
+  assert.equal(fight.series, 0)
+  assert.throws(() => applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('fight').steps), { series: '3' }), /不支持参数：series/u)
   assert.equal(fight.medicine_expire_days, 2)
 
   const infrast = applyTaskPanelOverrides(buildTaskDocument(parseLocalMaaCommand('infrast').steps), {
@@ -490,7 +492,8 @@ test('carries MAA remarks and mode-specific reclamation instructions into panels
   assert.match(reclamation.notes.find(note => note.when.equals === 48).text, /维什戴尔/)
 
   const fight = taskPanelFromDocument(buildTaskDocument(parseLocalMaaCommand('fight').steps))
-  assert.match(fight.fields.find(field => field.key === 'series').description, /自动最大倍率/)
+  assert.equal(fight.fields.some(field => field.key === 'series'), false)
+  assert.match(fight.fields.find(field => field.key === 'times').description, /自动选择代理倍率分组/)
   assert.match(fight.fields.find(field => field.key === 'drGrandet').description, /1 点理智/)
 
   const infrast = taskPanelFromDocument(buildTaskDocument(parseLocalMaaCommand('infrast').steps))
