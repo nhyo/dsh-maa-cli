@@ -530,6 +530,9 @@ async function performAutoUpdateRuntime(options) {
   }
 
   const checkedAt = new Date(now).toISOString()
+  // Only a due check reaches here; the caller uses this to show that the task
+  // is waiting on a MaaCore/resource download rather than hanging.
+  await options.onUpdateStart?.()
   try {
     const update = await updateRuntime({ ...options, env })
     if (update.result.exitCode !== 0) {

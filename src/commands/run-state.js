@@ -369,6 +369,7 @@ function emptyProgress(now) {
     stage: '',
     lastEvent: '',
     lastEventAt: null,
+    maintenance: '',
     updatedAt: now,
   }
 }

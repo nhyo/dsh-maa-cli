@@ -350,8 +350,9 @@ test('rejects unbounded, unsupported, or malformed game plans', () => {
 test('runs the read-only version query through the wrapper', async () => {
   const result = await runMaa(queryArguments('version'))
   assert.equal(result.exitCode, 0)
-  assert.match(result.stdout, /maa-cli v0\.7\.7/)
-  assert.match(result.stdout, /MaaCore v6\.20\.1/)
+  // The local runtime auto-updates daily, so pin the shape, not the release.
+  assert.match(result.stdout, /maa-cli v\d+\.\d+\.\d+/)
+  assert.match(result.stdout, /MaaCore v\d+\.\d+\.\d+/)
 })
 
 test('aborting runMaa terminates its exact Windows process tree', { skip: process.platform !== 'win32' }, async () => {

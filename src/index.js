@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './commands/planner.js'
 import { assertPlanCodeOpen, cancelPendingPlan, consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, recordPlanRun, updatePendingPlan } from './commands/confirmation.js'
 import { parseLocalMaaCommand } from './commands/local-command.js'
-import { activeRun, addRunCheckpoint, beginRun, clearRunStopping, describeRunState, finishRun, getRun, isProcessAlive, markRunStopping, readRunState, reapGeneratedTaskProcesses, setRunProcess, stopRun, updateRunRecovery } from './commands/run-state.js'
+import { activeRun, addRunCheckpoint, beginRun, clearRunStopping, describeRunState, finishRun, getRun, isProcessAlive, markRunStopping, readRunState, reapGeneratedTaskProcesses, setRunProcess, stopRun, updateRunProgress, updateRunRecovery } from './commands/run-state.js'
 import { applyRuntimeInstruction, completeTriggeredInstructions, parseMaaCallbackLine, processMaaCallback, recruitNotices, startLogTail } from './commands/runtime-instructions.js'
 import { callbackCheckpoint, decideRecovery, diagnoseExecutionFailure, isExecutionFailure, MAX_RECOVERY_RETRIES } from './agent/recovery-manager.js'
 import { createGoal, getGoal, listGoals, planGoal, trainingRequirements, updateGoal } from './agent/goal-manager.js'
@@ -860,8 +860,17 @@ async function executeDocument(agent, signal, document, planSummary, options = {
 
   try {
     const cliPath = await ensureMaaCli(executionSignal)
+    let updating = false
     const maintenance = isRuntimePath(cliPath)
-      ? await maybeAutoUpdateRuntime({ run: runMaa, signal: executionSignal, allowed: activeExecutions.size === 1 })
+      ? await maybeAutoUpdateRuntime({
+        run: runMaa, signal: executionSignal, allowed: activeExecutions.size === 1,
+        onUpdateStart: async () => {
+          updating = true
+          await updateRunProgress(run.id, { maintenance: '正在更新 MaaCore 与资源（每 24 小时检查一次，通常约 1 分钟），完成后自动开始任务…' }).catch(() => {})
+        },
+      }).finally(async () => {
+        if (updating) await updateRunProgress(run.id, { maintenance: '' }).catch(() => {})
+      })
       : { warning: '' }
     if (options.emulatorChecked !== true) {
       const emulator = await checkEmulator({ runMaa, signal: executionSignal })

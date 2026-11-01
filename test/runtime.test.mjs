@@ -236,9 +236,12 @@ test('automatic update is throttled, serialized, and keeps the installed runtime
   assert.match(concurrent.warning, /继续使用原版本/)
   assert.equal(await readFile(core, 'utf8'), 'old-core')
 
-  const throttled = await maybeAutoUpdateRuntime({ env, run: failedRun, now: now + 60_000 })
+  let notified = 0
+  const onUpdateStart = async () => { notified += 1 }
+  const throttled = await maybeAutoUpdateRuntime({ env, run: failedRun, now: now + 60_000, onUpdateStart })
   assert.equal(throttled.skipped, 'not-due')
   assert.equal(calls, 1)
+  assert.equal(notified, 0, 'a skipped check does not announce an update')
   const manifest = JSON.parse(await readFile(layout.manifest, 'utf8'))
   assert.equal(manifest.lastAutoUpdateCheckAt, '2026-10-29T12:00:00.000Z')
 
@@ -250,9 +253,11 @@ test('automatic update is throttled, serialized, and keeps the installed runtime
       await rm(path.join(layout.data, 'lib'), { recursive: true, force: true })
       await mkdir(path.join(layout.data, 'lib'), { recursive: true })
       await writeFile(core, 'new-core')
+      assert.equal(notified, 1, 'the update is announced before maa-cli starts downloading')
       return { exitCode: 0, stdout: 'Already up to date', stderr: '' }
     },
     now: now + 2 * 24 * 60 * 60_000,
+    onUpdateStart,
   })
   assert.equal(success.checked, true)
   assert.equal(success.warning, '')
