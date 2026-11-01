@@ -225,7 +225,7 @@ async function requireMaaCli() {
   return cli
 }
 
-async function ensureMaaCli(signal) {
+async function ensureMaaCli(signal, onBootstrapStart) {
   const current = resolveMaaCliPath()
   if (await exists(current)) return current
 
@@ -234,6 +234,7 @@ async function ensureMaaCli(signal) {
   const explicit = (process.env.DSH_MAA_CLI_PATH ?? process.env.MAA_CLI_PATH ?? '').trim()
   if (explicit !== '') throw new Error(`指定的 maa-cli 不存在：${explicit}`)
 
+  await onBootstrapStart?.()
   if (runtimeBootstrapPromise === null) {
     runtimeBootstrapPromise = bootstrapRuntime({ run: runMaa, signal })
       .finally(() => { runtimeBootstrapPromise = null })
@@ -859,7 +860,13 @@ async function executeDocument(agent, signal, document, planSummary, options = {
   }
 
   try {
-    const cliPath = await ensureMaaCli(executionSignal)
+    let installing = false
+    const cliPath = await ensureMaaCli(executionSignal, async () => {
+      installing = true
+      await updateRunProgress(run.id, { maintenance: '首次使用：正在下载并安装 maa-cli、MaaCore 与资源（可能需要几分钟），完成后自动开始任务…' }).catch(() => {})
+    }).finally(async () => {
+      if (installing) await updateRunProgress(run.id, { maintenance: '' }).catch(() => {})
+    })
     let updating = false
     const maintenance = isRuntimePath(cliPath)
       ? await maybeAutoUpdateRuntime({
