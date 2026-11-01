@@ -329,6 +329,7 @@ test('6. refresh, another session, and a DSH restart all restore the right contr
   assert.match(foreignStop.text, /另一个 DSH 会话/u)
   const plainStop = await env.hostRef.current.execute(SESSION_B, '/maa stop')
   assert.equal(plainStop.kind, 'error')
+  await waitFor(async () => (await env.workspace.spawnedRuns()).length === 1, 15_000, 'maa run')
   const [spawned] = await env.workspace.spawnedRuns()
   assert.ok(isAlive(spawned.pid), 'the other session must not have stopped it')
   // Hiding the observer panel does not stop anything either.
