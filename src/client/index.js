@@ -894,14 +894,22 @@ window.__ModuleLoader__.load({
       if (!progress) return '实时进度尚未读取。'
       const roguelike = !Array.isArray(run.taskTypes) || run.taskTypes.length === 0 || run.taskTypes.includes('Roguelike')
       const parts = []
-      if (progress.maintenance) parts.push(progress.maintenance)
+      // Before the first task chain starts there is nothing else worth saying.
+      const waiting = progress.maintenance || progress.startup
+      if (waiting) parts.push(waiting)
       else if (roguelike) {
         parts.push('本次进程已完成 ' + Number(progress.explorationsCompleted || 0) + ' 局探索')
         if (progress.floorReliable && Number.isInteger(progress.floor)) parts.push('当前第 ' + progress.floor + ' 层')
         else if (Number.isInteger(progress.lastSettlementFloor)) parts.push('上次结算于第 ' + progress.lastSettlementFloor + ' 层')
       }
       if (progress.stage) parts.push('关卡：' + progress.stage)
-      if (roguelike && !progress.floorReliable && !progress.maintenance) parts.push('当前楼层未知')
+      if (roguelike && !progress.floorReliable && !waiting) parts.push('当前楼层未知')
+      const copilot = progress.copilot
+      if (copilot && copilot.current && copilot.current.id) {
+        const switched = Array.isArray(copilot.switches) ? copilot.switches.length : 0
+        parts.push('当前作业：maa://' + copilot.current.id + (copilot.current.title ? '「' + copilot.current.title + '」' : '')
+          + (switched ? '（已自动换作业 ' + switched + '/' + Number(copilot.max || 3) + ' 次）' : '（备用作业 ' + Number(copilot.remaining || 0) + ' 份）'))
+      }
       const recruit = progress.recruit
       if (recruit && Array.isArray(recruit.results) && recruit.results.length) parts.push('公招已识别 ' + recruit.results.length + ' 次')
       if (recruit && Array.isArray(recruit.notices) && recruit.notices.length) parts.push('⚠ ' + recruit.notices.join('；') + '（未自动确认的高星招募需在游戏内手动处理）')

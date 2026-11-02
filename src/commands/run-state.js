@@ -370,6 +370,8 @@ function emptyProgress(now) {
     lastEvent: '',
     lastEventAt: null,
     maintenance: '',
+    startup: '',
+    copilot: null,
     updatedAt: now,
   }
 }

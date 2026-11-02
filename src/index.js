@@ -1,12 +1,12 @@
 import { actionArguments, isRuntimePath, queryArguments, resolveMaaCliPath, runMaa, startMaa } from './runtime/runner.js'
 import path from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { buildTaskDocument, GENERATED_TASK_NAME, summarizePlan, writeGeneratedTask } from './commands/planner.js'
 import { assertPlanCodeOpen, cancelPendingPlan, consumePlanFromHumanGesture, peekPendingPlan, preparePendingPlan, recordPlanRun, updatePendingPlan } from './commands/confirmation.js'
 import { parseLocalMaaCommand } from './commands/local-command.js'
-import { activeRun, addRunCheckpoint, beginRun, clearRunStopping, describeRunState, finishRun, getRun, isProcessAlive, markRunStopping, readRunState, reapGeneratedTaskProcesses, setRunProcess, stopRun, updateRunProgress, updateRunRecovery } from './commands/run-state.js'
+import { activeRun, addRunCheckpoint, beginRun, clearRunStopping, describeRunState, finishRun, getRun, isProcessAlive, markRunStopping, readRunState, reapGeneratedTaskProcesses, setRunProcess, stopRun, summarizeRun, updateRunProgress, updateRunRecovery } from './commands/run-state.js'
 import { applyRuntimeInstruction, completeTriggeredInstructions, parseMaaCallbackLine, processMaaCallback, recruitNotices, startLogTail } from './commands/runtime-instructions.js'
-import { callbackCheckpoint, decideRecovery, diagnoseExecutionFailure, isExecutionFailure, MAX_RECOVERY_RETRIES } from './agent/recovery-manager.js'
+import { callbackCheckpoint, decideRecovery, diagnoseExecutionFailure, isCopilotJobFailure, isExecutionFailure, MAX_RECOVERY_RETRIES } from './agent/recovery-manager.js'
 import { createGoal, getGoal, listGoals, planGoal, trainingRequirements, updateGoal } from './agent/goal-manager.js'
 import { applyDropRates, applyJointPlan, loadPlanningData, planWithArkPlanner, readPlanningData, weeklyStageOpen, weeklyStageSchedule } from './agent/planning-data.js'
 import {
@@ -19,6 +19,7 @@ import { discoverMaaCapabilities } from './capabilities/discovery.js'
 import { formatReport, runDoctor } from './runtime/doctor.js'
 import { prepareRuntimeDirectories } from './runtime/preflight.js'
 import { checkEmulator, emulatorErrorMessage } from './runtime/emulator.js'
+import { desktopNotify } from './runtime/notify.js'
 import { bootstrapRuntime, exists, formatRuntimeReport, inspectRuntime, maybeAutoUpdateRuntime, updateManifest, updateRuntime } from './runtime/runtime.js'
 import {
   formatOperatorBoxScanResult,
@@ -725,7 +726,7 @@ function formatRuntimeInstructionResult(result) {
   return result.message || JSON.stringify(result)
 }
 
-async function runWithRecovery({ runArguments, runOptions, document, run, active, executionSignal }) {
+async function runWithRecovery({ runArguments, runOptions, document, run, active, executionSignal, copilotFallback = null }) {
   let attempt = 0
   while (true) {
     active.failureCallbacks = []
@@ -739,18 +740,28 @@ async function runWithRecovery({ runArguments, runOptions, document, run, active
       // Persist the exact process tree so a stop after a DSH restart targets
       // it, and never another DSH instance's or the user's own MAA.
       await setRunProcess(run.id, handle.pid).catch(() => {})
+      // Cleared by the first TaskChainStart callback (see the log tail).
+      await updateRunProgress(run.id, { startup: STARTUP_PROGRESS }).catch(() => {})
       result = await handle.done
+      await updateRunProgress(run.id, { startup: '' }).catch(() => {})
       if (!isExecutionFailure(result)) {
         if (attempt > 0) await updateRunRecovery(run.id, { status: 'recovered', needsUser: false, historyEntry: { at: Date.now(), action: 'recovered', detail: `第 ${attempt} 次重试后任务恢复。` } })
         else await updateRunRecovery(run.id, { status: 'not_needed' })
         return result
       }
     } catch (error) {
+      await updateRunProgress(run.id, { startup: '' }).catch(() => {})
       if (error?.name === 'AbortError') throw error
       failureError = error
     }
 
     const diagnosis = diagnoseExecutionFailure({ result, error: failureError, callbacks: active.failureCallbacks })
+    // A failed community job is replaced by the next ranked one (at most
+    // COPILOT_MAX_SWITCHES); this does not spend the generic retry budget.
+    if (copilotFallback && !executionSignal?.aborted && isCopilotJobFailure({ result, callbacks: active.failureCallbacks, diagnosis })) {
+      const switched = await copilotFallback.next(diagnosis)
+      if (switched) continue
+    }
     const latest = await getRun(run.id)
     let emulator = null
     if (diagnosis.suggestedAction === 'probe_adb') emulator = await checkEmulator({ runMaa, signal: executionSignal }).catch(() => null)
@@ -770,6 +781,61 @@ async function runWithRecovery({ runArguments, runOptions, document, run, active
     await abortableDelay(decision.delayMs, executionSignal)
     attempt += 1
   }
+}
+
+const STARTUP_PROGRESS = 'MaaCore 正在启动、加载资源并连接模拟器…'
+export const COPILOT_MAX_SWITCHES = 3
+
+// Same stage, same task kind, and nothing the Box is known to lack; the
+// ranking already puts fully-owned jobs before unknown ones.
+export function pickCopilotFallbacks(ranked, primary) {
+  return ranked
+    .filter(item => item.id !== primary.id && item.job.kind === primary.job.kind && item.job.stageName === primary.job.stageName && item.ownership?.status !== 'missing')
+    .slice(0, COPILOT_MAX_SWITCHES)
+}
+
+// Swaps the generated copilot job file for the next ranked community job.
+// Every switch is recorded on the run (the panel shows it on its next read)
+// and announced with a desktop notification, because the panel never polls.
+export function createCopilotFallback({ run, target, current, fallbacks, notify = desktopNotify }) {
+  const queue = fallbacks.slice(0, COPILOT_MAX_SWITCHES)
+  const switches = []
+  let using = { id: String(current?.id ?? ''), title: String(current?.title ?? '') }
+  const progress = () => ({ copilot: { current: using, switches: [...switches], remaining: queue.length, max: COPILOT_MAX_SWITCHES } })
+  return {
+    remaining: () => queue.length,
+    announce: async () => { await updateRunProgress(run.id, progress()).catch(() => {}) },
+    next: async failure => {
+      const item = queue.shift()
+      if (!item) return false
+      await writeFile(target, `${JSON.stringify(item.content, null, 2)}\n`)
+      const to = { id: String(item.id), title: String(item.title ?? '') }
+      const reason = failure?.reason || '作业执行失败'
+      const detail = `作业 maa://${using.id} 失败（${reason}），自动换第 ${switches.length + 1}/${COPILOT_MAX_SWITCHES} 份：maa://${to.id}「${to.title || '未命名'}」`
+      switches.push({ at: Date.now(), from: using, to, reason })
+      using = to
+      await updateRunProgress(run.id, progress()).catch(() => {})
+      await updateRunRecovery(run.id, { historyEntry: { at: Date.now(), action: 'switch_copilot', detail } }).catch(() => {})
+      notify('MAA 自动换作业', detail)
+      return true
+    },
+  }
+}
+
+// A stop the user clicked needs no announcement; a stop condition that fired
+// on its own, a success, or a failure does.
+export function runFinishedNotification(run, options = {}) {
+  if (!run || !['succeeded', 'failed', 'stopped'].includes(run.status)) return null
+  if (run.status === 'stopped' && !options.conditionStop) return null
+  const label = run.purpose || run.confirmationCode || run.id
+  const title = run.status === 'succeeded' ? 'MAA 任务已完成' : run.status === 'failed' ? 'MAA 任务失败' : 'MAA 任务已按条件停止'
+  const body = [label, run.summary, run.duration ? `用时 ${run.duration}` : ''].filter(Boolean).join('\n')
+  return { title, body }
+}
+
+function notifyRunFinished(run, options = {}) {
+  const notification = runFinishedNotification(run, options)
+  if (notification) desktopNotify(notification.title, notification.body)
 }
 
 function abortableDelay(ms, signal) {
@@ -847,6 +913,8 @@ async function executeDocument(agent, signal, document, planSummary, options = {
     if (notices.length) recorded = { ...recorded, summary: `${recorded.summary}｜公招提醒：${notices.join('；')}（未自动确认，请在游戏内处理）` }
     await finishRun(run.id, recorded).catch(() => {})
     await completeTriggeredInstructions(run.id).catch(() => {})
+    const finished = await getRun(run.id).catch(() => null)
+    notifyRunFinished(finished && summarizeRun(finished), { conditionStop: Boolean(active.triggerInstructionId) })
     try {
       if (generatedExecution) await generatedExecution.restore().catch(() => {})
       if (strategyExecution) await strategyExecution.restore()
@@ -972,6 +1040,7 @@ async function executeDocument(agent, signal, document, planSummary, options = {
         if (active.failureCallbacks.length > 100) active.failureCallbacks.shift()
         const checkpoint = callbackCheckpoint(callback)
         if (checkpoint) await addRunCheckpoint(run.id, checkpoint)
+        if (checkpoint?.status === 'started') await updateRunProgress(run.id, { startup: '' }).catch(() => {})
         await processMaaCallback(run.id, callback, {
           stop: instructionId => {
             active.triggerInstructionId = instructionId
@@ -980,7 +1049,11 @@ async function executeDocument(agent, signal, document, planSummary, options = {
         })
       })
     }
-    const execution = runWithRecovery({ runArguments, runOptions, document: executionDocument, run, active, executionSignal })
+    const copilotFallback = generatedExecution?.files?.length === 1 && Array.isArray(options.copilotFallbacks) && options.copilotFallbacks.length > 0
+      ? createCopilotFallback({ run, target: generatedExecution.files[0], current: options.copilotCurrent, fallbacks: options.copilotFallbacks })
+      : null
+    if (copilotFallback) await copilotFallback.announce()
+    const execution = runWithRecovery({ runArguments, runOptions, document: executionDocument, run, active, executionSignal, copilotFallback })
     if (!backgroundWanted) return await settle(await execution)
     // Background mode: return as soon as the first MAA attempt is running. The
     // recovery loop and process tree remain owned by this plugin process.
@@ -1327,6 +1400,7 @@ async function confirmPlanSteps(agent, parsed, signal, launch, markConsumed) {
     : pending.purpose
   const result = await executeDocument(agent, signal, finalDocument, planSummary, {
     background: true, emulatorChecked: true, strategy: confirmationStrategy ?? pending.strategy, generatedFiles: pending.generatedFiles, purpose, confirmationCode: pending.confirmationCode,
+    copilotCurrent: pending.copilotCurrent, copilotFallbacks: pending.copilotFallbacks,
     abortSignal: launchSignal,
     onRunStarted: run => {
       launch.runId = run.id
@@ -2119,6 +2193,7 @@ export function apply(ctx) {
         formation: { type: 'boolean', description: 'Auto formation (default true).' },
         addTrust: { type: 'boolean' }, supportUnitUsage: { type: 'integer', minimum: 0, maximum: 3 },
         loopTimes: { type: 'integer', minimum: 1, maximum: 99 }, useSanityPotion: { type: 'boolean' },
+        autoSwitch: { type: 'boolean', description: 'prepare: when the job fails, automatically try up to 3 other same-stage jobs the Box can field (default true; the user gets a desktop notification on every switch).' },
         purpose: { type: 'string' },
       },
     },
@@ -2159,10 +2234,30 @@ export function apply(ctx) {
         step.type === 'Copilot' && !step.stageName ? '将在游戏当前显示的关卡上执行，请先进入该关卡的开始行动界面' : '',
         step.useSanityPotion ? '允许使用理智药' : '',
       ].filter(Boolean).join('｜')
+      // Backups only make sense when MAA navigates to the stage itself: after
+      // a lost battle the game is no longer on the stage's start screen.
+      let fallbacks = []
+      let fallbackNote = ''
+      if (step.type === 'Copilot' && step.stageName && args.autoSwitch !== false) {
+        try {
+          const ranked = rankCopilots(await searchCopilots({ stage: stageCode, limit: 20 }, { signal: exec.signal }), box)
+          fallbacks = pickCopilotFallbacks(ranked, item)
+          fallbackNote = fallbacks.length
+            ? `失败时自动换作业（最多 ${COPILOT_MAX_SWITCHES} 份，换时弹出通知）：${fallbacks.map(fallback => `maa://${fallback.id}`).join('、')}`
+            : '作业站没有其他干员齐全的同关作业，失败时不会自动换作业'
+        } catch (error) {
+          fallbackNote = `备用作业查询失败，失败时不会自动换作业：${error instanceof Error ? error.message : String(error)}`
+        }
+      }
+      const summaryWithFallback = [planSummary, fallbackNote].filter(Boolean).join('｜')
       const planJson = `${JSON.stringify(document, null, 2)}\n`
-      const confirmation = await preparePendingPlan(exec.agent, { purpose, document, planJson, planSummary, generatedFiles: [{ marker, content: item.content }], panelMemory: false })
+      const confirmation = await preparePendingPlan(exec.agent, {
+        purpose, document, planJson, planSummary: summaryWithFallback, generatedFiles: [{ marker, content: item.content }], panelMemory: false,
+        copilotCurrent: { id: item.id, title: job.title || job.stageName },
+        copilotFallbacks: fallbacks.map(fallback => ({ id: fallback.id, title: fallback.job.title || fallback.job.stageName, content: fallback.content })),
+      })
       exec.concludeTurn()
-      return agentResult({ status: 'pending_confirmation', summary: planSummary, ...confirmation, data: { id: item.id, job, ownership: item.ownership } })
+      return agentResult({ status: 'pending_confirmation', summary: summaryWithFallback, ...confirmation, data: { id: item.id, job, ownership: item.ownership, fallbacks: fallbacks.map(fallback => fallback.id) } })
     },
     presentCall: args => ({ card: 'terminal', title: args.action === 'search' ? `搜索作业：${args.stage ?? ''}` : `准备作业：${args.copilotId ?? ''}` }),
   })

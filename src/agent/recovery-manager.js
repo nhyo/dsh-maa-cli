@@ -64,6 +64,19 @@ export function callbackCheckpoint(callback) {
   return { taskchain: callback.body?.taskchain ?? '', taskId: callback.body?.taskid, status }
 }
 
+const NOT_A_JOB_PROBLEM = new Set(['stopped', 'adb_connection', 'adb_capture', 'initialization', 'resource_mismatch', 'core_restart_required'])
+
+// A copilot run that failed because the job itself did not work (lost battle,
+// formation the Box cannot fill) — not because the emulator, MaaCore or the
+// user stopped it. Only then is trying another community job meaningful.
+export function isCopilotJobFailure({ result, callbacks = [], diagnosis: failure } = {}) {
+  if (!failure || NOT_A_JOB_PROBLEM.has(failure.category)) return false
+  const copilotEvent = event => callbacks.some(callback => callback?.event === event && callback.body?.taskchain === 'Copilot')
+  if (copilotEvent('TaskChainCompleted')) return false
+  if (copilotEvent('TaskChainError')) return true
+  return /^\[Copilot\]\s+Failed\s*$/imu.test(`${result?.stdout ?? ''}\n${result?.stderr ?? ''}`)
+}
+
 export function isExecutionFailure(result) {
   if (!result || result.exitCode !== 0) return true
   return /^\[[^\]]+\]\s+Failed\s*$/imu.test(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)

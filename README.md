@@ -332,7 +332,7 @@ DSH 会先调用只读的 `maa_operator_box` 查询缓存，不连接模拟器�
 - **周常关卡开放日**：开放日来自 ArknightsGamedata 的 `zone_table.json`（`weeklyAdditionInfo`），关卡所属分区来自同一套游戏数据的 `stage_table.json`（MAA 的 `stages.json` 不含分区；企鹅物流把所有芯片本归为同一分区，不能用来判断 PR-A～PR-D 各自的开放日），与培养数据一起每 24 小时更新。`maa_stage_schedule` 列出今天开放的关卡；准备计划时若关卡今天未开放，会在计划摘要里提示，但不阻止确认。限时活动的“资源全开放”不在统计内。
 - **公招**：MaaCore 只会对 `confirm` 中列出的星级真正开始招募，空列表等于“只识别不招募”。默认与 MAA 图形界面一致：招募 4 次、自动确认 3★/4★；5★/6★ 组合不确认、跳过该栏位留给你手动处理，只有明确要求时才会加入。计划摘要会写明会确认哪些星级。运行期间解析 MaaCore 的 `RecruitTagsDetected` / `RecruitSpecialTag` / `RecruitResult` 回调，把高星组合与稀有 Tag 写入 `runs.json`，在运行面板和执行结果中提示。正在运行的 maa-cli 无法改参数，所以这里是“事后提醒”，不是“暂停等待确认”。
 - **基建自定义排班**：`maa_prepare_infrast` 按 MAA「基建排班协议」生成 JSON，干员名用 MAA 的 `battle_data.json` 校验，查不到、重复安排或超出房间人数的干员会列入“未执行”并说明原因；有 Box 缓存时还会提示你尚未拥有的干员。未提到的设施保持 MAA 默认算法。**MAA 不会切换制造站 / 贸易站的生产线**：`product` 只告诉 MAA 房间当前生产什么，以便挑选对应技能的干员。排班可以用 `saveAs` 保存到 `infrast-plans.json`，之后用 `useSaved` 复用。
-- **作业站**：`maa_copilot` 通过 `prts.maa.plus/copilot/query` 按关卡搜索，结合 `operator-box.json` 标注缺少或练度不足的干员（2 技能需精一、3 技能需精二，以及作业写明的精英化 / 等级要求），干员齐全的排在前面；没有 Box 缓存时明确说“无法判断”。`prepare` 下载 `copilot/get/{id}` 的作业，确认面板显示标题、作者、所需干员和缺少的干员；保全派驻作业自动使用 `SSSCopilot`。默认不使用理智药。
+- **作业站**：`maa_copilot` 通过 `prts.maa.plus/copilot/query` 按关卡搜索，结合 `operator-box.json` 标注缺少或练度不足的干员（2 技能需精一、3 技能需精二，以及作业写明的精英化 / 等级要求），干员齐全的排在前面；没有 Box 缓存时明确说“无法判断”。`prepare` 下载 `copilot/get/{id}` 的作业，确认面板显示标题、作者、所需干员和缺少的干员；保全派驻作业自动使用 `SSSCopilot`。默认不使用理智药。由 MAA 自动导航到关卡的普通作业，准备时会另挑最多 3 份同关、Box 不缺干员的备用作业；作业失败（不含模拟器断连、手动停止）时自动换下一份重试，每次换作业都会弹出桌面通知，运行面板显示当前作业和已换次数。传 `autoSwitch: false` 可关闭。
 - 生成的排班 / 作业文件只在确认后写到 maa-cli 配置目录的 `dsh-strategies/` 下，计划里只保存占位标记，执行结束后删除；计划无法指向磁盘上的任意文件。面板记忆不会保存这些临时文件，也不会保存掉落目标；执行前若计划中残留找不到文件的占位标记，会直接拒绝启动并说明原因。
 
 ### 养成规划：技能、专精、模组与联合刷图
@@ -395,6 +395,7 @@ DSH 会先调用只读的 `maa_operator_box` 查询缓存，不连接模拟器�
 | `DSH_MAA_CLI_ADB_PATH` | 指定 adb，安装时跳过探测 |
 | `DSH_MAA_CLI_STATE_DIR` | 待确认计划的存放目录（默认 `~/.dsh/maa-cli`） |
 | `DSH_MAA_CLI_ASSET_URL` | 覆盖 maa-cli 下载地址（内网镜像或离线 zip） |
+| `DSH_MAA_NOTIFY` | 设为 `0` 关闭桌面通知（任务完成 / 失败 / 按条件停止、自动换作业） |
 
 ## 兼容性
 
