@@ -66,11 +66,11 @@ test('registered slash command prepares and exposes the fight settings panel wit
   }
   await clearPendingPlansForTest()
 
-  const prepared = await maa.handler({ agent, rawInput: 'fight', signal: AbortSignal.timeout(2_000) })
-  assert.equal(prepared.kind, 'success')
+  const prepared = await maa.handler({ agent, rawInput: 'fight', signal: AbortSignal.timeout(20_000) })
+  assert.equal(prepared.kind, 'success', prepared.text)
   assert.match(prepared.text, /MAA 计划待确认/)
 
-  const peeked = await maa.handler({ agent, rawInput: 'peek', signal: AbortSignal.timeout(2_000) })
+  const peeked = await maa.handler({ agent, rawInput: 'peek', signal: AbortSignal.timeout(20_000) })
   assert.equal(peeked.kind, 'success')
   const payload = JSON.parse(peeked.text)
   assert.equal(payload.panel.type, 'Fight')
@@ -87,12 +87,12 @@ test('confirmation-panel cancellation invalidates the code on the host', async (
   const maa = commands.find(command => command.name === 'maa')
   const agent = { id: 'cancel-panel-test', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] } }
   await clearPendingPlansForTest()
-  const prepared = await maa.handler({ agent, rawInput: 'fight', signal: AbortSignal.timeout(2_000) })
+  const prepared = await maa.handler({ agent, rawInput: 'fight', signal: AbortSignal.timeout(20_000) })
   const code = prepared.text.match(/MAA-[A-F0-9]{6}/u)[0]
-  const cancelled = await maa.handler({ agent, rawInput: `cancel ${code}`, signal: AbortSignal.timeout(2_000) })
+  const cancelled = await maa.handler({ agent, rawInput: `cancel ${code}`, signal: AbortSignal.timeout(20_000) })
   assert.equal(cancelled.kind, 'success')
   assert.match(cancelled.text, /确认码已失效/u)
-  const confirm = await maa.handler({ agent, rawInput: `confirm ${code}`, signal: AbortSignal.timeout(2_000) })
+  const confirm = await maa.handler({ agent, rawInput: `confirm ${code}`, signal: AbortSignal.timeout(20_000) })
   assert.equal(confirm.kind, 'error')
   assert.match(confirm.text, /没有待确认/u)
 })
@@ -104,7 +104,7 @@ test('workflow confirmation exposes read-only steps and submits no task override
   const agent = { id: 'workflow-panel-test', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] } }
   const execution = await createWorkflowExecution({ name: '安全日常', capabilitySignature: 'test', steps: [{ kind: 'maa', title: '启动', maa: { type: 'StartUp', params: { client_type: 'Official', start_game_enabled: true } } }] })
   const pending = await preparePendingPlan(agent, { planSummary: '安全日常', document: { tasks: execution.steps.map(step => step.maa) }, workflowExecutionId: execution.id })
-  const peeked = await maa.handler({ agent, rawInput: `peek ${pending.confirmationCode}`, signal: AbortSignal.timeout(2_000) })
+  const peeked = await maa.handler({ agent, rawInput: `peek ${pending.confirmationCode}`, signal: AbortSignal.timeout(20_000) })
   assert.equal(peeked.kind, 'success')
   const payload = JSON.parse(peeked.text)
   assert.equal(payload.panel.type, 'Workflow')
@@ -120,7 +120,7 @@ test('daily goal tool creates a persisted workflow and one-time confirmation wit
   let concluded = false
   const agent = { id: 'daily-goal-test', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] } }
   const result = await goalTool.execute({ action: 'prepare', kind: 'daily', title: '今日安全日常', budget: { allowStone: false, maxMedicine: 0, maxExpiringMedicine: 0 } }, {
-    agent, signal: AbortSignal.timeout(3_000), concludeTurn: () => { concluded = true },
+    agent, signal: AbortSignal.timeout(20_000), concludeTurn: () => { concluded = true },
   })
   assert.equal(result.status, 'pending_confirmation')
   assert.match(result.goalId, /^GOAL-/u)

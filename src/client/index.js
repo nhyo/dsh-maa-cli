@@ -534,7 +534,11 @@ window.__ModuleLoader__.load({
           fail(outcome && outcome.text)
           return loadRunStatus(runs, plans, execute)
         }
-        runs.updateRun({ phase: 'finished', inFlight: false, local: false, error: '', message: outcome.text || '任务已停止。' })
+        // The host only answers success once the process has exited; do not
+        // show the pre-stop record ("执行中") while the status re-read is in flight.
+        const latestRecord = (runs.getSnapshot().run || run).record
+        const stoppedRecord = latestRecord ? Object.assign({}, latestRecord, { status: 'stopped', stopping: false }) : latestRecord
+        runs.updateRun({ phase: 'finished', inFlight: false, local: false, error: '', message: outcome.text || '任务已停止。', record: stoppedRecord })
         return loadRunStatus(runs, plans, execute)
       }, function (reason) {
         fail(reason instanceof Error ? reason.message : String(reason))
