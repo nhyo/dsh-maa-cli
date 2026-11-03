@@ -20,13 +20,41 @@ export function runStateFilePath(env = process.env) {
   return path.join(stateDirectory(env), 'runs.json')
 }
 
+// Windows briefly refuses to open or replace a file another handle (a reader,
+// an antivirus scan) is touching. DSH's own atomic writer retries these too.
+const TRANSIENT_FS_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM'])
+const FS_RETRY_LIMIT = 8
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+// A missing file is an empty history; anything else unreadable is an error.
+// It used to read as "no runs at all", which made the dock drop a live run
+// panel and let the next mutation write that empty list back over the file.
 export async function readRunState(env = process.env) {
-  try {
-    const parsed = JSON.parse(await readFile(runStateFilePath(env), 'utf8'))
+  let delay = 20
+  for (let attempt = 0; ; attempt += 1) {
+    let text
+    try {
+      text = await readFile(runStateFilePath(env), 'utf8')
+    } catch (error) {
+      if (error?.code === 'ENOENT') return emptyRunState()
+      if (!TRANSIENT_FS_ERRORS.has(error?.code) || attempt >= FS_RETRY_LIMIT) throw error
+      await sleep(delay)
+      delay = Math.min(delay * 2, 200)
+      continue
+    }
+    let parsed
+    try {
+      parsed = JSON.parse(text)
+    } catch (error) {
+      // A torn read can only come from a writer outside this process; retry,
+      // then refuse rather than pretend the history is empty.
+      if (attempt >= FS_RETRY_LIMIT) throw new Error(`runs.json is not valid JSON: ${error.message}`)
+      await sleep(delay)
+      delay = Math.min(delay * 2, 200)
+      continue
+    }
     if (parsed?.version !== RUNS_VERSION || !Array.isArray(parsed.runs)) return emptyRunState()
     return { version: RUNS_VERSION, runs: parsed.runs.filter(item => item && typeof item === 'object' && item.id) }
-  } catch {
-    return emptyRunState()
   }
 }
 
@@ -34,13 +62,22 @@ async function writeRunState(state, env) {
   const file = runStateFilePath(env)
   await mkdir(path.dirname(file), { recursive: true })
   const payload = `${JSON.stringify({ version: RUNS_VERSION, runs: state.runs }, null, 2)}\n`
-  const temporary = `${file}.${process.pid}.tmp`
-  try {
-    await writeFile(temporary, payload, 'utf8')
-    await rename(temporary, file)
-  } catch {
-    await writeFile(file, payload, 'utf8').catch(() => {})
-    await rm(temporary, { force: true }).catch(() => {})
+  const temporary = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`
+  await writeFile(temporary, payload, 'utf8')
+  // Only ever replace atomically: a direct overwrite could be read half-written.
+  let delay = 20
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(temporary, file)
+      return
+    } catch (error) {
+      if (!TRANSIENT_FS_ERRORS.has(error?.code) || attempt >= FS_RETRY_LIMIT) {
+        await rm(temporary, { force: true }).catch(() => {})
+        throw error
+      }
+      await sleep(delay)
+      delay = Math.min(delay * 2, 200)
+    }
   }
 }
 

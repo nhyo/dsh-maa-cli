@@ -5,7 +5,7 @@
 // (src/index.js) that spawns a fake maa-cli with a real child process tree.
 // Nothing here talks to an emulator or the game: this is not a device test.
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -463,3 +463,96 @@ test('10. two sessions confirming at once: one runs, the other is refused and ke
   assert.equal((await env.hostRef.current.execute(losers[0][0], `/maa stop ${laterRun}`)).kind, 'success')
   assert.deepEqual(await liveProcesses(env.workspace), [])
 })
+
+test('11. remounting the dock after each turn does not echo another /maa status (issue #1)', async t => {
+  const env = await setup(t)
+  const statusReads = () => env.hostRef.current.log.filter(entry => /^\/maa status/u.test(entry.line)).length
+  await openPlanInDock(env)
+  await env.page.settle(100)
+  assert.equal(statusReads(), 1, 'the first mount reads the host record once')
+
+  // DSH unmounts and mounts the composer dock around every turn/end.
+  for (let turn = 0; turn < 5; turn += 1) {
+    env.page.hide()
+    env.page.show(SESSION_A)
+    await env.page.settle(50)
+  }
+  assert.equal(statusReads(), 1, 'remounts reuse the session store and stay silent')
+  assert.equal(env.page.dock()?.props['data-maa-dock'], 'plan', 'the pending plan is still shown')
+
+  // Opening another conversation reads its record once, and only once.
+  env.page.show(SESSION_B)
+  await env.page.settle(100)
+  env.page.show(SESSION_B)
+  await env.page.settle(50)
+  assert.equal(statusReads(), 2)
+
+  // A page refresh (or DSH restart) is a new lifetime and restores from the host.
+  const reloaded = loadClient({ host: env.hostRef, localStorage: env.localStorage })
+  reloaded.show(SESSION_A)
+  await waitDock(reloaded, 'plan', 'plan after refresh')
+  assert.equal(statusReads(), 3)
+})
+
+test('12. over the status RPC the dock never echoes /maa status and notices a finished run by itself', async t => {
+  const env = await setup(t)
+  const page = loadClient({ host: env.hostRef, localStorage: env.localStorage, rpc: true })
+  const statusCommands = () => env.hostRef.current.log.filter(entry => /^\/maa status/u.test(entry.line)).length
+  await preparePlan(env.hostRef)
+  page.show(SESSION_A)
+  await waitDock(page, 'plan')
+  page.click('confirm', page.dock())
+  await waitDock(page, 'run')
+  await waitFor(async () => (await env.workspace.spawnedRuns()).length === 1, 15_000, 'maa run')
+
+  // Remounts after each turn may read again: the RPC is silent.
+  for (let turn = 0; turn < 3; turn += 1) {
+    page.hide()
+    page.show(SESSION_A)
+    await page.settle(50)
+  }
+  assert.equal(page.dock()?.props['data-maa-dock'], 'run')
+
+  // MAA exits on its own; nobody clicks anything. The background refresh
+  // over the RPC must still move the panel to "finished".
+  const [spawned] = await env.workspace.spawnedRuns()
+  for (const pid of [spawned.child, spawned.pid]) { try { process.kill(pid) } catch {} }
+  await waitDock(page, 'finished', 'finished without a click')
+
+  assert.equal(statusCommands(), 0, 'no /maa status command reached the transcript')
+  assert.ok(env.hostRef.current.rpcLog.length >= 2, 'status came from the RPC channel')
+  assert.ok(env.hostRef.current.rpcLog.every(call => call.channel === '/dsh-maa-cli' && call.endpoint === 'status' && call.payload.session === 'session-a'))
+  const marker = JSON.parse(await readFile(path.join(env.workspace.env.DSH_MAA_CLI_STATE_DIR, 'status-rpc.json'), 'utf8'))
+  assert.equal(marker.channel, '/dsh-maa-cli')
+  assert.equal(marker.pid, env.hostRef.current.pid, 'the running host registered the channel')
+  assert.equal(marker.stage, 'registered')
+  assert.deepEqual(marker.trail.map(step => step.stage), ['applied', 'registered'])
+  assert.deepEqual(await liveProcesses(env.workspace), [])
+})
+
+for (const rpc of [false, true]) {
+  test(`13. an unreadable run history never closes a live run panel (${rpc ? 'status RPC' : 'command fallback'})`, async t => {
+    const env = await setup(t)
+    const page = loadClient({ host: env.hostRef, localStorage: env.localStorage, rpc })
+    await preparePlan(env.hostRef)
+    page.show(SESSION_A)
+    await waitDock(page, 'plan')
+    page.click('confirm', page.dock())
+    await waitDock(page, 'run')
+    await waitFor(async () => { await page.settle(); return /RUN-[A-F0-9]{8}/u.test(page.text()) }, 15_000, 'run id')
+
+    // runs.json torn mid-write, then the user clicks 「刷新状态」.
+    const file = path.join(env.workspace.env.DSH_MAA_CLI_STATE_DIR, 'runs.json')
+    const intact = await readFile(file, 'utf8')
+    await writeFile(file, intact.slice(0, Math.floor(intact.length / 2)))
+    page.click('', findButtonByText(page, '刷新状态'))
+    await page.settle(2_500)
+    assert.equal(page.dock()?.props['data-maa-dock'], 'run', 'the run panel stays open with its stop button')
+    assert.equal(page.button('stop', page.dock()).props.disabled, false)
+
+    await writeFile(file, intact)
+    page.click('stop', page.dock())
+    await waitDock(page, 'finished', 'finished after stop')
+    assert.deepEqual(await liveProcesses(env.workspace), [])
+  })
+}

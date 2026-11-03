@@ -324,8 +324,17 @@ window.__ModuleLoader__.load({
         if (Object.prototype.hasOwnProperty.call(patch, 'run')) writeStoredRun(sessionId, value.run)
         listeners.forEach(function (listener) { listener() })
       }
+      let mountReadClaimed = false
       return {
         sessionId: sessionId,
+        // DSH remounts the composer dock after every turn. Only the first mount
+        // in this page lifetime may read the host record; later remounts would
+        // echo another `/maa status` into the transcript each turn (issue #1).
+        claimMountRead: function () {
+          if (mountReadClaimed) return false
+          mountReadClaimed = true
+          return true
+        },
         getSnapshot: function () { return value },
         subscribe: function (listener) { listeners.add(listener); return function () { listeners.delete(listener) } },
         replaceRun: function (run) { commit({ run: run }) },
@@ -351,12 +360,65 @@ window.__ModuleLoader__.load({
       return panelViewKey('run', run.code || run.runId)
     }
 
-    function readRunRecord(execute) {
+    // How this page reads run status. The host's `/dsh-maa-cli` RPC channel is
+    // silent: DSH's Connection carries it (Electron or HTTP) and authenticates
+    // it. `/maa status` is a command and DSH echoes every command result into
+    // the transcript (issue #1), so it is only the fallback for hosts without
+    // the channel (headless profiles, older DSH).
+    const STATUS_RPC_CHANNEL = '/dsh-maa-cli'
+    const STATUS_REFRESH_MS = 3000
+    let statusChannel = 'unknown'
+    let statusRpc = null
+
+    function connectionRpc(ctx) {
+      let connection = null
+      try { connection = ctx.connection || (typeof ctx.get === 'function' ? ctx.get('connection') : null) } catch (_) {}
+      return connection && connection.rpc && typeof connection.rpc.call === 'function' ? connection.rpc : null
+    }
+
+    function rpcRunRecord(sessionId) {
+      if (!statusRpc || !sessionId) {
+        warnStatusFallback(statusRpc ? 'no session id' : 'connection.rpc is not available in this client')
+        return Promise.resolve(undefined)
+      }
+      return Promise.resolve(statusRpc.call(STATUS_RPC_CHANNEL, 'status', { session: String(sessionId) })).then(function (result) {
+        if (!result || result.ok !== true || !result.value || typeof result.value !== 'object') {
+          warnStatusFallback(result && result.ok === false && result.error ? result.error.code + ': ' + result.error.message : 'unexpected result')
+          return undefined
+        }
+        statusChannel = 'rpc'
+        return result.value
+      }, function (reason) {
+        warnStatusFallback(reason instanceof Error ? reason.message : String(reason))
+        return undefined
+      })
+    }
+
+    // Explain in the devtools console why the dock had to use the echoing
+    // command, so "the panel still prints maa {...}" can be diagnosed.
+    function warnStatusFallback(reason) {
+      if (statusChannel === 'rpc') return
+      try { console.warn('[dsh-maa-cli] status RPC ' + STATUS_RPC_CHANNEL + '/status unavailable (' + reason + '); falling back to /maa status') } catch (_) {}
+    }
+
+    function readRunRecordByCommand(execute) {
       if (typeof execute !== 'function') return Promise.resolve(null)
       return Promise.resolve(execute('/maa status')).then(function (outcome) {
         if (!outcome || outcome.kind !== 'success' || typeof outcome.text !== 'string') return null
         try { return JSON.parse(outcome.text) } catch (_) { return null }
       }, function () { return null })
+    }
+
+    function readRunRecord(execute, sessionId) {
+      if (statusChannel === 'command') return readRunRecordByCommand(execute)
+      return rpcRunRecord(sessionId).then(function (value) {
+        if (value !== undefined) return value
+        // A channel that answered before and failed now is a transient error;
+        // do not start echoing commands into the transcript because of it.
+        if (statusChannel === 'rpc') return null
+        statusChannel = 'command'
+        return readRunRecordByCommand(execute)
+      })
     }
 
     function recordLabel(record) {
@@ -423,16 +485,23 @@ window.__ModuleLoader__.load({
         runs.replaceRun(Object.assign({}, current, { phase: 'finished', runId: record.id, record: record, inFlight: false, local: false, error: '' }))
         return
       }
+      // A live panel bound to a real run id is never dropped on one snapshot
+      // that does not mention it: a snapshot is not proof that a run vanished
+      // (an unreadable runs.json used to look exactly like this and closed the
+      // panel mid-run). Keep the controls; the next read settles it.
+      if (current.runId && LIVE_PHASES.indexOf(current.phase) >= 0) return
       // Nothing on the host: the confirmation failed before a run existed (or
       // its record aged out). Do not keep a stop button for a ghost.
       runs.replaceRun(null)
     }
 
-    function loadRunStatus(runs, plans, execute) {
+    function loadRunStatus(runs, plans, execute, options) {
       if (typeof execute !== 'function') return Promise.resolve(null)
-      runs.setLoading(true)
-      return readRunRecord(execute).then(function (snapshot) {
-        runs.setLoading(false)
+      // Background refreshes must not flash "正在读取…" on the buttons.
+      const quiet = Boolean(options && options.quiet)
+      if (!quiet) runs.setLoading(true)
+      return readRunRecord(execute, runs.sessionId).then(function (snapshot) {
+        if (!quiet) runs.setLoading(false)
         if (!snapshot) return null
         applyRunSnapshot(runs, snapshot)
         restorePendingPlan(plans, execute, snapshot.pending)
@@ -844,9 +913,10 @@ window.__ModuleLoader__.load({
     }
 
     // Every `/maa …` line goes through the command plane and is echoed into the
-    // transcript, so the dock never polls: it reads the host record once when it
-    // mounts (refresh, DSH restart, conversation switch), after each action the
-    // user takes, and when the user expands the panel or asks to refresh.
+    // transcript, so the dock never polls: it reads the host record the first
+    // time a conversation's dock mounts in this page (refresh, DSH restart,
+    // opening the conversation), after each action the user takes, and when the
+    // user expands the panel or asks to refresh.
     const PANEL_VIEW_STORAGE_KEY = 'dsh.maa.panel-view'
 
     function panelViewKey(kind, id) {
@@ -973,10 +1043,30 @@ window.__ModuleLoader__.load({
       const setPlanAction = planActionPair[1]
       const live = Boolean(run && LIVE_PHASES.indexOf(run.phase) >= 0)
       useRunClock(live)
-      // One read on mount/re-entry restores the binding after a refresh, a DSH
-      // restart or switching conversations. This is deliberately not polling.
+      // A mount read restores the binding after a refresh, a DSH restart or
+      // opening a conversation. Over the silent status RPC every remount may
+      // read; over the echoing command fallback only the first mount per
+      // conversation does, because DSH remounts the dock after every turn.
       const loadRecord = function () { return loadRunStatus(runs, plans, execute) }
-      React.useEffect(function () { loadRecord() }, [runs])
+      React.useEffect(function () {
+        const first = runs.claimMountRead()
+        if (first || statusChannel === 'rpc') loadRecord()
+      }, [runs])
+      // While a run is live, refresh it in the background — only over the
+      // silent RPC; the command fallback would echo every refresh.
+      React.useEffect(function () {
+        if (!live) return undefined
+        let stopped = false
+        let timer = null
+        const schedule = function () { if (!stopped) timer = setTimeout(tick, STATUS_REFRESH_MS) }
+        const tick = function () {
+          if (stopped || statusChannel === 'command') return
+          if (statusChannel !== 'rpc') { schedule(); return }
+          loadRunStatus(runs, plans, execute, { quiet: true }).then(schedule, schedule)
+        }
+        schedule()
+        return function () { stopped = true; if (timer !== null) clearTimeout(timer) }
+      }, [live, runs])
 
       const toggle = function (key) {
         return function () {
@@ -1244,7 +1334,8 @@ window.__ModuleLoader__.load({
           })))
     }
 
-    const inject = ['slots', 'remote', 'remote.commands']
+    // `connection` carries the silent run-status RPC (see STATUS_RPC_CHANNEL).
+    const inject = ['slots', 'remote', 'remote.commands', 'connection']
 
     // Run one `/maa …` line on the local command plane (zero model calls) and
     // hand the settled result back to the caller.
@@ -1302,6 +1393,7 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       installStyles()
+      statusRpc = connectionRpc(ctx)
       attachPlanNotices(ctx)
       // Every planning tool shares the same confirmation dock: `maa_prepare_plan`
       // builds a task-panel plan, while `maa_prepare_strategy` / `maa_prepare_note`

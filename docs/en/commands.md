@@ -45,7 +45,7 @@ After confirming, the panel becomes a run panel that always has a "Stop task" bu
 - **Cancel**: the confirmation panel's "×" deletes the plan and permanently invalidates its code.
 - **Session isolation**: other DSH sessions see a read-only status and cannot stop the task or add conditions.
 - **One at a time**: while a task runs, all new plans are refused so nothing fights over the emulator.
-- **No polling**: every status read adds an entry to the conversation, so the panel reads only when expanded, refreshed or stopped. A desktop notification pops up when a task finishes, fails, or switches copilot jobs.
+- **Auto refresh**: while a task runs, the panel refreshes its status every 3 seconds without leaving anything in the conversation. A desktop notification also pops up when a task finishes, fails, or switches copilot jobs.
 - **DSH restart**: on startup, leftover MAA process trees recorded in `runs.json` are terminated and their records marked "Stopped".
 
 ## Runtime instructions

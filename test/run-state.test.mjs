@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -164,7 +164,7 @@ test('clearRunStateForTest removes the file', async (t) => {
   assert.deepEqual(state.runs, [])
 })
 
-test('the composer dock persists panel interaction state and never polls the command plane', async () => {
+test('the composer dock persists panel interaction state and never polls through the echoing command plane', async () => {
   const commandSource = await readFile(new URL('../src/commands/local-command.js', import.meta.url), 'utf8')
   assert.match(commandSource, /\{ kind: 'status' \}/u)
   assert.match(commandSource, /\/maa status/u)
@@ -174,17 +174,24 @@ test('the composer dock persists panel interaction state and never polls the com
   // read never has a transport and the panel falls back to a stale bar.
   assert.match(clientSource, /id: 'maa-confirm'[\s\S]*?execute: commandRunner\(ctx, sessionId\)/u)
   assert.match(clientSource, /\[\s*'maa_prepare_plan',\s*'maa_prepare_strategy',\s*'maa_prepare_note',\s*'maa_goal_manager',\s*'maa_workflow_manager',\s*'maa_prepare_infrast',\s*'maa_copilot'\s*\]/u)
-  // DSH echoes every `/maa ...` command into the conversation, so the dock may
-  // restore once on mount and after explicit gestures, but must never poll.
+  // DSH echoes every `/maa ...` command into the conversation, so status is read
+  // over DSH's silent Connection RPC channel; the command is only the fallback
+  // and is never polled.
   assert.match(clientSource, /function readStoredRun\(sessionId\)/u)
-  assert.match(clientSource, /function readRunRecord\(execute\)/u)
+  assert.match(clientSource, /function readRunRecord\(execute, sessionId\)/u)
+  assert.match(clientSource, /const STATUS_RPC_CHANNEL = '\/dsh-maa-cli'/u)
+  assert.match(clientSource, /statusRpc\.call\(STATUS_RPC_CHANNEL, 'status', \{ session: String\(sessionId\) \}\)/u)
+  assert.match(clientSource, /const inject = \['slots', 'remote', 'remote\.commands', 'connection'\]/u)
+  assert.match(clientSource, /if \(stopped \|\| statusChannel === 'command'\) return/u)
   assert.match(clientSource, /function useRunClock\(active\)/u)
   assert.match(clientSource, /dsh\.maa\.run/u)
   assert.equal((clientSource.match(/execute\('\/maa status'\)/g) || []).length, 1)
   assert.doesNotMatch(clientSource, /setInterval\([^)]*\/maa/u)
   // Stops always name the run (or launching code) they are meant for.
   assert.match(clientSource, /execute\(target \? '\/maa stop ' \+ target : '\/maa stop'\)/u)
-  assert.match(clientSource, /React\.useEffect\(function \(\) \{ loadRecord\(\) \}, \[runs\]\)/u)
+  // Over the command fallback only the first dock mount per conversation reads;
+  // per-turn remounts stay silent (issue #1).
+  assert.match(clientSource, /const first = runs\.claimMountRead\(\)\s+if \(first \|\| statusChannel === 'rpc'\) loadRecord\(\)/u)
   assert.match(clientSource, /className: 'maa-stop-button'[\s\S]*?'停止任务'/u)
   assert.match(clientSource, /requestRunStop\(runs, plans, execute, true\)/u)
   assert.match(clientSource, /execute\('\/maa cancel ' \+ codeValue\)/u)
@@ -303,4 +310,25 @@ test('the targeted reaper only signals the recorded process tree', { skip: proce
   } finally {
     try { process.kill(-bystander.pid, 'SIGKILL') } catch {}
   }
+})
+
+test('an unreadable runs.json is an error, never an empty history that gets written back', async t => {
+  const env = await withStateDir(t)
+  assert.deepEqual((await readRunState(env)).runs, [], 'a missing file is an empty history')
+  const run = await beginRun({ purpose: '扫描干员' }, { env, now: Date.now() })
+
+  // A torn file (as a concurrent non-atomic writer could leave it) must not
+  // read as "no runs": the dock used to drop a live run panel on exactly this.
+  const file = runStateFilePath(env)
+  const intact = await readFile(file, 'utf8')
+  await writeFile(file, intact.slice(0, Math.floor(intact.length / 2)))
+  await assert.rejects(readRunState(env), /not valid JSON/u)
+  await assert.rejects(describeRunState({ env }))
+  // A mutation on top of an unreadable file must not overwrite it with an empty list.
+  await assert.rejects(finishRun(run.id, { status: 'succeeded' }, { env }))
+  assert.equal(await readFile(file, 'utf8'), intact.slice(0, Math.floor(intact.length / 2)), 'the file was not replaced')
+
+  // Once readable again, the run is still there.
+  await writeFile(file, intact)
+  assert.equal((await getRun(run.id, { env }))?.purpose, '扫描干员')
 })

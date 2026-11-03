@@ -114,6 +114,17 @@ async function startHost(workspace) {
         child.send({ type: 'execute', id, sessionId, line })
       })
     },
+    // Connection RPC to a plugin channel; never part of the command log.
+    rpcLog: [],
+    rpc(channel, endpoint, payload) {
+      if (!host.alive) return Promise.reject(new Error('DSH host is not running'))
+      const id = nextId++
+      host.rpcLog.push({ channel, endpoint, payload })
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject })
+        child.send({ type: 'rpc', id, channel, endpoint, payload })
+      })
+    },
     // SIGKILL: no cleanup code in the plugin gets to run — like a crash.
     kill() {
       if (!host.alive) return
@@ -140,7 +151,7 @@ export function createLocalStorage() {
 
 // Load the real client module (a fresh page) against a host. `confirmAnswer`
 // decides what window.confirm returns for the close buttons.
-export function loadClient({ host, localStorage, confirmAnswer = () => true }) {
+export function loadClient({ host, localStorage, confirmAnswer = () => true, rpc = false }) {
   // `host` is a ref ({ current }) so a test can swap in a restarted host.
   const mini = createMiniReact()
   const source = readFileSync(CLIENT, 'utf8')
@@ -171,6 +182,15 @@ export function loadClient({ host, localStorage, confirmAnswer = () => true }) {
       inject: (name, factory) => slots.push(factory()),
       register: (spec, Component) => ({ spec, Component }),
     },
+    // Without `rpc` the page behaves like a host without the plugin's RPC
+    // channel, so the client falls back to the `/maa status` command.
+    ...(rpc ? {
+      connection: {
+        rpc: {
+          call: async (channel, endpoint, payload) => await host.current.rpc(channel, endpoint, payload),
+        },
+      },
+    } : {}),
     remote: {
       commands: {
         async execute(sessionId, line) {

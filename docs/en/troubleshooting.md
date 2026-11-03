@@ -13,7 +13,7 @@ When something goes wrong, first have DSH run a health check (`maa_doctor`); it 
 | `os error 17` (cannot move the file to a different disk drive) | The directory is EFS-encrypted. Decrypt it with `cipher /d`, or point it to an unencrypted drive with `mklink /J` |
 | Runtime download slow or failing | Set `DSH_MAA_CLI_ASSET_URL` to a mirror or offline zip |
 | Nothing happens for a long time after confirming | The daily MaaCore update may be running (about 1 minute); the panel shows "updating" |
-| Panel stays on "Running" | The panel doesn't poll; click "Refresh status" to read the latest state |
+| Panel stays on "Running" | It normally refreshes every 3 seconds; if it doesn't change, click "Refresh status", or restart DSH Desktop so the new plugin version loads |
 | "Stop failed" | The process didn't exit within 30 seconds (e.g. blocked by security software); just retry |
 | "An MAA task is already running" | Only one task can run at a time; stop it or wait for it to finish |
 | "Belongs to another DSH session" | Go back to the session that started the task |
