@@ -184,3 +184,29 @@ test('records recruitment tags and reports 5★/6★ combinations without trigge
   assert.deepEqual(stored.progress.recruit.special, ['高级资深干员'])
   assert.deepEqual(recruitNotices(stored), ['检测到稀有 Tag「高级资深干员」', '检测到 6★ Tag 组合：近卫干员、输出、高级资深干员、控场、远程位'])
 })
+
+test('flush waits for a read already in flight and still reads the lines written after it began', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-log-flush-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const file = path.join(root, 'asst.log')
+  await writeFile(file, '')
+  const seen = []
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  // A long interval keeps the timer out of the way; reads happen on flush.
+  const monitor = await startLogTail(file, async line => {
+    seen.push(line)
+    if (line === 'first') await gate
+  }, { intervalMs: 60_000 })
+  t.after(() => monitor.stop())
+
+  await appendFile(file, 'first\n')
+  const firstFlush = monitor.flush()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  // The read for "first" is still in flight when the run's last line lands.
+  await appendFile(file, 'last\n')
+  const finalFlush = monitor.flush()
+  release()
+  await Promise.all([firstFlush, finalFlush])
+  assert.deepEqual(seen, ['first', 'last'])
+})

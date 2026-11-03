@@ -204,11 +204,15 @@ export async function startLogTail(file, onLine, options = {}) {
   let offset = await fileSize(file)
   let carry = ''
   let stopped = false
-  let polling = false
+  let inFlight = null
   const intervalMs = options.intervalMs ?? 100
-  const poll = async () => {
-    if (stopped || polling) return
-    polling = true
+  const poll = () => {
+    if (stopped) return Promise.resolve()
+    // One read at a time; a timer tick during a read simply joins it.
+    if (inFlight === null) inFlight = readNew().finally(() => { inFlight = null })
+    return inFlight
+  }
+  const readNew = async () => {
     try {
       const size = await fileSize(file)
       if (size < offset) { offset = 0; carry = '' }
@@ -227,15 +231,19 @@ export async function startLogTail(file, onLine, options = {}) {
       }
     } catch {
       // The log may be rotated or not created yet. The next poll retries.
-    } finally {
-      polling = false
     }
   }
   const timer = setInterval(() => { void poll() }, intervalMs)
   timer.unref?.()
   return {
     stop() { stopped = true; clearInterval(timer) },
-    async flush() { await poll() },
+    // A read already in flight may have sized the file before the caller's
+    // last write: wait for it, then read once more so nothing is left behind
+    // (the final MaaCore callbacks of a run arrive right before this).
+    async flush() {
+      if (inFlight !== null) await inFlight
+      await poll()
+    },
   }
 }
 

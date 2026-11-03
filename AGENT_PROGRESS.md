@@ -218,3 +218,15 @@
 - Windows `npm test`：231 项，229 通过、2 跳过、0 失败；修复后全量连续 8 次全部通过。
 - `npm pack`：37 个文件，217.2 kB（解包 731.5 kB），含 `src/runtime/notify.js`，不含测试。从包内加载入口：15 个工具、1 个命令注册成功，客户端可解析。
 - 换作业流程未在真实游戏中验证。未执行 git 提交、打 tag、推送或 npm 发布，留给用户执行。
+
+## 阶段 17：1.1.0 发布准备（2026-11-02）
+- issue #1（`/maa status` 回显进对话、面板不自动刷新）：DSH 每条命令都会写入 command/run + command/done，没有静默选项。插件在 `ctx.inject(['connection','webServer'])` 中用 `webServer.register` 注册前缀路由 `/dsh-maa-cli`，按 Connection RPC 线格式应答（`client-request` → `server-response`），鉴权交给 `connection.requestRejection`；客户端在 inject 中声明 `connection`，用 `connection.rpc.call('/dsh-maa-cli','status',{session})` 读取。运行中每 3 秒后台刷新；无频道时退回 `/maa status`，每会话只在首次挂载时读一次。
+- 不用 `connection.rpc.handle`：真实 DSH 主机上第三方插件调用会报 `cannot get property "webServer" without inject`（rpc.handle 用 Connection 自己的上下文访问 webServer）。最初的绝对路径 `fetch` 方案同样没有在真机上验证就交付，属失误。
+- 面板被误关闭：`readRunState` 把任何读取错误当成空记录，`mutateRunState` 还会把空记录写回。现在 ENOENT 才算空，EACCES/EBUSY/EPERM 与 JSON 解析失败重试后报错；写入只做原子 rename 并有限次重试；客户端不因一次不含当前任务的快照关闭带 runId 的运行面板。
+- 诊断：`status-rpc.json` 记录 applied → registered / register-failed / inject-failed；客户端退回命令时在控制台打印原因。
+- 真机验证：临时 `DSH_HOME` 下以 web 模板建配置、链接本仓库、启动真实 DSH 主机（假 maa-cli）：注册成功；无 cookie 401、跨站 403、带 cookie 200；在真实网页中按 rpc.call 方式请求返回 200 且 rpcId 匹配。用户桌面版重启后 `status-rpc.json` 为 registered，实测刷新不再回显、面板自动更新、结束后自动变为已结束。
+- 日志跟踪：`startLogTail().flush()` 在定时读取进行中时直接返回（`polling` 标志），任务结束时可能漏读最后的 MaaCore 回调；全量测试偶发失败暴露了它。改为共享进行中的读取 Promise，flush 先等它再读一次；新增可稳定复现的回归测试（旧代码只读到 first）。
+- 文档：README 精简并拆分到 `docs/`，新增 `README.en.md` 与 `docs/en/`。
+- Windows `npm test`：237 项，235 通过、2 跳过、0 失败，连续 4 次全过。`npm pack`：39 个文件，208.9 kB（解包 709.0 kB），含 `src/commands/status-rpc.js` 与 `README.en.md`，不含测试；从包内加载入口 15 个工具、1 个命令，并请求注入 connection/webServer，客户端可解析。
+- `package.json` 1.0.9 → 1.1.0，CHANGELOG「未发布」整理为 `1.1.0 - 2026-11-02`。
+- 未执行 git 提交、打 tag、推送或 npm 发布，留给用户执行。
