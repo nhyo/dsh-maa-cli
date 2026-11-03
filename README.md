@@ -5,6 +5,8 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/nhyo/dsh-maa-cli)
 
+简体中文 | [English](README.en.md)
+
 一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：用自然语言「一键」游玩《明日方舟》！
 
 > [!TIP]
