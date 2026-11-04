@@ -10,8 +10,9 @@ npm test   # node --test，无第三方依赖
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/index.js` | 入口：注册工具和 `/maa` 命令，串起确认与执行 |
-| `src/client/` | 面板 UI |
+| `src/index.js` | 入口：注册 status 频道，按顺序调用各工具与 `/maa` 命令的注册函数 |
+| `src/host/` | 主机侧编排：`/maa` 命令、确认流程、后台执行、停止与所有权、目标与工作流、工具注册（`tools/`） |
+| `src/client/` | 面板 UI（必须保持单文件：DSH 只加载 `exports["./client"]` 指向的一个文件） |
 | `src/capabilities/` | 从当前 MAA 版本和资源发现能力 |
 | `src/commands/` | 命令解析、任务规划、确认码、运行记录 |
 | `src/runtime/` | maa-cli 调用、私有运行时、诊断、桌面通知 |

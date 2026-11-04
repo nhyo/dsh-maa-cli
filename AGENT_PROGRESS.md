@@ -230,3 +230,30 @@
 - Windows `npm test`：237 项，235 通过、2 跳过、0 失败，连续 4 次全过。`npm pack`：39 个文件，208.9 kB（解包 709.0 kB），含 `src/commands/status-rpc.js` 与 `README.en.md`，不含测试；从包内加载入口 15 个工具、1 个命令，并请求注入 connection/webServer，客户端可解析。
 - `package.json` 1.0.9 → 1.1.0，CHANGELOG「未发布」整理为 `1.1.0 - 2026-11-02`。
 - 未执行 git 提交、打 tag、推送或 npm 发布，留给用户执行。
+
+## 阶段 18：交接文档更新、服务端拆分、黑流树海排查（2026-11-03）
+> 未修改版本号，未提交、未推送、未发布。全部在本机 Windows 上进行。
+
+### 第 8 项：交接文档
+- `AGENT_HANDOFF.md` 停留在 1.0.2（148 项测试、HEAD `3ac09e8`、「后台执行未实机验证」等），逐条对照代码与阶段 1–17 改写为当前快照：项目与环境、目录职责、能力状态四表（已实机 / 未实机 / 有意不做 / 未实现，均注明阶段号或 `RUN-…`）、已知问题、关键机制、测试与真实 DSH 验证步骤、发布要点。去掉 git HEAD、diffstat 等易过时信息。
+- 已过时并更正的条目：`STALE_MS` 是 7 小时而非 40 分钟；面板记忆覆盖所有 `/maa` 面板（v2）而非仅肉鸽；客户端经静默频道每 3 秒刷新，不再「不轮询」；堵门 / 守蓝门各存一条跨地图策略；萨米 `_collapse` 关卡是因地图数据缺失列为不支持，代码中没有专门的跳过逻辑。
+- `docs/HANDOFF.md` 是 0.9.2 时期的另一份交接记录（94 项测试），未删除未改写，开头加「已过时」提示并指向 `AGENT_HANDOFF.md`。
+- **基线更正**：阶段 17 记录的「237 项、235 通过」有误，实际为 239 项、237 通过、2 跳过（当时只看了通过数）。与阶段 17 最后一次运行逐项对比，测试列表完全一致。
+
+### 第 9 项：拆分 `src/index.js`
+- 客户端不拆：`dsh-client-modules` 每个插件只读取 `exports["./client"]` 指向的一个文件，传给 factory 的 `require` 只解析包名、不解析相对路径（源码注释提到构建期打包检查）。临时 DSH 主机实测：页面为插件加载 `plugins/??dsh-maa-cli/client.js`，内容与 `src/client/index.js` 逐字一致、只有一个模块注册。多文件需要构建步骤，按约束保持单文件。
+- 服务端：新增 `src/host/`（`execution-state`、`maa-command`、`confirm`、`run-control`、`execution`、`goal-workflow`、`plan-environment`、`formatting`、`tool-schemas`、`tools/status-tools`、`tools/planning-tools`、`tools/feature-tools`、`tools/runtime-tools`）与 `src/runtime/maa-cli.js`；`src/index.js` 从 155.5 KB 降到 2.9 KB，只保留 `name` / `inject` / `apply`、status 频道注册与重新导出。
+- 共享状态：五个 `Map` 只在 `execution-state.js`；会被重新赋值的 `let` 各自只有一个使用者，原样留在使用模块（`launchQueue` → `maa-command`，`activeStrategyExecution` → `execution`，`runtimeBootstrapPromise` → `runtime/maa-cli`，`restartRecoveryPromise` → 入口），未改任何逻辑。
+- 方法：脚本按声明名原样搬移（含上方注释），只给搬走的声明加 `export`，import 按实际用到的标识符生成。第一版脚本有两个缺陷，已在测试前由核对发现并重做：去除模板字符串的正则会吞掉两段模板之间的代码，导致漏 import；按括号计数找函数结尾会被正则字面量打乱，截断了 `classifyMaaExecution`。改为保留模板字符串、以列 0 的 `}` 判定结尾。
+- 核对：原文件每一行在新文件中恰好出现一次（仅多出 5 个注册包装函数的结尾括号）；无漏 import、无多余 import；导入图 45 个模块无循环，`src/commands`、`src/agent` 等不引用 `src/host`；拆分前后 15 个工具的完整定义（名称、说明、参数与输出 schema）、`/maa` 命令定义、入口导出集合完全一致。
+- 测试：唯一需要调整的是 `feature-tools.test.mjs` 中读取源码查找「公招提醒：」的路径（`src/index.js` → `src/host/execution.js`），断言未改。Windows `npm test`：239 项，237 通过、2 跳过、0 失败，连续 3 次。
+- 打包：`npm pack --dry-run` 53 个文件，213.5 kB（解包 718.6 kB），含全部新文件，不含测试、交接文档和 `artifacts/`；打包到临时目录并从包内加载入口：15 个工具、1 个命令，请求注入 connection / webServer，客户端可解析。仓库内未生成 tgz。
+- 真实 DSH 主机（临时 `DSH_HOME`，web 模板，假 maa-cli）：`status-rpc.json` 为 registered，主机日志无错误，频道请求 200；真实页面加载的客户端与源文件一致，样式表 `dsh-maa-cli-styles` 已注入，控制台无错误。临时 web 界面新建会话需要登录 DeepSeek，确认面板与运行面板的渲染、确认、停止**未在真实页面验证**，需用户在桌面版确认（客户端代码未改动）。
+
+### 第 11 项：黑流树海 `U1T` 难度文本（只读排查）
+- 运行时 `asst.log` 中 `Failed to convert difficulty text` 只出现 1 次：2026-10-30 15:56:46，MaaCore v6.20.1。此后没有黑流树海运行，MaaCore 已更新到 v6.21.1；`runs.json` 最近 8 条无肉鸽记录。按约定标为「未复现，需要用户实机确认」，未改代码。
+- 日志表明旧结论有误：难度 OCR 失败不致命（`Current difficulty: -1` 后照常确认、选分队、寻路）；真正的失败在 1 分 48 秒后，`NodeDispatchAction` 连续 20 次识别不到 `StageTraderInvestSystem`，`SubTaskError`（`pre_task: RoutingAction`）→ `TaskChainError`。MaaCore 确认收到的参数（BlackFlow / mode 0 / difficulty 0 / 特勤分队 / 稳扎稳打 / 机械师）都在能力层范围内，调试截图显示第一层地图已被正常识别。判断为 MaaCore 侧界面识别问题，插件不做绕过。复现步骤与需回传的日志片段写在 `AGENT_HANDOFF.md` 第 4 节。
+
+### 未实机验证
+1. 拆分后在 DSH 桌面版中完成一次「准备计划 → 确认 → 运行面板 → 停止 / 自然结束」。
+2. 黑流树海复现（见交接文档）。

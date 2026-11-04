@@ -10,8 +10,9 @@ npm test   # node --test, no third-party dependencies
 
 | Path | Responsibility |
 | --- | --- |
-| `src/index.js` | Entry: registers tools and the `/maa` command, ties confirmation to execution |
-| `src/client/` | Panel UI |
+| `src/index.js` | Entry: registers the status channel, then calls the tool and `/maa` command registrations in order |
+| `src/host/` | Host orchestration: `/maa` command, confirmation, background execution, stopping and ownership, goals and workflows, tool registration (`tools/`) |
+| `src/client/` | Panel UI (must stay a single file: DSH loads only the one file `exports["./client"]` points to) |
 | `src/capabilities/` | Discovers capabilities from the current MAA version and resources |
 | `src/commands/` | Command parsing, task planning, confirmation codes, run records |
 | `src/runtime/` | maa-cli calls, private runtime, diagnostics, desktop notifications |

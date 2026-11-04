@@ -201,7 +201,7 @@ test('recruit high-star results are reported, never auto-confirmed', async () =>
   assert.match(summarizePlan([{ type: 'Recruit', confirm: [3, 6] }]), /⚠ 6★ 也会自动确认/u)
   assert.match(summarizePlan([{ type: 'Recruit', confirm: [] }]), /只会识别、不会招募/u)
   assert.match(summarizePlan([{ type: 'Recruit', times: 0 }]), /只识别 Tag，不招募/u)
-  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/host/execution.js', import.meta.url), 'utf8')
   assert.match(source, /公招提醒：/u)
 })
 

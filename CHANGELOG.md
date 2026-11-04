@@ -1,5 +1,9 @@
 # 更新日志
 
+## 未发布
+
+- 内部：拆分 `src/index.js`（主机侧编排移到 `src/host/`），行为不变；客户端入口保持单文件。
+
 ## 1.1.0 - 2026-11-02
 
 - 修复：运行面板读取状态时，结果会作为 `/maa status` 的一行回显出现在对话里；DSH 每轮对话结束后重新挂载面板，又会再读一次，一晚上能积累十几条（[#1](https://github.com/nhyo/dsh-maa-cli/issues/1)）。现在插件在 DSH 网页服务器上注册只读频道 `/dsh-maa-cli`，按 DSH Connection RPC 协议应答，面板用 DSH 自带的 `connection.rpc.call` 读取状态，鉴权由 DSH 负责，不再写进对话记录；没有该频道的环境（headless、旧版 DSH）才退回 `/maa status`，且每个会话只读一次。插件状态目录下的 `status-rpc.json` 记录本次主机是否注册成功，便于排查。
