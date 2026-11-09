@@ -91,7 +91,9 @@ dsh plugin --profile web add dsh-maa-cli
 
 ### [辅助插件](docs/extensions.md)
 
-按需安装的扩展，不随本插件自动安装。目前有 `dsh-maa-coverocr`：把 B 站作业视频链接发给模型，它会识别视频用到的干员，并和你的 Box 比较，告诉你能不能抄，附上视频链接。用 `/maa ext install coverocr` 安装，确认后才会安装。
+按需安装的扩展，不随本插件自动安装。用 `/maa ext` 查看状态，用 `/maa ext install <id>` 安装（确认后才会安装）。
+
+- **[coverocr](https://github.com/nhyo/dsh-maa-coverocr)**（`dsh-maa-coverocr`，🧪 测试功能）：把 B 站作业视频链接发给模型，它会从标题、简介、标签、UP 主评论和封面识别视频用到的干员，并和你的 Box 比较，告诉你能不能抄（缺 1 名也算，可借助战），附上视频链接让你自己去抄。识别结果可能不全或有误，请以视频为准。
 
 ### [运行时与配置](docs/runtime.md)
 

@@ -89,6 +89,12 @@ One sentence prepares a whole chain of tasks, e.g. "Start the game, rotate base 
 - **"Is it enough?"**: "Does my depot have enough to promote Purestream to Elite 2?" is answered read-only.
 - **Farming plans**: stage selection is jointly optimized with Penguin Statistics drop rates and ArkPlanner; it farms one batch at a time, then rescans the depot and replans, so it never overfarms on expected values.
 
+### [Companion plugins](docs/extensions.md) (Chinese)
+
+Optional extensions, installed on demand and never bundled with this plugin. Check their status with `/maa ext` and install one with `/maa ext install <id>` (nothing is installed until you confirm).
+
+- **[coverocr](https://github.com/nhyo/dsh-maa-coverocr)** (`dsh-maa-coverocr`, 🧪 experimental): send Bilibili strategy-video links to the model; it reads the title, description, tags, the uploader's comments and the cover to find the operators the video uses, compares them with your Box and tells you whether you can copy it (one missing operator still counts — borrow it as support), with the video link so you can follow along yourself. Results may be incomplete or wrong; the video is the source of truth.
+
 ### [Runtime and configuration](docs/en/runtime.md)
 
 The plugin ships its own maa-cli runtime: downloaded on first use and checked for updates once a day (the panel shows progress while updating, and a failed update rolls back). It lives in its own directory, isolated from any MAA on your system, and deleting the directory uninstalls it. This page also covers environment variables, supported systems and emulators, and what the plugin will and won't do.
