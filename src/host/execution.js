@@ -302,11 +302,15 @@ export async function executeDocument(agent, signal, document, planSummary, opti
       }
       return enriched
     }
+    // The hard ceiling (6 h) is set in runWithRecovery. A structured scan needs
+    // its complete output, so it keeps the large fail-closed limit; any other
+    // task only keeps the newest output and is never killed for being chatty.
+    const structuredScan = hasOperatorBox || hasDepot
     const runOptions = {
       signal: executionSignal,
-      timeoutMs: 30 * 60_000,
-      outputLimit: hasOperatorBox || hasDepot ? 16 * 1024 * 1024 : undefined,
-      envPatch: hasOperatorBox || hasDepot ? { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } : undefined,
+      outputLimit: structuredScan ? 16 * 1024 * 1024 : undefined,
+      keepOutputTail: !structuredScan,
+      envPatch: structuredScan ? { MAA_LOG: 'info', MAA_LOG_PREFIX: 'Never' } : undefined,
     }
     const runArguments = actionArguments('run_task', GENERATED_TASK_NAME, true, strategyExecution?.userResource === true)
     const logResult = await runMaa(queryArguments('log_dir'), { signal: executionSignal, timeoutMs: 20_000 })

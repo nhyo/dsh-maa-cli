@@ -1,6 +1,6 @@
-# AGENT PROGRESS — Runtime Instructions
+# AGENT PROGRESS — dsh-maa-cli 开发历史
 
-> 更新时间：2026-10-30｜本文件记录本轮“运行时自然语言交互与动态任务控制”进度。已准备 1.0.3，未提交、未推送、未发布。
+> 按阶段记录的开发历史（阶段 1 起于 1.0.3，2026-10-30）。当前状态快照以 [`AGENT_HANDOFF.md`](AGENT_HANDOFF.md) 为准；各阶段内的“未提交 / 未发布”等描述仅代表当时状态。
 
 ## 阶段 1：现状与接口边界（已完成）
 
@@ -257,3 +257,11 @@
 ### 未实机验证
 1. 拆分后在 DSH 桌面版中完成一次「准备计划 → 确认 → 运行面板 → 停止 / 自然结束」。
 2. 黑流树海复现（见交接文档）。
+
+## 阶段 19：执行器与仓库整理（2026-11-09）
+
+- `runMaa` 改为基于 `startMaa` 实现，去掉两份重复的校验、环境注入、输出收集与退出处理。
+- 输出上限新增 `keepOutputTail` 尾部保留模式：普通后台任务超出 128 KB 时只丢弃最早输出、不再终止进程，结果带 `outputTruncated`；Box/Depot 结构化扫描仍保留 16 MB 失败即停的完整输出。删除 `execution.js` 中对 `startMaa` 无效的 `timeoutMs`。
+- `asst.log` 跟踪默认轮询间隔 100 ms → 250 ms，单次读取上限 4 MB，`flush` 会分轮读完积压。
+- `src/client/index.js` 维持单文件：宿主客户端协议（`window.__ModuleLoader__.load`）的 `require` 只解析宿主注入模块，不支持相对文件；拆分需引入打包步骤，本轮不做。
+- 删除已过时的 `docs/HANDOFF.md`（0.9.2 时期）；`.gitignore` 加入 `output/`、`tmp/`、`artifacts/`。

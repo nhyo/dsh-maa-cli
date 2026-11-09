@@ -425,3 +425,29 @@ test('a detached maa-cli task can be killed through its abort signal', async (t)
   controller.abort()
   await assert.rejects(handle.done, error => error?.name === 'AbortError')
 })
+
+test('a chatty detached task keeps only its newest output instead of being killed', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-tail-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cliPath = path.join(directory, 'chatty-maa.cmd')
+  await writeFile(cliPath, '@echo off\r\nfor /l %%i in (1,1,400) do echo line-%%i-padding-padding-padding\r\necho FINAL-SUMMARY\r\nexit /b 0\r\n')
+
+  const handle = startMaa(['run', 'Task', '--batch'], { cliPath, hardTimeoutMs: 30_000, outputLimit: 1024, keepOutputTail: true })
+  const result = await handle.done
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.outputTruncated, true)
+  assert.match(result.stdout, /FINAL-SUMMARY$/u)
+  assert.doesNotMatch(result.stdout, /line-1-padding/u)
+  assert.ok(Buffer.byteLength(result.stdout) <= 1024)
+})
+
+test('without tail mode exceeding the output limit still fails closed', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-limit-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cliPath = path.join(directory, 'chatty-maa.cmd')
+  await writeFile(cliPath, '@echo off\r\nfor /l %%i in (1,1,400) do echo line-%%i-padding-padding-padding\r\nexit /b 0\r\n')
+
+  const handle = startMaa(['run', 'Task', '--batch'], { cliPath, hardTimeoutMs: 30_000, outputLimit: 1024 })
+  await assert.rejects(handle.done, /output exceeded 1024 bytes/u)
+  await assert.rejects(runMaa(['version'], { cliPath, outputLimit: 1024 }), /output exceeded 1024 bytes/u)
+})

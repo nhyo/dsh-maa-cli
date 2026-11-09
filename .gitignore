@@ -4,3 +4,8 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+
+# Local scratch / build output
+output/
+tmp/
+artifacts/

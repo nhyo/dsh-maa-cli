@@ -77,14 +77,41 @@ export function actionArguments(action, taskName, batch = false, userResource = 
   return ['run', taskName, ...(userResource ? ['--user-resource'] : []), ...(batch ? ['--batch'] : [])]
 }
 
+/**
+ * Run a maa-cli query or short action and wait for it.
+ *
+ * Same validation, environment and process-tree termination rules as
+ * `startMaa`; `timeoutMs` (default 30 s) becomes the hard ceiling.
+ */
 export async function runMaa(args, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('timeoutMs must be positive')
+  const { timeoutMs: _ignored, ...rest } = options
+  return await startMaa(args, { ...rest, hardTimeoutMs: timeoutMs }).done
+}
+
+/**
+ * Start a maa-cli process without waiting for it.
+ *
+ * A long task (`maa run task --batch`) can take far longer than a command-plane
+ * call is allowed to live, so the caller starts it here, returns to the user
+ * immediately and settles the run record from the returned `done` promise.
+ *
+ * `outputLimit` caps the bytes kept from stdout + stderr. By default exceeding
+ * it terminates the process (a structured scan needs its complete output).
+ * With `keepOutputTail: true` the oldest output is dropped instead and the
+ * process keeps running: a multi-hour task must not be killed for being
+ * chatty. The result then reports `outputTruncated: true`.
+ */
+export function startMaa(args, options = {}) {
   if (!Array.isArray(args) || args.length === 0 || args.some(arg => !/^[A-Za-z0-9._-]+$/.test(arg))) {
     throw new TypeError('maa-cli arguments must come from the validated command map')
   }
-  const timeoutMs = options.timeoutMs ?? 30_000
+  const hardTimeoutMs = options.hardTimeoutMs ?? 6 * 60 * 60_000
   const outputLimit = options.outputLimit ?? 131_072
+  const keepOutputTail = options.keepOutputTail === true
   const signal = options.signal
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('timeoutMs must be positive')
+  if (!Number.isFinite(hardTimeoutMs) || hardTimeoutMs <= 0) throw new TypeError('hardTimeoutMs must be positive')
   if (!Number.isFinite(outputLimit) || outputLimit <= 0) throw new TypeError('outputLimit must be positive')
   if (signal?.aborted) throw abortError()
 
@@ -99,90 +126,10 @@ export async function runMaa(args, options = {}) {
   }
   Object.assign(childEnv, options.envPatch ?? {})
 
-  return await new Promise((resolve, reject) => {
-    const child = spawnMaaProcess(cliPath, args, command, commandProcessor, childEnv)
-    const stdout = []
-    const stderr = []
-    let outputBytes = 0
-    let state = 'running'
-
-    const stop = nextState => {
-      if (state !== 'running') return
-      state = nextState
-      void terminateProcessTree(child)
-    }
-    const onAbort = () => stop('aborted')
-    signal?.addEventListener('abort', onAbort, { once: true })
-    const timer = setTimeout(() => stop('timed-out'), timeoutMs)
-
-    const collect = destination => chunk => {
-      outputBytes += chunk.length
-      if (outputBytes > outputLimit) {
-        stop('output-limit')
-        return
-      }
-      destination.push(chunk)
-    }
-    child.stdout.on('data', collect(stdout))
-    child.stderr.on('data', collect(stderr))
-
-    child.on('error', error => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-      reject(error)
-    })
-    child.on('close', (code, terminationSignal) => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-      if (state === 'aborted') return reject(abortError())
-      if (state === 'timed-out') return reject(new Error(`maa-cli timed out after ${timeoutMs} ms`))
-      if (state === 'output-limit') return reject(new Error(`maa-cli output exceeded ${outputLimit} bytes`))
-      resolve({
-        command: `${cliPath} ${args.join(' ')}`,
-        exitCode: typeof code === 'number' ? code : -1,
-        terminationSignal: terminationSignal ?? '',
-        stdout: Buffer.concat(stdout).toString('utf8').trimEnd(),
-        stderr: Buffer.concat(stderr).toString('utf8').trimEnd(),
-      })
-    })
-  })
-}
-
-/**
- * Start a maa-cli process without waiting for it.
- *
- * A long task (`maa run task --batch`) can take far longer than a command-plane
- * call is allowed to live, so the caller starts it here, returns to the user
- * immediately and settles the run record from the returned `done` promise.
- * The returned handle keeps the same validation, output limits and process-tree
- * termination rules as `runMaa`.
- */
-export function startMaa(args, options = {}) {
-  if (!Array.isArray(args) || args.length === 0 || args.some(arg => !/^[A-Za-z0-9._-]+$/.test(arg))) {
-    throw new TypeError('maa-cli arguments must come from the validated command map')
-  }
-  const hardTimeoutMs = options.hardTimeoutMs ?? 6 * 60 * 60_000
-  const outputLimit = options.outputLimit ?? 131_072
-  const signal = options.signal
-  if (!Number.isFinite(outputLimit) || outputLimit <= 0) throw new TypeError('outputLimit must be positive')
-  if (signal?.aborted) throw abortError()
-
-  const cliPath = options.cliPath ?? resolveMaaCliPath()
-  const command = `call "${cliPath}" ${args.join(' ')}`
-  const commandProcessor = process.env.ComSpec || String.raw`C:\Windows\System32\cmd.exe`
-  const childEnv = { ...(options.env ?? process.env) }
-  if (options.env === undefined && isRuntimePath(cliPath)) {
-    Object.assign(childEnv, runtimeEnvironment(runtimeLayout()))
-  }
-  Object.assign(childEnv, options.envPatch ?? {})
-
   const child = spawnMaaProcess(cliPath, args, command, commandProcessor, childEnv)
-  const stdout = []
-  const stderr = []
-  let outputBytes = 0
+  const output = createOutputBuffer(outputLimit, keepOutputTail)
   let state = 'running'
   let exited = false
-  let lastKill = null
 
   // The first stop decides how the run is reported (aborted / timed out). A
   // repeated stop re-issues the tree kill: if the first attempt could not
@@ -190,23 +137,19 @@ export function startMaa(args, options = {}) {
   const stop = nextState => {
     if (exited) return Promise.resolve({ ok: true, exited: true, detail: '进程已经退出。' })
     if (state === 'running') state = nextState
-    lastKill = terminateProcessTree(child)
-    return lastKill
+    return terminateProcessTree(child)
   }
   const onAbort = () => { void stop('aborted') }
   signal?.addEventListener('abort', onAbort, { once: true })
   const timer = setTimeout(() => { void stop('timed-out') }, hardTimeoutMs)
 
-  const collect = destination => chunk => {
-    outputBytes += chunk.length
-    if (outputBytes > outputLimit) {
-      stop('output-limit')
-      return
-    }
-    destination.push(chunk)
+  const collect = stream => chunk => {
+    // Once stopping, later chunks are dropped without issuing another kill.
+    if (state !== 'running') return
+    if (!output.push(stream, chunk)) void stop('output-limit')
   }
-  child.stdout.on('data', collect(stdout))
-  child.stderr.on('data', collect(stderr))
+  child.stdout.on('data', collect('stdout'))
+  child.stderr.on('data', collect('stderr'))
 
   const done = new Promise((resolve, reject) => {
     child.on('error', error => {
@@ -221,12 +164,14 @@ export function startMaa(args, options = {}) {
       if (state === 'aborted') return reject(abortError())
       if (state === 'timed-out') return reject(new Error(`maa-cli timed out after ${hardTimeoutMs} ms`))
       if (state === 'output-limit') return reject(new Error(`maa-cli output exceeded ${outputLimit} bytes`))
+      const { stdout, stderr, truncated } = output.result()
       resolve({
         command: `${cliPath} ${args.join(' ')}`,
         exitCode: typeof code === 'number' ? code : -1,
         terminationSignal: terminationSignal ?? '',
-        stdout: Buffer.concat(stdout).toString('utf8').trimEnd(),
-        stderr: Buffer.concat(stderr).toString('utf8').trimEnd(),
+        stdout,
+        stderr,
+        ...(keepOutputTail ? { outputTruncated: truncated } : {}),
       })
     })
   })
@@ -238,6 +183,39 @@ export function startMaa(args, options = {}) {
     done,
     kill: () => stop('aborted'),
     get exited() { return exited },
+  }
+}
+
+// Bytes from both streams share one budget, in arrival order. In tail mode the
+// oldest bytes are discarded (possibly mid-chunk) so the newest `limit` bytes
+// survive; otherwise `push` returns false once the budget is exceeded.
+function createOutputBuffer(limit, keepTail) {
+  const entries = []
+  let bytes = 0
+  let truncated = false
+  return {
+    push(stream, chunk) {
+      if (!keepTail && bytes + chunk.length > limit) return false
+      entries.push({ stream, chunk })
+      bytes += chunk.length
+      while (keepTail && bytes > limit) {
+        truncated = true
+        const excess = bytes - limit
+        const first = entries[0]
+        if (first.chunk.length <= excess) {
+          entries.shift()
+          bytes -= first.chunk.length
+        } else {
+          first.chunk = first.chunk.subarray(excess)
+          bytes -= excess
+        }
+      }
+      return true
+    },
+    result() {
+      const pick = stream => Buffer.concat(entries.filter(entry => entry.stream === stream).map(entry => entry.chunk)).toString('utf8').trimEnd()
+      return { stdout: pick('stdout'), stderr: pick('stderr'), truncated }
+    },
   }
 }
 

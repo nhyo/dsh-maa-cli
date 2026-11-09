@@ -37,7 +37,7 @@ DSH Desktop 插件：用自然语言或零模型的 `/maa` 命令准备《明日
 | `src/agent/` | 目标、工作流、养成数据与掉率、联网请求、故障诊断与恢复决策 |
 | `src/strategy/` | 策略编译与原子记忆、肉鸽资源覆盖、Copilot 生成、基建排班、作业站客户端 |
 | `test/` | 全部测试；`fixtures/fake-maa.mjs` 充当 maa-cli，`fixtures/dsh-host.mjs` 充当 DSH 主机，`helpers/mini-react.mjs` 渲染真实客户端 |
-| `docs/` | 用户文档（中文）与 `docs/en/`（英文）；`docs/HANDOFF.md` 是 0.9.2 时代的旧交接记录，已过时 |
+| `docs/` | 用户文档（中文）与 `docs/en/`（英文） |
 | `artifacts/` | 本地旧打包文件，不随 npm 发布 |
 
 ## 3. 能力状态

@@ -200,12 +200,17 @@ export function parseMaaCallbackLine(line) {
   }
 }
 
+const LOG_TAIL_INTERVAL_MS = 250
+const LOG_TAIL_MAX_READ_BYTES = 4 * 1024 * 1024
+
 export async function startLogTail(file, onLine, options = {}) {
   let offset = await fileSize(file)
   let carry = ''
   let stopped = false
   let inFlight = null
-  const intervalMs = options.intervalMs ?? 100
+  // Callbacks only drive stop conditions and progress, which need no
+  // sub-second latency; a multi-hour run should not stat the log 10× a second.
+  const intervalMs = options.intervalMs ?? LOG_TAIL_INTERVAL_MS
   const poll = () => {
     if (stopped) return Promise.resolve()
     // One read at a time; a timer tick during a read simply joins it.
@@ -219,7 +224,8 @@ export async function startLogTail(file, onLine, options = {}) {
       if (size <= offset) return
       const handle = await open(file, 'r')
       try {
-        const buffer = Buffer.alloc(size - offset)
+        // Bounded per read; a larger backlog is drained over the next polls.
+        const buffer = Buffer.alloc(Math.min(size - offset, LOG_TAIL_MAX_READ_BYTES))
         const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
         offset += bytesRead
         const text = carry + buffer.subarray(0, bytesRead).toString('utf8')
@@ -242,7 +248,11 @@ export async function startLogTail(file, onLine, options = {}) {
     // (the final MaaCore callbacks of a run arrive right before this).
     async flush() {
       if (inFlight !== null) await inFlight
-      await poll()
+      // Reads are bounded, so drain until caught up (bounded rounds).
+      for (let round = 0; round < 64; round += 1) {
+        await poll()
+        if (stopped || await fileSize(file) <= offset) break
+      }
     },
   }
 }
