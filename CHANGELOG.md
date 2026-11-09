@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- 新增：辅助插件机制（`src/extensions/`）。`/maa ext` 查看辅助插件状态；`/maa ext install <id>` 先预览安装操作，加 `confirm` 后才安装到当前 DSH 配置并登记到 `dsh.profile.bundles`。详见 [docs/extensions.md](docs/extensions.md)。
+- 新增：`maa_video_lineup` 工具。需要辅助插件 `dsh-maa-coverocr`：读取 B 站作业视频的标题、简介、标签、UP 主评论，并识别封面，再和干员 Box 比较；只看是否拥有，缺 1 名也算可抄（借助战），结果附视频链接。未安装辅助插件时只提示安装，不会自行访问 B 站。
 - 内部：拆分 `src/index.js`（主机侧编排移到 `src/host/`），行为不变；客户端入口保持单文件。
 - 修复：长时间运行的后台任务（如肉鸽多局）输出超过 128 KB 时会被当作异常直接终止。现在普通任务只保留最新的输出、继续运行；干员 Box / 仓库扫描仍需要完整输出，保持原有上限。
 - 内部：`runMaa` 改为基于 `startMaa` 实现；`asst.log` 跟踪轮询间隔调整为 250 ms，单次读取有上限。

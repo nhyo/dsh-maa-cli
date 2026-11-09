@@ -5,6 +5,7 @@ import { registerStatusTools } from './host/tools/status-tools.js'
 import { registerPlanningTools } from './host/tools/planning-tools.js'
 import { registerFeatureTools } from './host/tools/feature-tools.js'
 import { registerRuntimeTools } from './host/tools/runtime-tools.js'
+import { registerExtensionTools } from './host/tools/extension-tools.js'
 
 export const name = 'maa-cli-tools'
 export const inject = ['tools', 'commands']
@@ -48,6 +49,7 @@ export function apply(ctx) {
   registerPlanningTools(ctx)
   registerFeatureTools(ctx)
   registerRuntimeTools(ctx)
+  registerExtensionTools(ctx)
 }
 
 // Kept importable from the entry for existing callers and tests.

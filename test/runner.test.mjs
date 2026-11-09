@@ -32,7 +32,7 @@ test('registers a zero-token command plus prepare-only model tools', () => {
     commands: { register: command => commands.push(command) },
   })
   assert.deepEqual(commands.map(command => command.name), ['maa'])
-  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_runtime_instruction', 'maa_operator_box', 'maa_depot', 'maa_goal_manager', 'maa_workflow_manager', 'maa_training_advice', 'maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note', 'maa_stage_schedule', 'maa_prepare_infrast', 'maa_copilot', 'maa_doctor', 'maa_runtime'])
+  assert.deepEqual(tools.map(tool => tool.name), ['maa_query', 'maa_runtime_instruction', 'maa_operator_box', 'maa_depot', 'maa_goal_manager', 'maa_workflow_manager', 'maa_training_advice', 'maa_prepare_plan', 'maa_prepare_strategy', 'maa_prepare_note', 'maa_stage_schedule', 'maa_prepare_infrast', 'maa_copilot', 'maa_doctor', 'maa_runtime', 'maa_video_lineup'])
   assert.deepEqual(tools[0].parameters.required, ['operation'])
   assert.deepEqual(tools[1].parameters.required, ['action'])
   assert.deepEqual(tools[6].parameters.required, ['useCached'])
