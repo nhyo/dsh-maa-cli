@@ -15,7 +15,7 @@ import { deleteStrategyMemory, listStrategyMemory, setStrategyMemoryEnabled } fr
 import { confirmPlan } from './confirm.js'
 import { buildTaskDocument, summarizePlan } from '../commands/planner.js'
 import { executeDocument } from './execution.js'
-import { describeExtensions, installExtension, previewInstall } from '../extensions/host.js'
+import { describeExtensions, installExtension } from '../extensions/host.js'
 
 let launchQueue = Promise.resolve()
 
@@ -30,9 +30,8 @@ export function registerMaaCommand(ctx) {
         const parsed = parseLocalMaaCommand(rawInput)
         if (parsed.kind === 'help') return { kind: 'success', text: parsed.text }
         if (parsed.kind === 'ext-list') return { kind: 'success', text: describeExtensions(ctx) }
-        // Installing changes the user's DSH profile and downloads a package, so
-        // the first command only previews; the user confirms with a second one.
-        if (parsed.kind === 'ext-install') return parsed.confirmed ? await installExtension(ctx, parsed.id, { signal }) : previewInstall(ctx, parsed.id)
+        // The user typed the install command themselves: install right away.
+        if (parsed.kind === 'ext-install') return await installExtension(ctx, parsed.id, { signal })
         if (parsed.kind === 'setup') {
           const steps = []
           await bootstrapRuntime({

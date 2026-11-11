@@ -59,6 +59,8 @@ function mutatePanelMemory(env, mutate) {
 
 export function panelMemoryKey(panel, theme = panel?.values?.theme) {
   if (!panel || !Array.isArray(panel.fields) || panel.fields.length === 0) return ''
+  // A multi-step plan is remembered step by step (see rememberConfirmedPanel).
+  if (panel.type === 'Plan') return ''
   if (panel.type === 'Roguelike') return typeof theme === 'string' && theme !== '' ? `Roguelike:${theme}` : ''
   return typeof panel.type === 'string' && panel.type !== '' ? `Panel:${panel.type}` : ''
 }
@@ -182,7 +184,7 @@ function availableThemes(panel) {
 
 /** Overlay history on defaults, while preserving parameters explicit in this command. */
 export async function applyRememberedConfig(panel, options = {}) {
-  if (!panel || !Array.isArray(panel.fields) || panel.fields.length === 0) return panel
+  if (!panel || !Array.isArray(panel.fields) || panel.fields.length === 0 || panel.type === 'Plan') return panel
   const memory = await readPanelMemory(options.env ?? process.env)
   const explicitKeys = new Set(Array.isArray(options.explicitKeys) ? options.explicitKeys : [])
   let values = { ...panel.values }

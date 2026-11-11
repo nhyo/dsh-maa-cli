@@ -278,7 +278,15 @@ function stepDetail(task) {
 
 export function taskPanelFromDocument(document, capabilities = fallbackCapabilities(), context = {}) {
   const tasks = isObject(document) && Array.isArray(document.tasks) ? document.tasks : []
-  const onlyDataTasks = tasks.length > 0 && tasks.every(task => task && (task.type === 'OperBox' || task.type === 'Depot'))
+  if (tasks.length > 1 && !tasks.every(isDataTask)) return planPanel(document, capabilities, context)
+  return singleTaskPanel(document, capabilities, context)
+}
+
+function isDataTask(task) { return Boolean(task) && (task.type === 'OperBox' || task.type === 'Depot') }
+
+function singleTaskPanel(document, capabilities, context) {
+  const tasks = isObject(document) && Array.isArray(document.tasks) ? document.tasks : []
+  const onlyDataTasks = tasks.length > 0 && tasks.every(isDataTask)
   if (onlyDataTasks) {
     const definition = PANELS.UserDataUpdate
     return {
@@ -304,6 +312,95 @@ export function taskPanelFromDocument(document, capabilities = fallbackCapabilit
     notes: clone(definition.notes ?? []),
     values: valuesFromTask(task.type, params, context),
   }
+}
+
+// Several steps (e.g. 开始唤醒 → 自动肉鸽): every step keeps its own panel.
+// The steps' fields are flattened into one field list with a `s<index>.`
+// prefix, so the client's generic visibility / confirm-line code works
+// unchanged, and `steps` tells it how to group them. Steps without a panel
+// (Copilot, Custom ...) stay read-only. The roguelike note is plan-wide and
+// keeps its plain `note` key.
+const STEP_PREFIX = /^s(\d{1,2})\.(.+)$/u
+
+function stepKey(index, key) { return `s${index}.${key}` }
+
+function prefixWhen(when, index) {
+  if (!isObject(when)) return when
+  const result = { ...when }
+  if (Array.isArray(when.all)) result.all = when.all.map(item => prefixWhen(item, index))
+  if (Array.isArray(when.any)) result.any = when.any.map(item => prefixWhen(item, index))
+  if (typeof when.key === 'string') result.key = stepKey(index, when.key)
+  return result
+}
+
+function prefixPatch(patch, index) {
+  return Object.fromEntries(Object.entries(patch).map(([key, value]) => [stepKey(index, key), value]))
+}
+
+function prefixField(item, index) {
+  const result = { ...clone(item), key: stepKey(index, item.key), step: index }
+  if (item.when) result.when = prefixWhen(item.when, index)
+  if (Array.isArray(item.options)) {
+    result.options = item.options.map(entry => ({
+      ...entry,
+      ...(entry.when ? { when: prefixWhen(entry.when, index) } : {}),
+      ...(isObject(entry.patch) ? { patch: prefixPatch(entry.patch, index) } : {}),
+    }))
+  }
+  return result
+}
+
+function stepTitle(task) {
+  return PANELS[task?.type]?.title ?? STEP_LABELS[task?.type] ?? String(task?.type ?? '未知任务')
+}
+
+function planPanel(document, capabilities, context) {
+  const tasks = document.tasks
+  const steps = []
+  const fields = []
+  const notes = []
+  const values = {}
+  let signature = ''
+  tasks.forEach((task, index) => {
+    const panel = singleTaskPanel({ ...document, tasks: [task] }, capabilities, context)
+    const editable = Boolean(panel) && Array.isArray(panel.fields) && panel.fields.length > 0
+    steps.push({ index, type: String(task?.type ?? ''), title: panel?.title ?? stepTitle(task), editable, detail: editable ? '' : stepDetail(task).replace(/^：/u, '') })
+    if (!editable) return
+    if (panel.capabilitySignature) signature = panel.capabilitySignature
+    for (const item of panel.fields) fields.push(prefixField(item, index))
+    for (const item of panel.notes ?? []) notes.push({ ...item, step: index, ...(item.when ? { when: prefixWhen(item.when, index) } : {}) })
+    for (const [key, value] of Object.entries(panel.values ?? {})) {
+      if (key === 'note') { values.note = value; continue }
+      values[stepKey(index, key)] = clone(value)
+    }
+  })
+  if (fields.length === 0) return null
+  return {
+    type: 'Plan', title: `MAA 计划（${tasks.length} 步）`, steps, fields, notes, values,
+    ...(signature ? { capabilitySignature: signature, capabilitySource: capabilities?.source ?? 'adapter' } : {}),
+  }
+}
+
+function applyPlanOverrides(document, panel, overrides, capabilities, context) {
+  const byStep = new Map()
+  for (const [key, raw] of Object.entries(overrides)) {
+    const match = key.match(STEP_PREFIX)
+    const step = match ? panel.steps.find(item => item.index === Number(match[1])) : null
+    if (!step || !step.editable) throw new Error(`当前计划面板不支持参数：${key}`)
+    if (!byStep.has(step.index)) byStep.set(step.index, {})
+    byStep.get(step.index)[match[2]] = raw
+  }
+  const tasks = []
+  const applied = []
+  document.tasks.forEach((task, index) => {
+    const stepOverrides = byStep.get(index)
+    if (!stepOverrides) { tasks.push(task); return }
+    const patched = applyTaskPanelOverrides({ ...document, tasks: [task] }, stepOverrides, capabilities, context)
+    tasks.push(...patched.document.tasks)
+    const title = panel.steps.find(item => item.index === index)?.title ?? stepTitle(task)
+    for (const entry of patched.applied) applied.push(`第 ${index + 1} 步${title}：${entry}`)
+  })
+  return { document: { ...document, tasks }, applied }
 }
 
 function decoded(raw, label) {
@@ -364,6 +461,7 @@ export function applyTaskPanelOverrides(document, overrides, capabilities = fall
   const panel = taskPanelFromDocument(document, capabilities, context)
   if (!panel) throw new Error('当前计划没有可编辑的 MAA 参数面板。')
   const normalizedOverrides = applyUnset(panel, overrides)
+  if (panel.type === 'Plan') return applyPlanOverrides(document, panel, normalizedOverrides, capabilities, context)
   if (panel.type === 'Roguelike') return applyRoguelikeOverrides(document, normalizedOverrides, capabilities)
   const definition = PANELS[panel.type]
   const fields = new Map(definition.fields.map(item => [item.key, item]))

@@ -27,7 +27,7 @@ const HELP = [
   '/maa strategies          查看策略记忆；strategy-enable / disable / delete <id> 管理条目',
   '/maa setup        安装本机 MAA 运行时（首次使用）',
   '/maa ext          查看辅助插件（如 B 站视频作业阵容识别）的安装状态',
-  '/maa ext install <id>  安装辅助插件：先显示要执行的操作，再输入 /maa ext install <id> confirm 确认',
+  '/maa ext install <id>  直接下载并安装辅助插件到当前 DSH 配置',
   '',
   '所有项目都必须在面板点击「确认并执行 MAA」后才会运行。',
 ].join('\n')
@@ -72,7 +72,8 @@ export function parseLocalMaaCommand(rawInput) {
   if (/^(?:strategies|策略记忆|策略库)$/iu.test(input)) return { kind: 'strategies' }
   if (/^(?:ext|extensions|辅助插件)$/iu.test(input)) return { kind: 'ext-list' }
   const extInstall = input.match(/^(?:ext|extensions|辅助插件)\s+(?:install|安装)\s+([A-Za-z0-9._-]{1,64})(?:\s+(confirm|确认))?$/iu)
-  if (extInstall) return { kind: 'ext-install', id: extInstall[1].toLowerCase(), confirmed: extInstall[2] !== undefined }
+  // A trailing confirm (the old two-step form) is still accepted and ignored.
+  if (extInstall) return { kind: 'ext-install', id: extInstall[1].toLowerCase() }
   const strategyAction = input.match(/^(strategy-enable|strategy-disable|strategy-delete)\s+([0-9a-f-]{36})$/iu)
   if (strategyAction) return { kind: strategyAction[1].toLowerCase(), id: strategyAction[2].toLowerCase() }
   const confirm = input.match(/^confirm\s+(MAA-[A-F0-9]{6})(?:\s+(.+))?$/iu)

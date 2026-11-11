@@ -4,6 +4,10 @@
 
 - 新增：辅助插件机制（`src/extensions/`）。`/maa ext` 查看辅助插件状态；`/maa ext install <id>` 先预览安装操作，加 `confirm` 后才安装到当前 DSH 配置并登记到 `dsh.profile.bundles`。详见 [docs/extensions.md](docs/extensions.md)。
 - 新增：`maa_video_lineup` 工具。需要辅助插件 `dsh-maa-coverocr`：读取 B 站作业视频的标题、简介、标签、UP 主评论，并识别封面，再和干员 Box 比较；只看是否拥有，缺 1 名也算可抄（借助战），结果附视频链接。未安装辅助插件时只提示安装，不会自行访问 B 站。
+- 修复：多步计划（如「开始唤醒 → 自动肉鸽」）的确认面板只显示只读步骤列表，任何一步都改不了参数。现在每一步各有一个可折叠的参数区，点开即可单独修改，确认时参数只作用到对应步骤；没有可调参数的步骤照常显示它要做什么。确认成功后，每一步的设置也像单项面板一样被记住。
+- 变更：运行面板去掉自由文本输入框，改为从下拉框选择可用的运行时指令（这把肉鸽打完就停、这次 Boss 关前停止、第 N 层 Boss 前停止、再打 N 局就停、取消停止要求、现在打到哪里了）；停止条件只在肉鸽任务里出现。
+- 变更：`/maa ext install <id>` 不再需要二次确认，直接下载安装；旧写法 `… confirm` 仍可用。
+- 修复：`/maa ext install coverocr` 在 DSH 自带的 pnpm 11 下失败（`ERR_PNPM_IGNORED_BUILDS`）：pnpm 11 默认不允许依赖运行安装脚本，而 onnxruntime-node 带有一个只用于下载 Linux CUDA 运行库的脚本。现在安装时明确拒绝该脚本（`--allow-build=!onnxruntime-node`），并记录到配置的 `pnpm-workspace.yaml`，之后在同一配置里安装其他插件也不会再被它卡住。CPU 运行库随包自带，不受影响。
 - 内部：拆分 `src/index.js`（主机侧编排移到 `src/host/`），行为不变；客户端入口保持单文件。
 - 修复：长时间运行的后台任务（如肉鸽多局）输出超过 128 KB 时会被当作异常直接终止。现在普通任务只保留最新的输出、继续运行；干员 Box / 仓库扫描仍需要完整输出，保持原有上限。
 - 内部：`runMaa` 改为基于 `startMaa` 实现；`asst.log` 跟踪轮询间隔调整为 250 ms，单次读取有上限。

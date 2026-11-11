@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { EXTENSIONS, extensionInstallSpec, findExtension } from './registry.js'
+import { EXTENSIONS, extensionInstallArgs, extensionInstallSpec, findExtension } from './registry.js'
 
 const INSTALL_TIMEOUT_MS = 15 * 60_000
 const OUTPUT_TAIL_BYTES = 4096
@@ -71,46 +71,29 @@ export function describeExtensions(ctx) {
     lines.push(`  ${entry.title}：${entry.description}`)
     if (status.detail) lines.push(`  ${status.detail}`)
   }
-  lines.push('', '安装：/maa ext install <id>（会先显示要执行的操作，确认后才安装）')
+  lines.push('', '安装：/maa ext install <id>（直接下载并安装到当前 DSH 配置）')
   return lines.join('\n')
 }
 
-export function previewInstall(ctx, id, env = process.env) {
-  const entry = requireEntry(id)
-  const profile = activeProfile(ctx)
-  const spec = extensionInstallSpec(entry, env)
-  const status = extensionStatus(ctx, entry, profile)
-  if (status.state === 'ready') return { kind: 'success', text: `${entry.packageName} 已安装并启用，无需重复安装。` }
-  const manual = `dsh plugin --profile ${profile?.name ?? '<配置名>'} add ${spec}`
-  if (profile === null || profile.packageManager === null) {
-    return { kind: 'error', text: `无法确认当前 DSH 配置或它的包管理器，不会自动安装。请手动运行：\n${manual}\n然后把 ${entry.packageName} 加入该配置 package.json 的 dsh.profile.bundles，再完全退出并重新打开 DSH。` }
-  }
-  return {
-    kind: 'success',
-    text: [
-      `将安装辅助插件 ${entry.packageName}（${entry.title}）：`,
-      `- 安装来源：${spec}`,
-      `- 安装到 DSH 配置「${profile.name}」：${profile.dir}`,
-      `- 下载体积：${entry.size}`,
-      `- 同时把它加入该配置的 dsh.profile.bundles，DSH 才会加载它`,
-      `- 等同于手动运行：${manual}`,
-      '',
-      `确认安装请输入：/maa ext install ${entry.id} confirm`,
-    ].join('\n'),
-  }
+function manualInstall(entry, spec, profile) {
+  const manual = `dsh plugin --profile ${profile?.name ?? '<配置名>'} ${extensionInstallArgs(entry, spec).join(' ')}`
+  return { kind: 'error', text: `无法确认当前 DSH 配置或它的包管理器，不会自动安装。请手动运行：
+${manual}
+然后把 ${entry.packageName} 加入该配置 package.json 的 dsh.profile.bundles，再完全退出并重新打开 DSH。` }
 }
 
 export async function installExtension(ctx, id, options = {}) {
   const entry = requireEntry(id)
   const env = options.env ?? process.env
   const profile = activeProfile(ctx)
-  if (profile === null || profile.packageManager === null) return previewInstall(ctx, id, env)
   const spec = extensionInstallSpec(entry, env)
+  if (extensionStatus(ctx, entry, profile).state === 'ready') return { kind: 'success', text: `${entry.packageName} 已安装并启用，无需重复安装。` }
+  if (profile === null || profile.packageManager === null) return manualInstall(entry, spec, profile)
   if (!SAFE_SPEC.test(spec)) return { kind: 'error', text: `安装来源格式不安全，已拒绝：${spec}` }
   const manifestFile = path.join(profile.dir, 'package.json')
   if (!existsSync(manifestFile)) return { kind: 'error', text: `当前 DSH 配置目录里没有 package.json：${profile.dir}` }
 
-  const result = await runPackageManager(profile, ['add', spec], { ...options, timeoutMs: options.timeoutMs ?? INSTALL_TIMEOUT_MS })
+  const result = await runPackageManager(profile, extensionInstallArgs(entry, spec), { ...options, timeoutMs: options.timeoutMs ?? INSTALL_TIMEOUT_MS })
   const installed = existsSync(path.join(profile.dir, 'node_modules', entry.packageName, 'package.json'))
   if (result.exitCode !== 0 || !installed) {
     return { kind: 'error', text: `安装 ${entry.packageName} 失败（退出码 ${result.exitCode}${result.timedOut ? '，超时' : ''}）：\n${result.output || '没有输出'}` }
@@ -124,7 +107,7 @@ export async function installExtension(ctx, id, options = {}) {
   return {
     kind: 'success',
     text: [
-      `已安装辅助插件 ${entry.packageName}${bundleAdded ? '，并加入当前配置的 dsh.profile.bundles' : '（dsh.profile.bundles 中已存在）'}。`,
+      `已下载并安装辅助插件 ${entry.packageName}（${entry.title}，安装到 DSH 配置「${profile.name}」）${bundleAdded ? '，并加入当前配置的 dsh.profile.bundles' : '（dsh.profile.bundles 中已存在）'}。`,
       'DSH 通常会在几秒内自动加载新插件；若 /maa ext 仍显示「已安装，待重启 DSH」，请完全退出 DSH（包括托盘图标）后重新打开。',
     ].join('\n'),
   }

@@ -20,6 +20,10 @@ window.__ModuleLoader__.load({
       '.maa-plan-state{font-size:12px;color:var(--dsw-alias-label-secondary)}',
       '.maa-note-input{flex:1 1 220px;min-width:0;height:30px;box-sizing:border-box;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}',
       '.maa-note-input:disabled{opacity:.55;cursor:default}',
+      '.maa-runtime-select{flex:1 1 200px}',
+      '.maa-runtime-count{flex:0 0 auto;gap:6px}',
+      '.maa-runtime-count .maa-rogue-control{width:80px;flex:0 0 80px}',
+      '.maa-plan-step{margin-top:6px}',
       '.maa-note-preview{width:100%;margin-top:8px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px}',
       '.maa-note-preview-title{font-weight:600;margin-bottom:4px}',
       '.maa-note-preview-list{margin:4px 0 0;padding-left:18px}',
@@ -173,6 +177,22 @@ window.__ModuleLoader__.load({
           || (panel.preferenceVariants && panel.preferenceVariants[params.theme])
         if (restored) nextParams = Object.assign({}, params, restored, { theme: params.theme })
       }
+      // Multi-step plan: the same per-theme drafts, for each roguelike step's
+      // `s<index>.` keys.
+      if (panel && panel.type === 'Plan' && Array.isArray(panel.steps) && previous && params) {
+        panel.steps.forEach(function (step) {
+          if (step.type !== 'Roguelike' || !step.editable) return
+          const prefix = 's' + step.index + '.'
+          const before = previous[prefix + 'theme']
+          const after = nextParams[prefix + 'theme']
+          if (before === after) return
+          const own = {}
+          Object.keys(previous).forEach(function (key) { if (key.indexOf(prefix) === 0) own[key] = previous[key] })
+          nextDrafts = Object.assign({}, nextDrafts, { [prefix + before]: own })
+          const restored = nextDrafts[prefix + after]
+          if (restored) nextParams = Object.assign({}, nextParams, restored, { [prefix + 'theme']: after })
+        })
+      }
       return { params: nextParams, drafts: nextDrafts }
     }
 
@@ -313,7 +333,7 @@ window.__ModuleLoader__.load({
     function createRunStore(sessionId) {
       let value = {
         run: readStoredRun(sessionId),
-        runtime: { busy: false, message: '', input: '' },
+        runtime: { busy: false, message: '', action: '', count: '' },
         collapsed: {},
         loading: false,
         historyHidden: false,
@@ -614,10 +634,36 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // The run-time instructions the host understands (runtime-instructions.js),
+    // offered as fixed choices instead of free text. "现在停止" is the stop
+    // button. Stop conditions only apply to roguelike runs.
+    const RUNTIME_ACTIONS = [
+      { id: 'stop_after_current', label: '这把肉鸽打完就停', roguelike: true, command: function () { return '这把肉鸽打完就停' } },
+      { id: 'stop_before_next_boss', label: '这次 Boss 关前停止', roguelike: true, command: function () { return '这次 Boss 关前停止' } },
+      { id: 'stop_before_boss', label: '第 N 层 Boss 前停止', roguelike: true, count: { min: 1, max: 99, initial: 5, label: '层数' }, command: function (n) { return '第' + n + '层 Boss 前停止' } },
+      { id: 'stop_after_runs', label: '再打 N 局就停', roguelike: true, count: { min: 1, max: 9999, initial: 2, label: '局数' }, command: function (n) { return '再打' + n + '局就停' } },
+      { id: 'cancel_stop', label: '取消刚才的停止要求', command: function () { return '取消刚才的停止要求' } },
+      { id: 'status', label: '现在打到哪里了', command: function () { return '现在打到哪里了' } },
+    ]
+
+    function runtimeActionsFor(record) {
+      const types = record && Array.isArray(record.taskTypes) ? record.taskTypes : []
+      const roguelike = types.length === 0 || types.indexOf('Roguelike') >= 0
+      return RUNTIME_ACTIONS.filter(function (item) { return roguelike || !item.roguelike })
+    }
+
+    function runtimeCommand(action, rawCount) {
+      if (!action) return ''
+      if (!action.count) return action.command()
+      const count = Number(rawCount === '' || rawCount === undefined ? action.count.initial : rawCount)
+      if (!Number.isInteger(count) || count < action.count.min || count > action.count.max) return ''
+      return action.command(count)
+    }
+
     function sendRuntimeInstruction(runs, plans, execute, command) {
       const state = runs.getSnapshot()
       if (typeof execute !== 'function' || state.runtime.busy || !command) return
-      runs.setRuntime({ busy: true, message: '', input: '' })
+      runs.setRuntime({ busy: true, message: '' })
       Promise.resolve(execute('/maa ' + command)).then(function (outcome) {
         runs.setRuntime({ busy: false, message: outcome && outcome.text ? outcome.text : '运行时指令没有返回结果。' })
         loadRunStatus(runs, plans, execute)
@@ -803,21 +849,46 @@ window.__ModuleLoader__.load({
           })))
       }
 
-      const basic = fields.filter(function (item) { return !item.advanced }).map(renderField).filter(Boolean)
-      const advanced = fields.filter(function (item) { return item.advanced }).map(renderField).filter(Boolean)
-      const notes = (Array.isArray(panel.notes) ? panel.notes : []).filter(function (item) {
-        return item && typeof item.text === 'string' && fieldVisible(item, value)
-      })
+      const renderBody = function (ownFields, ownNotes) {
+        const basic = ownFields.filter(function (item) { return !item.advanced }).map(renderField).filter(Boolean)
+        const advanced = ownFields.filter(function (item) { return item.advanced }).map(renderField).filter(Boolean)
+        const notes = ownNotes.filter(function (item) {
+          return item && typeof item.text === 'string' && fieldVisible(item, value)
+        })
+        return [
+          basic.length ? h('div', { className: 'maa-rogue-grid', key: 'basic' }, basic) : h('div', { className: 'maa-rogue-note', key: 'basic' }, '此项目没有可调参数。'),
+          notes.length ? h('div', { className: 'maa-task-notes', key: 'notes' }, notes.map(function (item, index) {
+            return h('div', { className: 'maa-task-note', key: String(index) }, item.text)
+          })) : null,
+          advanced.length ? h('details', { className: 'maa-rogue-advanced', key: 'advanced' },
+            h('summary', { className: 'maa-rogue-summary' }, '高级设置'),
+            h('div', { className: 'maa-rogue-grid' }, advanced)) : null,
+        ]
+      }
+      const allNotes = Array.isArray(panel.notes) ? panel.notes : []
+
+      // Multi-step plan: one collapsible section per step, each with its own
+      // fields; steps without parameters show what they will do.
+      if (panel.type === 'Plan' && Array.isArray(panel.steps)) {
+        return h('div', { className: 'maa-rogue-panel' },
+          h('div', { className: 'maa-rogue-head' }, h('span', null, panel.title + '：点击步骤修改参数')),
+          panel.steps.map(function (step) {
+            const label = (step.index + 1) + '. ' + step.title
+            if (!step.editable) {
+              return h('div', { className: 'maa-plan-step maa-rogue-note', key: 'step-' + step.index }, label + (step.detail ? '：' + step.detail : '（无可调参数）'))
+            }
+            return h('details', { className: 'maa-rogue-advanced maa-plan-step', key: 'step-' + step.index },
+              h('summary', { className: 'maa-rogue-summary' }, label),
+              renderBody(
+                fields.filter(function (item) { return item.step === step.index }),
+                allNotes.filter(function (item) { return item && item.step === step.index })))
+          }))
+      }
+
       return h('div', { className: 'maa-rogue-panel' },
         h('div', { className: 'maa-rogue-head' },
           h('span', null, panel.title + '参数')),
-        basic.length ? h('div', { className: 'maa-rogue-grid' }, basic) : h('div', { className: 'maa-rogue-note' }, '此项目没有可调参数。'),
-        notes.length ? h('div', { className: 'maa-task-notes' }, notes.map(function (item, index) {
-          return h('div', { className: 'maa-task-note', key: String(index) }, item.text)
-        })) : null,
-        advanced.length ? h('details', { className: 'maa-rogue-advanced' },
-          h('summary', { className: 'maa-rogue-summary' }, '高级设置'),
-          h('div', { className: 'maa-rogue-grid' }, advanced)) : null)
+        renderBody(fields, allNotes))
     }
 
     function MaaPlanCard(props) {
@@ -1116,25 +1187,35 @@ window.__ModuleLoader__.load({
           }, stopBusy ? '正在停止…' : '停止任务'),
           h('span', { className: 'maa-plan-state' }, stopBusy ? '正在等待进程退出并清理运行资源' : '停止会终止任务，不是可恢复的暂停'),
           h('button', { className: 'maa-secondary-button', type: 'button', disabled: runState.loading, onClick: loadRecord }, runState.loading ? '正在读取…' : '刷新状态')),
-        run.phase === 'launching' ? null : h('form', {
-          className: 'maa-plan-actions',
-          onSubmit: function (event) {
-            if (event && typeof event.preventDefault === 'function') event.preventDefault()
-            const command = String(runState.runtime.input || '').trim()
-            if (!command || runState.runtime.busy) return
-            sendRuntimeInstruction(runs, plans, execute, command)
+        run.phase === 'launching' ? null : (function () {
+          const actions = runtimeActionsFor(record)
+          const action = actions.find(function (item) { return item.id === runState.runtime.action }) || null
+          const command = runtimeCommand(action, runState.runtime.count)
+          const busy = runState.runtime.busy
+          return h('form', {
+            className: 'maa-plan-actions',
+            onSubmit: function (event) {
+              if (event && typeof event.preventDefault === 'function') event.preventDefault()
+              if (!command || busy) return
+              sendRuntimeInstruction(runs, plans, execute, command)
+            },
           },
-        },
-          h('input', {
-            className: 'maa-note-input', type: 'text', maxLength: 120,
-            placeholder: '输入运行时要求，如“再打两局就停”或“这次 Boss 关前停止”',
-            value: runState.runtime.input, disabled: runState.runtime.busy,
-            onChange: function (event) { runs.setRuntime({ input: event.target.value }) },
-          }),
-          h('button', {
-            className: 'maa-secondary-button', type: 'submit',
-            disabled: runState.runtime.busy || String(runState.runtime.input || '').trim() === '',
-          }, runState.runtime.busy ? '正在分析…' : '发送')),
+            h('select', {
+              className: 'maa-rogue-control maa-runtime-select', value: action ? action.id : '', disabled: busy,
+              onChange: function (event) { runs.setRuntime({ action: event.target.value, count: '' }) },
+            },
+              h('option', { value: '' }, '选择运行时指令…'),
+              actions.map(function (item) { return h('option', { key: item.id, value: item.id }, item.label) })),
+            action && action.count ? h('label', { className: 'maa-rogue-field maa-runtime-count' },
+              h('span', { className: 'maa-rogue-label' }, action.count.label),
+              h('input', {
+                className: 'maa-rogue-control', type: 'number', min: action.count.min, max: action.count.max, step: 1,
+                value: runState.runtime.count === '' ? String(action.count.initial) : String(runState.runtime.count), disabled: busy,
+                onChange: function (event) { runs.setRuntime({ count: event.target.value === '' ? '' : Number(event.target.value) }) },
+              })) : null,
+            h('button', { className: 'maa-secondary-button', type: 'submit', disabled: busy || !command },
+              busy ? '正在发送…' : '发送'))
+        })(),
         run.message ? h('div', { className: 'maa-run-result' }, run.message) : null,
         runState.runtime.message ? h('div', { className: 'maa-run-result' }, runState.runtime.message) : null)
       }

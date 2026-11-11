@@ -22,12 +22,23 @@ export const EXTENSIONS = Object.freeze([
     // Development / mirrors: a pnpm spec used instead of the npm package name,
     // e.g. DSH_MAA_COVEROCR_SPEC=link:E:/DESK/dsh-maa-coverocr
     specEnv: 'DSH_MAA_COVEROCR_SPEC',
+    // Dependencies whose install scripts are explicitly denied. pnpm 11 (the
+    // host's package manager) fails an install on any unapproved build script;
+    // onnxruntime-node's postinstall only downloads optional Linux CUDA
+    // binaries, and the CPU runtime ships in the package. The denial is saved
+    // to the profile's pnpm-workspace.yaml (allowBuilds), so later installs of
+    // other plugins in the same profile don't trip over it either.
+    deniedBuilds: Object.freeze(['onnxruntime-node']),
   }),
 ])
 
 export function findExtension(id) {
   const key = String(id ?? '').trim().toLowerCase()
   return EXTENSIONS.find(entry => entry.id === key || entry.packageName === key) ?? null
+}
+
+export function extensionInstallArgs(entry, spec) {
+  return ['add', spec, ...(entry.deniedBuilds ?? []).map(name => `--allow-build=!${name}`)]
 }
 
 export function extensionInstallSpec(entry, env = process.env) {

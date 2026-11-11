@@ -8,6 +8,7 @@ import path from 'node:path'
 const entry = pathToFileURL(path.resolve(process.argv[2])).href
 const { apply } = await import(entry)
 const commands = []
+const tools = []
 const routes = []
 // A minimal DSH web server and Connection fence, shaped like the real ones:
 // the plugin registers a prefix route and checks each request with
@@ -15,7 +16,7 @@ const routes = []
 const webServer = { register: route => { routes.push(route); return () => routes.splice(routes.indexOf(route), 1) } }
 const connection = { requestRejection: () => undefined }
 apply({
-  tools: { register() {} },
+  tools: { register: tool => tools.push(tool) },
   commands: { register: command => commands.push(command) },
   inject: (deps, callback) => { if (deps.every(dep => ['connection', 'webServer'].includes(dep))) callback({ connection, webServer }) },
 })
@@ -56,6 +57,17 @@ process.on('message', async message => {
   if (message?.type === 'rpc') {
     try {
       process.send({ type: 'result', id: message.id, result: await callRpc(message.channel, message.endpoint, message.payload) })
+    } catch (error) {
+      process.send({ type: 'result', id: message.id, error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+  if (message?.type === 'tool') {
+    // What the model does: call a registered tool directly (no command plane).
+    try {
+      const tool = tools.find(item => item.name === message.name)
+      const result = await tool.execute(message.args, { agent: agentFor(message.sessionId), signal: AbortSignal.timeout(120_000), concludeTurn() {} })
+      process.send({ type: 'result', id: message.id, result })
     } catch (error) {
       process.send({ type: 'result', id: message.id, error: error instanceof Error ? error.message : String(error) })
     }

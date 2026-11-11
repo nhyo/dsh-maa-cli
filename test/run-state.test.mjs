@@ -198,7 +198,8 @@ test('the composer dock persists panel interaction state and never polls through
   assert.match(clientSource, /props\.collapsed \? '\+' : '\\u2212'/u)
   // Minimizing hides the body; it does not unmount it.
   assert.match(clientSource, /className: 'maa-dock-body', hidden: Boolean\(props\.collapsed\)/u)
-  assert.match(clientSource, /placeholder: '输入运行时要求/u)
+  assert.doesNotMatch(clientSource, /placeholder: '输入运行时要求/u)
+  assert.match(clientSource, /'maa-rogue-control maa-runtime-select'/u)
   assert.match(clientSource, /sendRuntimeInstruction\(runs, plans, execute, command\)/u)
   assert.doesNotMatch(clientSource, /'本局结束后停'|'取消停止条件'|'查看实时进度'/u)
   const variantStart = clientSource.indexOf('function switchPanelVariant(')

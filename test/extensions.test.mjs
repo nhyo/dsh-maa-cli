@@ -41,7 +41,7 @@ await writeFile(path.join(stateDir, 'operator-box.json'), JSON.stringify({ versi
 
 const { apply } = await import('../src/index.js')
 const { parseLocalMaaCommand } = await import('../src/commands/local-command.js')
-const { activeProfile, extensionStatus, installExtension, previewInstall } = await import('../src/extensions/host.js')
+const { activeProfile, extensionStatus, installExtension } = await import('../src/extensions/host.js')
 const { EXTENSIONS, extensionInstallSpec, findExtension } = await import('../src/extensions/registry.js')
 const { evaluateVideoLineup } = await import('../src/extensions/video-lineup.js')
 
@@ -81,11 +81,12 @@ test('the registry lists coverocr with a versioned service and an overridable in
   assert.equal(extensionInstallSpec(coverocr, { DSH_MAA_COVEROCR_SPEC: 'link:E:/DESK/dsh-maa-coverocr' }), 'link:E:/DESK/dsh-maa-coverocr')
 })
 
-test('/maa ext commands parse into list and two-step install', () => {
+test('/maa ext commands parse into list and a one-step install', () => {
   assert.deepEqual(parseLocalMaaCommand('ext'), { kind: 'ext-list' })
   assert.deepEqual(parseLocalMaaCommand('辅助插件'), { kind: 'ext-list' })
-  assert.deepEqual(parseLocalMaaCommand('ext install coverocr'), { kind: 'ext-install', id: 'coverocr', confirmed: false })
-  assert.deepEqual(parseLocalMaaCommand('ext install CoverOCR confirm'), { kind: 'ext-install', id: 'coverocr', confirmed: true })
+  assert.deepEqual(parseLocalMaaCommand('ext install coverocr'), { kind: 'ext-install', id: 'coverocr' })
+  // The old two-step form still works and installs the same way.
+  assert.deepEqual(parseLocalMaaCommand('ext install CoverOCR confirm'), { kind: 'ext-install', id: 'coverocr' })
 })
 
 test('status distinguishes ready, incompatible, installed-not-loaded and missing', async () => {
@@ -101,16 +102,17 @@ test('status distinguishes ready, incompatible, installed-not-loaded and missing
   assert.equal(extensionStatus({ get: () => { throw new Error('no inject') } }, coverocr, null).state, 'missing')
 })
 
-test('install previews first and refuses to guess the profile', async () => {
-  const unknown = previewInstall({ get: () => undefined }, 'coverocr', {})
+test('install refuses to guess the profile and skips a companion that is already running', async () => {
+  const unknown = await installExtension({ get: () => undefined }, 'coverocr', { env: {} })
   assert.equal(unknown.kind, 'error')
-  assert.match(unknown.text, /dsh plugin --profile <配置名> add dsh-maa-coverocr/u)
-  const dir = await profileDir('preview')
-  const preview = previewInstall({ get: name => name === 'profileContext' ? profileContext(dir) : undefined }, 'coverocr', {})
-  assert.equal(preview.kind, 'success')
-  assert.match(preview.text, /\/maa ext install coverocr confirm/u)
-  assert.match(preview.text, new RegExp(dir.replace(/\\/gu, '\\\\')))
-  await assert.rejects(async () => previewInstall({ get: () => undefined }, 'nope'), /未知的辅助插件/u)
+  assert.match(unknown.text, /dsh plugin --profile <配置名> add dsh-maa-coverocr --allow-build=!onnxruntime-node/u)
+  const dir = await profileDir('ready')
+  const calls = []
+  const ready = await installExtension({ get: name => name === 'profileContext' ? profileContext(dir) : name === 'maaCoverocr' ? { apiVersion: 1 } : undefined }, 'coverocr', { env: {}, spawnImpl: () => { calls.push(1); throw new Error('must not spawn') } })
+  assert.equal(ready.kind, 'success')
+  assert.match(ready.text, /无需重复安装/u)
+  assert.equal(calls.length, 0)
+  await assert.rejects(async () => installExtension({ get: () => undefined }, 'nope'), /未知的辅助插件/u)
 })
 
 function fakeSpawn(dir, { exitCode = 0, createPackage = true } = {}) {
@@ -134,14 +136,14 @@ function fakeSpawn(dir, { exitCode = 0, createPackage = true } = {}) {
   return { spawnImpl, calls }
 }
 
-test('confirmed install runs the host package manager in the profile and registers the bundle once', async () => {
+test('install runs the host package manager in the profile and registers the bundle once', async () => {
   const dir = await profileDir('install')
   const ctx = { get: name => name === 'profileContext' ? profileContext(dir, { command: 'node', args: ['pnpm.cjs'], env: { PNPM_HOME: 'x' } }) : undefined }
   const { spawnImpl, calls } = fakeSpawn(dir)
   const result = await installExtension(ctx, 'coverocr', { spawnImpl, env: {} })
   assert.equal(result.kind, 'success', result.text)
   assert.equal(calls[0].command, 'node')
-  assert.deepEqual(calls[0].args, ['pnpm.cjs', 'add', 'dsh-maa-coverocr'])
+  assert.deepEqual(calls[0].args, ['pnpm.cjs', 'add', 'dsh-maa-coverocr', '--allow-build=!onnxruntime-node'])
   assert.equal(calls[0].options.cwd, dir)
   assert.equal(calls[0].options.env.PNPM_HOME, 'x')
   const manifest = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'))

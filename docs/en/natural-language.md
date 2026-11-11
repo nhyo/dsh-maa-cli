@@ -7,7 +7,7 @@
 Just describe what you want, e.g. "Start the game, rotate base shifts, farm 1-7 20 times, then collect the daily rewards":
 
 1. The model calls `maa_prepare_plan` once and produces an ordered plan.
-2. A confirmation panel appears above the input box, where you can adjust parameters and add a note.
+2. A confirmation panel appears above the input box, where you can adjust parameters and add a note; in a multi-step plan, each step can be opened and edited on its own.
 3. Click "Confirm and run MAA" to run it locally — **no further model calls**.
 
 Confirmation codes are valid only in the current session, single-use, and expire after 30 minutes; they survive a DSH restart.

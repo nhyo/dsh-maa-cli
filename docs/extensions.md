@@ -11,19 +11,18 @@ dsh-maa-cli 本身不带任何运行依赖。体积大的能力，或者超出 M
 ## 使用
 
 ```
-/maa ext                         查看辅助插件状态
-/maa ext install coverocr        显示要执行的安装操作（不会安装）
-/maa ext install coverocr confirm  确认后才安装
+/maa ext                    查看辅助插件状态
+/maa ext install coverocr   直接下载并安装（约 300 MB）
 ```
 
-**安装做了什么**：用当前 DSH 配置自己的包管理器，在配置目录里执行 `add dsh-maa-coverocr`，再把包名加入该配置 `package.json` 的 `dsh.profile.bundles`，DSH 才会加载它。
+**安装做了什么**：用当前 DSH 配置自己的包管理器，在配置目录里执行 `add dsh-maa-coverocr --allow-build=!onnxruntime-node`，再把包名加入该配置 `package.json` 的 `dsh.profile.bundles`，DSH 才会加载它。`--allow-build=!onnxruntime-node` 明确拒绝 onnxruntime-node 的安装脚本（它只用来下载 Linux CUDA 运行库），DSH 自带的 pnpm 11 否则会拒绝安装；这个选择会记到配置的 `pnpm-workspace.yaml`。旧写法 `/maa ext install coverocr confirm` 仍可用，效果相同。
 
 DSH 通常会在几秒内自动加载新插件。如果 `/maa ext` 仍显示“已安装，待重启 DSH”，请完全退出 DSH（包括托盘图标）后重新打开。
 
 如果插件无法确认当前 DSH 配置，就不会自动安装，只给出手动命令：
 
 ```
-dsh plugin --profile <配置名> add dsh-maa-coverocr
+dsh plugin --profile <配置名> add dsh-maa-coverocr --allow-build=!onnxruntime-node
 ```
 
 **开发时**可以用环境变量 `DSH_MAA_COVEROCR_SPEC` 替换安装来源，例如 `link:E:/DESK/dsh-maa-coverocr`。

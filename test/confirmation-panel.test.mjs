@@ -558,3 +558,67 @@ test('fight panel drop targets accept item names and show names back', async () 
   assert.throws(() => applyTaskPanelOverrides(document, { drops: encodeURIComponent('不存在=1') }, undefined, { itemIndex }), /找不到/u)
   assert.throws(() => applyTaskPanelOverrides(document, { drops: encodeURIComponent('固源岩组') }, undefined, { itemIndex }), /名称=数量/u)
 })
+
+test('multi-step plan: every step with parameters is editable on its own, overrides land on the right step', () => {
+  const document = documentOf([{ type: 'StartUp' }, { type: 'Fight', stage: '1-7', times: 2 }, { type: 'Recruit', times: 4 }, { type: 'CloseDown' }])
+  const panel = taskPanelFromDocument(document)
+  assert.equal(panel.type, 'Plan')
+  assert.deepEqual(panel.steps.map(step => [step.type, step.editable]), [['StartUp', true], ['Fight', true], ['Recruit', true], ['CloseDown', false]])
+  assert.ok(panel.fields.every(field => /^s\d+\./u.test(field.key) && Number.isInteger(field.step)))
+  assert.equal(panel.values['s1.stage'], '1-7')
+  // Conditions point at the same step's keys.
+  const conditional = panel.fields.filter(field => field.when && field.step === 1)
+  for (const field of conditional) assert.match(JSON.stringify(field.when), /"key":"s1\./u)
+
+  const patched = applyTaskPanelOverrides(document, { 's1.times': '5', 's2.times': '1' })
+  assert.equal(patched.document.tasks[1].params.times, 5)
+  assert.equal(patched.document.tasks[2].params.times, 1)
+  assert.equal(patched.document.tasks[0].type, 'StartUp')
+  assert.equal(patched.document.tasks[3].type, 'CloseDown')
+  assert.ok(patched.applied.some(entry => entry.startsWith('第 2 步')))
+  assert.throws(() => applyTaskPanelOverrides(document, { 's3.anything': '1' }), /不支持参数/u)
+  assert.throws(() => applyTaskPanelOverrides(document, { times: '1' }), /不支持参数/u)
+})
+
+test('multi-step plan with a roguelike step keeps the roguelike panel editable and the note plan-wide', () => {
+  const document = documentOf([{ type: 'StartUp' }, { type: 'Roguelike', theme: 'Sami', startsCount: 3 }])
+  const panel = taskPanelFromDocument(document)
+  assert.equal(panel.type, 'Plan')
+  assert.equal(panel.steps[1].type, 'Roguelike')
+  assert.equal(panel.steps[1].editable, true)
+  assert.equal(panel.values['s1.theme'], 'Sami')
+  assert.equal(panel.values.note, '')
+  assert.equal(panel.values['s1.note'], undefined)
+  const theme = panel.fields.find(field => field.key === 's1.theme')
+  assert.ok(theme.options.every(option => Object.keys(option.patch ?? {}).every(key => key.startsWith('s1.'))))
+  const patched = applyTaskPanelOverrides(document, { 's1.startsCount': '7' })
+  assert.equal(patched.document.tasks[1].params.starts_count, 7)
+  assert.equal(patched.document.tasks[0].type, 'StartUp')
+  // The client's confirm line carries the prefixed keys unchanged.
+  const line = clientConfirmLine()('MAA-1A2B3C', { ...panel.values, 's1.startsCount': 7 }, panel.fields)
+  assert.match(line, / s1\.startsCount=7/u)
+  assert.equal(parseLocalMaaCommand(line.replace(/^\/maa /u, '')).overrides['s1.startsCount'], '7')
+})
+
+test('every run-time choice in the run panel produces an instruction the host understands', async () => {
+  const { parseRuntimeInstruction } = await import('../src/commands/runtime-instructions.js')
+  const source = readFileSync(new URL('../src/client/index.js', import.meta.url), 'utf8')
+    .replace('return { inject, apply }', 'return { inject, apply, __actions: RUNTIME_ACTIONS, __command: runtimeCommand, __for: runtimeActionsFor }')
+  let registration
+  vm.runInNewContext(source, {
+    window: { __ModuleLoader__: { load(value) { registration = value } } },
+    Date, Set, Map, String, Number, Boolean, Array, Object, Promise, JSON, encodeURIComponent,
+  })
+  const module = registration.factory(name => name === 'react' ? { createElement() {} } : {})
+  for (const action of module.__actions) {
+    const parsed = parseRuntimeInstruction(module.__command(action, ''))
+    assert.equal(parsed.action, action.id)
+    if (action.count) {
+      assert.equal(parseRuntimeInstruction(module.__command(action, action.count.max)).action, action.id)
+      assert.equal(module.__command(action, action.count.max + 1), '')
+    }
+  }
+  assert.equal(parseRuntimeInstruction(module.__command(module.__actions.find(item => item.id === 'stop_after_runs'), 3)).count, 3)
+  assert.deepEqual([...module.__for({ taskTypes: ['Fight'] }).map(item => item.id)], ['cancel_stop', 'status'])
+  assert.equal(module.__for({ taskTypes: ['StartUp', 'Roguelike'] }).length, module.__actions.length)
+})

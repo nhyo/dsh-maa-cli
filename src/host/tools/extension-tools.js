@@ -25,7 +25,7 @@ export function registerExtensionTools(ctx) {
       if (service === null) {
         return agentResult({
           status: 'needs_extension',
-          summary: `此功能需要辅助插件 ${entry.packageName}（${entry.title}），当前状态：${status.detail} 请让用户在对话中输入 /maa ext install ${entry.id} 安装；不要自行分析视频或编造阵容。`,
+          summary: `此功能需要辅助插件 ${entry.packageName}（${entry.title}），当前状态：${status.detail} 请让用户在对话中输入 /maa ext install ${entry.id}，会直接下载安装（${entry.size}）；不要自行分析视频或编造阵容。`,
           data: { extension: entry.id, state: status.state },
         })
       }

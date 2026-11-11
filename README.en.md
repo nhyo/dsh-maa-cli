@@ -56,7 +56,7 @@ Everyday operations skip the model: `/maa fight`, `/maa infrast`, `/maa recruit`
 
 - **No model calls**: commands go through DSH's local channel and spend no tokens.
 - **Remembers your last settings**: each panel remembers the parameters you last confirmed, Integrated Strategies per theme; after an MAA update only fields that became invalid fall back.
-- **Runtime instructions**: while a task runs, type "stop now", "stop after two more runs", "stop before this boss" or "how far has it got" into the panel. Run counts and floors come only from reliable MaaCore callbacks, never guesses.
+- **Runtime instructions**: while a task runs, pick "stop after this run", "stop after N more runs", "stop before this boss", "how far has it got" and more from the panel's drop-down. Run counts and floors come only from reliable MaaCore callbacks, never guesses.
 - **Desktop notifications**: a notification pops up when a task finishes, fails or stops on a condition, so you don't have to keep watching.
 - **Safe stopping**: stopping only kills this task's process tree and shows "Stopped" only after the processes have really exited; leftover processes are cleaned up after DSH crashes and restarts.
 
@@ -91,7 +91,7 @@ One sentence prepares a whole chain of tasks, e.g. "Start the game, rotate base 
 
 ### [Companion plugins](docs/extensions.md) (Chinese)
 
-Optional extensions, installed on demand and never bundled with this plugin. Check their status with `/maa ext` and install one with `/maa ext install <id>` (nothing is installed until you confirm).
+Optional extensions, installed on demand and never bundled with this plugin. Check their status with `/maa ext` and install one with `/maa ext install <id>`, which downloads and installs it right away.
 
 - **[coverocr](https://github.com/nhyo/dsh-maa-coverocr)** (`dsh-maa-coverocr`, 🧪 experimental): send Bilibili strategy-video links to the model; it reads the title, description, tags, the uploader's comments and the cover to find the operators the video uses, compares them with your Box and tells you whether you can copy it (one missing operator still counts — borrow it as support), with the video link so you can follow along yourself. Results may be incomplete or wrong; the video is the source of truth.
 

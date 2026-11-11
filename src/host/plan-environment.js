@@ -104,7 +104,13 @@ export async function rememberConfirmedPanel(document, environment) {
   const capabilities = hasRoguelike
     ? environment?.capabilities ?? (await strategyEnvironment()).capabilities
     : undefined
-  await rememberPanelValues(taskPanelFromDocument(document, capabilities, panelContext(environment)))
+  const context = panelContext(environment)
+  const panel = taskPanelFromDocument(document, capabilities, context)
+  if (panel?.type !== 'Plan') { await rememberPanelValues(panel); return }
+  // Multi-step plan: remember each editable step like a single-task panel.
+  for (const step of panel.steps.filter(item => item.editable)) {
+    await rememberPanelValues(taskPanelFromDocument({ ...document, tasks: [tasks[step.index]] }, capabilities, context))
+  }
 }
 
 export async function prepareNotePreview(agent, confirmationCode, rawNote, overrides, signal) {

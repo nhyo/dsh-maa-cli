@@ -389,23 +389,23 @@ test('7. a stop that cannot confirm exit keeps the controls and the reason, and 
   assert.equal(record.stopError, '')
 })
 
-test('8. natural-language runtime instructions still work from the run panel', async t => {
+test('8. run-time instructions are picked from a fixed list in the run panel', async t => {
   const env = await setup(t)
   const code = await preparePlan(env.hostRef)
   assert.equal((await env.hostRef.current.execute(SESSION_A, `/maa confirm ${code}`)).kind, 'success')
   env.page.show(SESSION_A)
   await waitDock(env.page, 'run')
-  const send = async text => {
-    const input = env.page.inputs().find(node => /运行时要求/u.test(node.props.placeholder ?? ''))
-    input.props.onChange({ target: { value: text } })
-    await env.page.settle()
-    const form = env.page.tree() && (await import('./helpers/mini-react.mjs')).findAll(env.page.tree(), node => node.type === 'form')[0]
-    form.props.onSubmit({ preventDefault() {} })
-    await waitFor(async () => { await env.page.settle(); return !env.page.inputs().find(node => /运行时要求/u.test(node.props.placeholder ?? '')).props.disabled }, 10_000, 'instruction answered')
-    return env.page.text()
-  }
-  assert.match(await send('现在打到哪里了'), /"running"/u)
-  assert.match(await send('再打两局就停'), /只适用于正在执行的肉鸽任务/u)
+  const { findAll } = await import('./helpers/mini-react.mjs')
+  const select = () => findAll(env.page.tree(), node => node.type === 'select' && /maa-runtime-select/u.test(node.props.className ?? ''))[0]
+  // No free-text box any more.
+  assert.equal(env.page.inputs().find(node => /运行时要求/u.test(node.props.placeholder ?? '')), undefined)
+  const offered = findAll(select(), node => node.type === 'option').map(node => node.props.value).filter(Boolean)
+  // This run is not a roguelike run: only the instructions that apply to it.
+  assert.deepEqual(offered, ['cancel_stop', 'status'])
+  select().props.onChange({ target: { value: 'status' } })
+  await env.page.settle()
+  findAll(env.page.tree(), node => node.type === 'form')[0].props.onSubmit({ preventDefault() {} })
+  await waitFor(async () => { await env.page.settle(); return !select().props.disabled && /"running"/u.test(env.page.text()) }, 10_000, 'instruction answered')
   // The other session cannot attach stop conditions to this run.
   const foreign = await env.hostRef.current.execute(SESSION_B, '/maa 这次 Boss 关前停止')
   assert.equal(foreign.kind, 'error')
@@ -556,3 +556,30 @@ for (const rpc of [false, true]) {
     assert.deepEqual(await liveProcesses(env.workspace), [])
   })
 }
+
+test('multi-step plan: every step opens its own parameters and only the edited step changes', async t => {
+  const env = await setup(t, { mode: 'fast' })
+  const prepared = await env.hostRef.current.tool(SESSION_A, 'maa_prepare_plan', {
+    purpose: '唤醒、刷 1-7 再公招', steps: [{ type: 'StartUp' }, { type: 'Fight', stage: '1-7', times: 2 }, { type: 'Recruit', times: 4 }],
+  })
+  const code = prepared.confirmationCode
+  assert.match(code, /^MAA-[A-F0-9]{6}$/u)
+  env.page.show(SESSION_A)
+  const dock = await waitDock(env.page, 'plan')
+  const { findAll, textOf } = await import('./helpers/mini-react.mjs')
+  const sections = findAll(dock, node => node.type === 'details' && /maa-plan-step/u.test(node.props.className ?? ''))
+  assert.deepEqual(sections.map(node => textOf(findAll(node, item => item.type === 'summary')[0])), ['1. 开始唤醒', '2. 理智作战', '3. 自动公招'])
+  // The fight step has its own times field, prefilled from the plan.
+  const timesInput = () => findAll(env.page.dock(), node => node.type === 'input' && node.props.type === 'number' && node.props.value === '2')[0]
+  timesInput().props.onChange({ target: { value: '7' } })
+  await env.page.settle()
+  env.page.click('confirm', env.page.dock())
+  await waitDock(env.page, 'run')
+  await waitFor(async () => (await readRuns(env.workspace)).length === 1, 15_000, 'run recorded')
+  const [record] = await readRuns(env.workspace)
+  assert.deepEqual(record.taskTypes, ['StartUp', 'Fight', 'Recruit'])
+  assert.match(record.planSummary, /第 2 步理智作战：作战次数=7/u)
+  // The panel submits every visible field (as single-step panels do); the other steps keep their values.
+  assert.match(record.planSummary, /第 3 步自动公招：招募次数（0＝仅识别）=4/u)
+  assert.doesNotMatch(record.planSummary, /第 [13] 步[^、]*作战次数/u)
+})

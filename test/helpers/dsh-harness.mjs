@@ -114,6 +114,15 @@ async function startHost(workspace) {
         child.send({ type: 'execute', id, sessionId, line })
       })
     },
+    // A model tool call; never part of the command log.
+    tool(sessionId, name, args) {
+      if (!host.alive) return Promise.reject(new Error('DSH host is not running'))
+      const id = nextId++
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject })
+        child.send({ type: 'tool', id, sessionId, name, args })
+      })
+    },
     // Connection RPC to a plugin channel; never part of the command log.
     rpcLog: [],
     rpc(channel, endpoint, payload) {

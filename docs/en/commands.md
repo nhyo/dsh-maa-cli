@@ -30,6 +30,7 @@
 - Parameters and options come from the MAA version and resources actually in use, and are validated again before confirming; a failed validation does not use up the confirmation code.
 - Basic options are shown directly, the rest under "Advanced settings"; MAA's own hints appear under the matching field.
 - Optional fields left unselected are not sent to MaaCore; a missing required field is named explicitly.
+- A plan with several steps (e.g. "Start up → Auto I.S.") has one collapsible parameter section per step: click a step's name to edit it on its own. Steps without parameters (close the game, copilot jobs) only show what they will do.
 
 ### Panel memory
 
@@ -50,16 +51,20 @@ After confirming, the panel becomes a run panel that always has a "Stop task" bu
 
 ## Runtime instructions
 
-While a task runs, type instructions into the panel in plain language:
+While a task runs, pick an instruction from the drop-down in the run panel and click "Send"; free text is not accepted:
 
 ```text
-stop now
-stop after two more runs
+stop after this I.S. run
 stop before this boss
+stop before the boss of floor N (enter the floor)
+stop after N more runs (enter the count)
 cancel the stop request
 how far has it got
 ```
 
+- The first four are stop conditions and only appear for I.S. (roguelike) runs; other tasks only offer the last two. To stop right away, use the "Stop task" button.
+- You can also just tell the model in the conversation; it turns your words into one of these instructions.
+
 - Run counts, floors and boss nodes are judged only from reliable MaaCore callbacks; without reliable data the status shows "unknown" and keeps waiting rather than guessing.
 - A new stop condition replaces any older one that hasn't triggered.
-- Requests like "recruit X first from now on" or "let me play this one" cannot take effect mid-run (maa-cli exposes no live parameter interface) and are reported as "not applied". Put them in the note of your next task instead.
+- Strategies such as "recruit X first" or "block the gate" cannot take effect mid-run (maa-cli exposes no live parameter interface); put them in the note on the confirmation panel of your next task.

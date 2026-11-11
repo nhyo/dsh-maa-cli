@@ -205,7 +205,7 @@ test('recruit high-star results are reported, never auto-confirmed', async () =>
   assert.match(source, /公招提醒：/u)
 })
 
-test('multi-step and Copilot plans get a read-only confirmation panel instead of hanging', async () => {
+test('multi-step plans get one editable section per step instead of a read-only list', async () => {
   await clearPendingPlansForTest()
   const context = exec('multi-step')
   const prepared = await tool('maa_prepare_plan').execute({ purpose: '基建换班并公招', steps: [{ type: 'Infrast' }, { type: 'Recruit', times: 4 }] }, context)
@@ -214,10 +214,9 @@ test('multi-step and Copilot plans get a read-only confirmation panel instead of
   assert.equal(peeked.kind, 'success')
   const payload = JSON.parse(peeked.text)
   assert.equal(payload.panel.type, 'Plan')
-  assert.deepEqual(payload.panel.fields, [])
-  assert.deepEqual(payload.panel.values, {})
-  assert.equal(payload.panel.notes[0].text, '1. 基建换班')
-  assert.match(payload.panel.notes[1].text, /^2\. 自动公招：4次，自动确认 3\/4★/u)
+  assert.deepEqual(payload.panel.steps.map(step => [step.index, step.type, step.editable]), [[0, 'Infrast', true], [1, 'Recruit', true]])
+  assert.ok(payload.panel.fields.some(field => field.key === 's0.facilities' && field.step === 0))
+  assert.equal(payload.panel.values['s1.times'], 4)
   const single = await tool('maa_prepare_plan').execute({ purpose: '只刷 1-7', steps: [{ type: 'Fight', stage: '1-7', times: 2 }] }, exec('single-step'))
   const singlePeek = JSON.parse((await maa.handler({ agent: { id: 'single-step', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn } }] } }, rawInput: `peek ${single.confirmationCode}`, signal: AbortSignal.timeout(10_000) })).text)
   assert.equal(singlePeek.panel.type, 'Fight')
