@@ -15,7 +15,7 @@ export const EXTENSIONS = Object.freeze([
     id: 'coverocr',
     packageName: 'dsh-maa-coverocr',
     service: 'maaCoverocr',
-    apiVersion: 1,
+    apiVersion: 2,
     title: 'B 站视频作业阵容识别',
     description: '读取 B 站作业视频的标题、简介、标签、UP 主评论，并用 MAA 自带的文字识别模型识别封面，找出视频用到的干员。',
     size: '约 300 MB（onnxruntime-node 自带多平台运行库）',

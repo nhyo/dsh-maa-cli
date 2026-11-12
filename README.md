@@ -93,7 +93,7 @@ dsh plugin --profile web add dsh-maa-cli
 
 按需安装的扩展，不随本插件自动安装。用 `/maa ext` 查看状态，用 `/maa ext install <id>` 直接下载安装。
 
-- **[coverocr](https://github.com/nhyo/dsh-maa-coverocr)**（`dsh-maa-coverocr`，🧪 测试功能）：把 B 站作业视频链接发给模型，它会从标题、简介、标签、UP 主评论和封面识别视频用到的干员，并和你的 Box 比较，告诉你能不能抄（缺 1 名也算，可借助战），附上视频链接让你自己去抄。识别结果可能不全或有误，请以视频为准。
+- **[coverocr](https://github.com/nhyo/dsh-maa-coverocr)**（`dsh-maa-coverocr`，🧪 测试功能）：可以按“明日方舟 + 关卡”搜索 B 站作业，只读取视频元数据与封面、不下载视频流；也可以直接分析你给的视频链接。它用封面识别阵容并和 Box 比较，告诉你能不能抄（缺 1 名也算，可借助战），每条推荐都附对应视频链接让你自己看。识别结果可能不全或有误，请以视频为准。
 
 ### [运行时与配置](docs/runtime.md)
 

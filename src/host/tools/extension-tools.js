@@ -12,11 +12,13 @@ const MAX_VIDEOS = 5
 export function registerExtensionTools(ctx) {
   ctx.tools.register({
     name: 'maa_video_lineup',
-    description: 'Check Bilibili Arknights strategy videos (作业视频) against the user\'s operator Box. Give 1–5 video links (bilibili.com/video/BV…, b23.tv short links or BV ids) the user provided; keyword search is not supported. Needs the companion plugin dsh-maa-coverocr: if the result status is needs_extension, tell the user to type `/maa ext install coverocr` themselves — never claim you analyzed the video. Only ownership is checked (no level/skill); one missing operator still counts as copyable via the support unit. Report each video\'s verdict, lineup with its sources and the video link so the user can copy it manually. This tool never operates the game.',
+    description: 'Search Bilibili for Arknights strategy videos by stage/query, using exactly 明日方舟 + the user query, or inspect 1–5 supplied video links. The dsh-maa-coverocr companion only reads metadata and cover images; it never downloads or watches video streams. Compare cover OCR results with the user\'s operator Box. Needs dsh-maa-coverocr; if missing, report needs_extension. Only ownership is checked (no level/skill); one missing operator still counts as copyable via support. MANDATORY: every user-facing answer that recommends or lists a Bilibili strategy must include the corresponding clickable video URL for every item; never give a strategy recommendation without its video link. This tool never operates the game.',
     parameters: {
-      type: 'object', additionalProperties: false, required: ['videos'],
+      type: 'object', additionalProperties: false,
       properties: {
         videos: { type: 'array', minItems: 1, maxItems: MAX_VIDEOS, items: { type: 'string' }, description: 'Bilibili video URLs, b23.tv short links or BV ids.' },
+        query: { type: 'string', minLength: 1, description: 'Stage code or search terms, e.g. TL-EX-8. The companion only adds 明日方舟 when absent.' },
+        limit: { type: 'integer', minimum: 1, maximum: MAX_VIDEOS, default: 5 },
       },
     },
     output: { schema: AGENT_RESULT_SCHEMA, render: renderAgentResult },
@@ -42,12 +44,25 @@ export function registerExtensionTools(ctx) {
       const names = await loadOperatorNames(resourceDir)
       if (names === null) return agentResult({ status: 'source_error', summary: 'MAA 资源里的干员名单（battle_data.json）无法读取。' })
 
-      const videos = [...new Set(args.videos.map(video => String(video).trim()).filter(Boolean))].slice(0, MAX_VIDEOS)
+      let videos = Array.isArray(args.videos) ? [...new Set(args.videos.map(video => String(video).trim()).filter(Boolean))].slice(0, MAX_VIDEOS) : []
+      let searched = null
+      if (videos.length === 0 && String(args.query ?? '').trim() !== '') {
+        try {
+          searched = await service.searchVideos({ query: String(args.query).trim(), limit: args.limit ?? MAX_VIDEOS, operatorNames: [...names.keys()], resourceDir, signal: exec.signal })
+          videos = searched.videos
+        } catch (error) {
+          if (exec.signal?.aborted) throw error
+          return agentResult({ status: 'source_error', summary: `B 站搜索失败：${error instanceof Error ? error.message : String(error)}` })
+        }
+      }
+      if (videos.length === 0) return agentResult({ status: 'invalid_input', summary: '请提供搜索关键词（例如 TL-EX-8）或 1–5 个 B 站视频链接。' })
       const reports = []
       const results = []
       for (const [index, video] of videos.entries()) {
         try {
-          const analysis = await service.analyzeVideo({ video, operatorNames: [...names.keys()], resourceDir, signal: exec.signal })
+          const analysis = typeof video === 'string'
+            ? await service.analyzeVideo({ video, operatorNames: [...names.keys()], resourceDir, signal: exec.signal })
+            : video
           const evaluation = evaluateVideoLineup(analysis, box)
           reports.push(formatVideoLineup(analysis, evaluation, index))
           results.push({ video: analysis.video, verdict: evaluation.verdict, complete: evaluation.complete, missing: evaluation.missing, operators: evaluation.operators, maaCodes: analysis.maaCodes, cover: analysis.cover.status, warnings: analysis.warnings })
@@ -63,8 +78,8 @@ export function registerExtensionTools(ctx) {
         : `干员 Box：${box.scannedAt} 扫描，共 ${box.operators.length} 名。只判断是否拥有，不看练度与技能；缺 1 名也算可抄（借助战）。`
       return agentResult({
         status: 'ok',
-        summary: [boxNote, '', ...reports, '', '链接请交给用户自己打开观看、手动抄作业。'].join('\n'),
-        data: { boxScannedAt: box?.scannedAt ?? '', results },
+        summary: [searched ? `B 站搜索：明日方舟 ${searched.query}（只读取封面，不下载视频）` : '', boxNote, '', ...reports, '', '回答用户时必须逐条保留上面的对应视频链接，让用户自己打开观看、手动抄作业；不得只给标题或结论。'].filter((line, index, all) => line !== '' || all[index - 1] !== '').join('\n'),
+        data: { query: searched?.query ?? '', boxScannedAt: box?.scannedAt ?? '', results },
       })
     },
   })

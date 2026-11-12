@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 // Companion plugins: registry, status, the two-step install, the
 // `maa_video_lineup` tool and the Box comparison. The companion itself is a
-// fake object implementing service API v1; the real one lives in its own repo.
+// fake object implementing service API v2; the real one lives in its own repo.
 const here = path.dirname(fileURLToPath(import.meta.url))
 const FAKE_MAA = path.join(here, 'fixtures', 'fake-maa.mjs')
 const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-maa-ext-'))
@@ -96,8 +96,8 @@ test('status distinguishes ready, incompatible, installed-not-loaded and missing
   await mkdir(path.join(dir, 'node_modules', 'dsh-maa-coverocr'), { recursive: true })
   await writeFile(path.join(dir, 'node_modules', 'dsh-maa-coverocr', 'package.json'), '{}')
   assert.equal(extensionStatus({ get: () => undefined }, coverocr, profile).state, 'installed')
-  assert.equal(extensionStatus({ get: () => ({ apiVersion: 2 }) }, coverocr, profile).state, 'incompatible')
-  assert.equal(extensionStatus({ get: () => ({ apiVersion: 1, version: '0.1.0' }) }, coverocr, profile).state, 'ready')
+  assert.equal(extensionStatus({ get: () => ({ apiVersion: 1 }) }, coverocr, profile).state, 'incompatible')
+  assert.equal(extensionStatus({ get: () => ({ apiVersion: 2, version: '0.2.0' }) }, coverocr, profile).state, 'ready')
   // A host whose get() throws for an unknown service counts as missing.
   assert.equal(extensionStatus({ get: () => { throw new Error('no inject') } }, coverocr, null).state, 'missing')
 })
@@ -108,7 +108,7 @@ test('install refuses to guess the profile and skips a companion that is already
   assert.match(unknown.text, /dsh plugin --profile <配置名> add dsh-maa-coverocr --allow-build=!onnxruntime-node/u)
   const dir = await profileDir('ready')
   const calls = []
-  const ready = await installExtension({ get: name => name === 'profileContext' ? profileContext(dir) : name === 'maaCoverocr' ? { apiVersion: 1 } : undefined }, 'coverocr', { env: {}, spawnImpl: () => { calls.push(1); throw new Error('must not spawn') } })
+  const ready = await installExtension({ get: name => name === 'profileContext' ? profileContext(dir) : name === 'maaCoverocr' ? { apiVersion: 2 } : undefined }, 'coverocr', { env: {}, spawnImpl: () => { calls.push(1); throw new Error('must not spawn') } })
   assert.equal(ready.kind, 'success')
   assert.match(ready.text, /无需重复安装/u)
   assert.equal(calls.length, 0)
@@ -184,7 +184,7 @@ test('maa_video_lineup asks for the companion when it is not installed', async (
 test('maa_video_lineup passes MAA names and resource dir to the companion and compares with the Box', async () => {
   const requests = []
   const service = {
-    apiVersion: 1, version: '0.1.0',
+    apiVersion: 2, version: '0.2.0',
     async analyzeVideo(request) {
       requests.push(request)
       if (request.video === 'bad') throw new Error('B 站接口错误 -404')
@@ -210,9 +210,31 @@ test('maa_video_lineup passes MAA names and resource dir to the companion and co
   assert.equal(data.results[0].complete, true)
 })
 
+test('maa_video_lineup searches by stage and evaluates cover-only results', async () => {
+  const searches = []
+  const service = {
+    apiVersion: 2, version: '0.2.0',
+    async searchVideos(request) {
+      searches.push(request)
+      return { query: request.query, videos: [{
+        video: { bvid: 'BV1upWJ6YEf3', url: 'https://www.bilibili.com/video/BV1upWJ6YEf3/', title: 'TL-EX-8 摆完挂机', owner: 'UP' },
+        operators: [{ name: '维什戴尔', certainty: 'certain', sources: ['cover'] }],
+        cover: { status: 'recognized', layout: 'squad', detail: '', ignored: [] }, text: {}, maaCodes: [], warnings: [],
+      }] }
+    },
+  }
+  const result = await hostContext({ maaCoverocr: service }).tool('maa_video_lineup').execute({ query: 'TL-EX-8', limit: 3 }, exec())
+  assert.equal(result.status, 'ok')
+  assert.equal(searches[0].query, 'TL-EX-8')
+  assert.equal(searches[0].limit, 3)
+  assert.match(result.summary, /B 站搜索：明日方舟 TL-EX-8（只读取封面，不下载视频）/u)
+  assert.match(result.summary, /必须逐条保留上面的对应视频链接/u)
+  assert.match(result.summary, /【可抄】TL-EX-8 摆完挂机/u)
+})
+
 test('/maa ext reports status through the local command', async () => {
-  const { command } = hostContext({ maaCoverocr: { apiVersion: 1, version: '0.1.0' } })
+  const { command } = hostContext({ maaCoverocr: { apiVersion: 2, version: '0.2.0' } })
   const result = await command('maa').handler({ agent: { id: 'a', session: {} }, rawInput: 'ext', signal: AbortSignal.timeout(5000) })
   assert.equal(result.kind, 'success')
-  assert.match(result.text, /coverocr｜dsh-maa-coverocr｜已启用（0\.1\.0）/u)
+  assert.match(result.text, /coverocr｜dsh-maa-coverocr｜已启用（0\.2\.0）/u)
 })
