@@ -12,10 +12,6 @@
 > [!TIP]
 > MAA 负责稳定执行，dsh-maa-cli 让它听懂目标、编译策略、记住偏好，并根据真实反馈继续推进。
 
-![说一句「帮我清理基建」，确认计划后 MAA 自动收菜换班](docs/assets/demo-infrast.gif)
-
-<sub>说一句「帮我清理基建」→ 生成计划 → 确认 → MAA 自动收菜换班（已加速）</sub>
-
 ## 相比原生 MAA 多了什么
 
 | | 原生 MAA | dsh-maa-cli |
@@ -76,7 +72,7 @@ dsh plugin --profile web add dsh-maa-cli
 
 ![在备注里写「有特种券优先抓结城理并堵门」，编译成肉鸽策略后开始自动肉鸽](docs/assets/demo-roguelike.gif)
 
-<sub>备注写「有特种券优先抓结城理并堵门」→ 编译成策略 → 自动开始萨卡兹肉鸽（已加速）</sub>
+<sub>备注写「有特种券优先抓结城理并堵门」→ 编译成策略 → 自动开始萨卡兹肉鸽</sub>
 
 ### [日常任务、抄作业与目标](docs/tasks.md)
 
@@ -88,6 +84,9 @@ dsh plugin --profile web add dsh-maa-cli
 - **失败自动换作业**：作业打输时自动换下一份同关作业，最多换 3 份，每次都弹通知告诉你。
 - **目标驱动**：「我要培养结城理，缺什么列出来」「源岩要 20 个，总理智不超过 120」，插件读 Box 和仓库，按预算分步执行，每步确认完成才进入下一步。
 - **工作流预设**：把「启动、基建、访问好友、领奖」存成预设，下次一句话复用。
+- ![说一句「帮我清理基建」，确认计划后 MAA 自动收菜换班](docs/assets/demo-infrast.gif)
+
+<sub>说一句「帮我清理基建」→ 生成计划 → 确认 → MAA 自动收菜换班</sub>
 
 ### [干员与养成](docs/operators.md)
 
@@ -99,7 +98,7 @@ dsh plugin --profile web add dsh-maa-cli
 
 ![说一句「给我干员培养建议」，扫描 Box 后给出培养排序](docs/assets/demo-training-advice.gif)
 
-<sub>「给我干员培养建议」→ 扫描 Box → 按杯级和职业覆盖给出培养排序（已加速）</sub>
+<sub>「给我干员培养建议」→ 扫描 Box → 按杯级和职业覆盖给出培养排序</sub>
 
 ### [辅助插件](docs/extensions.md)
 
@@ -109,7 +108,7 @@ dsh plugin --profile web add dsh-maa-cli
 
 ![按 Box 找 TL-EX-8 的 B 站视频攻略，标出哪些能直接抄](docs/assets/demo-copilot.gif)
 
-<sub>coverocr：「按照我的 box 帮我找 tl-ex-8 的攻略」→ 对照 Box 标出能抄的视频作业（已加速）</sub>
+<sub>coverocr：「按照我的 box 帮我找 tl-ex-8 的攻略」→ 对照 Box 标出能抄的视频作业</sub>
 
 ### [运行时与配置](docs/runtime.md)
 
