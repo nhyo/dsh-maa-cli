@@ -12,6 +12,10 @@
 > [!TIP]
 > MAA 负责稳定执行，dsh-maa-cli 让它听懂目标、编译策略、记住偏好，并根据真实反馈继续推进。
 
+![说一句「帮我清理基建」，确认计划后 MAA 自动收菜换班](docs/assets/demo-infrast.gif)
+
+<sub>说一句「帮我清理基建」→ 生成计划 → 确认 → MAA 自动收菜换班（已加速）</sub>
+
 ## 相比原生 MAA 多了什么
 
 | | 原生 MAA | dsh-maa-cli |
@@ -70,6 +74,10 @@ dsh plugin --profile web add dsh-maa-cli
 - **策略记忆**：验证通过的策略会保存下来，下次换种说法也能命中复用；冲突的要求不会执行。
 - **肉鸽面板**：主题、模式、难度、分队等选项从当前 MAA 资源读取，新主题上线不用等插件更新；难度默认「MAX」自动取最高。
 
+![在备注里写「有特种券优先抓结城理并堵门」，编译成肉鸽策略后开始自动肉鸽](docs/assets/demo-roguelike.gif)
+
+<sub>备注写「有特种券优先抓结城理并堵门」→ 编译成策略 → 自动开始萨卡兹肉鸽（已加速）</sub>
+
 ### [日常任务、抄作业与目标](docs/tasks.md)
 
 - **刷理智**：只给总次数，代理倍率自动分组；支持「刷到 3 个固源岩组」这种掉落目标。
@@ -89,11 +97,19 @@ dsh plugin --profile web add dsh-maa-cli
 - **够不够**：「我的仓库够不够把清流精二？」只读计算，直接回答。
 - **刷图规划**：用企鹅物流的掉率和 ArkPlanner 联合优化选关；每次只刷一批，然后重新扫描仓库再规划，避免按期望值刷过头。
 
+![说一句「给我干员培养建议」，扫描 Box 后给出培养排序](docs/assets/demo-training-advice.gif)
+
+<sub>「给我干员培养建议」→ 扫描 Box → 按杯级和职业覆盖给出培养排序（已加速）</sub>
+
 ### [辅助插件](docs/extensions.md)
 
 按需安装的扩展，不随本插件自动安装。用 `/maa ext` 查看状态，用 `/maa ext install <id>` 直接下载安装。
 
 - **[coverocr](https://github.com/nhyo/dsh-maa-coverocr)**（`dsh-maa-coverocr`，🧪 测试功能）：可以按“明日方舟 + 关卡”搜索 B 站作业，只读取视频元数据与封面、不下载视频流；也可以直接分析你给的视频链接。它用封面识别阵容并和 Box 比较，告诉你能不能抄（缺 1 名也算，可借助战），每条推荐都附对应视频链接让你自己看。识别结果可能不全或有误，请以视频为准。
+
+![按 Box 找 TL-EX-8 的 B 站视频攻略，标出哪些能直接抄](docs/assets/demo-copilot.gif)
+
+<sub>coverocr：「按照我的 box 帮我找 tl-ex-8 的攻略」→ 对照 Box 标出能抄的视频作业（已加速）</sub>
 
 ### [运行时与配置](docs/runtime.md)
 

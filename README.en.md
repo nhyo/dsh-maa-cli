@@ -12,6 +12,10 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin: pl
 > [!TIP]
 > MAA does the reliable execution; dsh-maa-cli lets it understand goals, compile strategies, remember preferences, and keep going based on real feedback.
 
+![Say "clean up my base", confirm the plan, and MAA collects and rotates shifts on its own](docs/assets/demo-infrast.gif)
+
+<sub>Say "clean up my base" → plan generated → confirm → MAA collects products and rotates shifts (sped up; UI in Chinese)</sub>
+
 ## What it adds over plain MAA
 
 | | Plain MAA | dsh-maa-cli |
@@ -70,6 +74,10 @@ One sentence prepares a whole chain of tasks, e.g. "Start the game, rotate base 
 - **Strategy memory**: validated strategies are saved and reused next time, even when phrased differently; conflicting requests are never run.
 - **IS panel**: theme, mode, difficulty, squad and other options are read from the current MAA resources, so new themes appear without a plugin update; difficulty defaults to "MAX", the highest available.
 
+![A note asking to recruit Yuki Makoto first and have him block the gate is compiled into a roguelike strategy, then the run starts](docs/assets/demo-roguelike.gif)
+
+<sub>Note: "recruit Yuki Makoto first with a Specialist voucher and have him block the gate" → compiled into a strategy → the Sarkaz roguelike run starts (sped up; UI in Chinese)</sub>
+
 ### [Daily tasks, copilot jobs and goals](docs/en/tasks.md)
 
 - **Combat**: give only the total number of runs and MaaCore groups them automatically; drop targets such as "farm until I have 3 Orirock Clusters" are supported.
@@ -89,11 +97,19 @@ One sentence prepares a whole chain of tasks, e.g. "Start the game, rotate base 
 - **"Is it enough?"**: "Does my depot have enough to promote Purestream to Elite 2?" is answered read-only.
 - **Farming plans**: stage selection is jointly optimized with Penguin Statistics drop rates and ArkPlanner; it farms one batch at a time, then rescans the depot and replans, so it never overfarms on expected values.
 
+![Ask for operator training advice; the Box is scanned and a training order is returned](docs/assets/demo-training-advice.gif)
+
+<sub>"Give me operator training advice" → Box scan → training order by tier and class coverage (sped up; UI in Chinese)</sub>
+
 ### [Companion plugins](docs/en/extensions.md)
 
 Optional extensions, installed on demand and never bundled with this plugin. Check their status with `/maa ext` and install one with `/maa ext install <id>`, which downloads and installs it right away.
 
 - **[coverocr](https://github.com/nhyo/dsh-maa-coverocr)** (`dsh-maa-coverocr`, 🧪 experimental): search Bilibili with “Arknights + stage”, reading only metadata and cover images—never the video stream—or inspect links you supply. It recognizes the lineup from covers, compares it with your Box and tells you whether you can copy it (one missing operator still counts—borrow it as support). Every recommendation includes its corresponding video URL. Results may be incomplete or wrong; the video is the source of truth.
+
+![Find Bilibili guide videos for TL-EX-8 against your Box, marking which ones you can copy](docs/assets/demo-copilot.gif)
+
+<sub>coverocr: "find a TL-EX-8 guide that fits my Box" → video guides checked against your Box, copyable ones marked (sped up; UI in Chinese)</sub>
 
 ### [Runtime and configuration](docs/en/runtime.md)
 
